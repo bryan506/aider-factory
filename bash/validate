@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Evidence grounding auditor: exact-substring quote proof + embedding region check.
+# Runs under aider's own uv tool interpreter (has lancedb + sentence-transformers).
+# Mirrors .aider_factory/bash/oracle.
+#   .aider_factory/bash/validate --file <doc> --source <ocr.md> --report <out.md> \
+#       [--ledger <l.json>] [--tag evidence] [--region-threshold 0.60] \
+#       [--region-margin 2] [--top-k 5] [--db <lancedb>] [--collection <table>]
+# Dynamically resolve the python interpreter of the aider-chat uv tool or virtualenv
+if [ -z "$AIDER_PY" ]; then
+    if [ -f "$HOME/.local/share/uv/tools/aider-chat/bin/python" ]; then
+        AIDER_PY="$HOME/.local/share/uv/tools/aider-chat/bin/python"
+    elif [ -n "$VIRTUAL_ENV" ] && [ -f "$VIRTUAL_ENV/bin/python" ]; then
+        AIDER_PY="$VIRTUAL_ENV/bin/python"
+    else
+        AIDER_PY=$(which python3 || which python)
+    fi
+fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$AIDER_PY" "$SCRIPT_DIR/src/aider_factory/python/validator.py" "$@"

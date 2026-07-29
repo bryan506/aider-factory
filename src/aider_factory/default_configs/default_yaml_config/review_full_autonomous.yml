@@ -1,0 +1,103 @@
+name: "Literature Review"
+working_directory: "/path/to/project"
+
+# Literary review validation runs .sh gate scripts
+test_command_prefix: "bash"
+test_runner: "{file}"
+loop_aider_test: 3
+
+# OCR endpoint — uncomment for local vision model; omit for cloud OCR via gemini/
+# ocr_api_base: "http://localhost:8080/v1"
+
+# RAG settings — full OCR + embedding pipeline for paper ingestion
+rag:
+    collection_name: "my_papers"
+    overwrite: false                           # true = rebuild vector store from scratch
+    ocr_agent: "gemini/gemini-2.5-flash"       # local alternative: "glm-ocr-f16:LATEST"
+    ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
+    ocr_parallel: 4                            # concurrent OCR pages (match server --parallel)
+    ocr_max_retries: 2
+    cer_threshold: 0.05                        # max Character Error Rate (5%)
+    embed_model: "BAAI/bge-m3"
+    embed_backend: "sentence-transformers"
+    chunk_size_chars: 800
+    chunk_overlap_chars: 100
+    top_k: 30
+    retrieval_mode: top_k
+    query_prefix: "Instruct: Given an academic query, retrieve relevant passages\nQuery: "
+
+# Uncomment for local model endpoints
+# endpoints:
+#     architect_api_base: "http://localhost:8080/v1"
+#     editor_ollama_api: "http://localhost:8080/v1"
+#     editor_test_ollama_api: "http://localhost:8080/v1"
+#     rag_agent_api: "http://localhost:8080/v1"
+#     grounding_agent_api: "http://localhost:8090/v1"   # MiniCheck entailment shim (Section 7.12)
+
+phases:
+    # Full pipeline: ingest PDFs -> OCR -> embed -> oracle generates review ->
+    # deterministic autofix -> heal loop (oracle + architect fix failing quotes) ->
+    # escalation debate if heal exhausts -> apply verdict -> finalize.
+    #
+    # Place PDFs in: .aider_factory/markdown/lanceDB/my_papers/
+    # batch: false creates one LanceDB table per paper so the oracle sees
+    # only the relevant source when generating/healing each review.
+    - name: "Literary Review — Full Pipeline"
+      enabled: true
+      batch: false                             # per-document tables (one table per paper)
+      oracle:
+          template: ".aider_factory/markdown/templates/literary_review_template.md"
+          full_document: true                  # oracle sees the entire paper table
+          start_job: true                      # REVIEW mode: oracle generates the review
+      vector_store:
+          collection_name: "my_papers"
+      toggles:
+          run_job_one: false                   # REVIEW mode — oracle generates, not job_one
+          run_job_two: false
+          iterate_test: true                   # heal loop: fix failing evidence quotes
+          auto_test: false
+          pair_programming: false
+          sticky_context: false
+          run_ocr_rag: true                    # ingest PDFs (set false once built to reuse)
+          vectordb_overwrite: false
+      oracle_toggles:
+          post_validate: true                  # enable grounding heal loop after generation
+          redo_oracle_job: false               # true = force re-generation from scratch
+          validation_tag: "evidence"           # tag type anchoring evidence quotes
+          region_threshold: 0.60               # cosine similarity for embedding region check
+          region_margin: 2                     # context lines around each failing block
+          region_top_k: 5                      # source chunks retrieved per failing quote
+          validation_loops: 3                  # max heal/apply retry cycles
+          debate_loops: 4                      # architect/oracle turns per escalation debate
+          debate_rounds: 2                     # full debate->apply->re-verify cycles
+          pass_round_history: false            # fresh context each round (independent judgments)
+          # Entailment verification (requires MiniCheck server — see Section 7.12)
+          # verify_all_claims: false           # true = verify every claim; false = failing only
+          # entail_threshold: 0.5              # entailment support threshold
+      models:
+          architect_agent: "gemini/gemini-2.5-flash"
+          editor_agent: "gemini/gemini-2.5-flash"
+          editor_agent_test: "gemini/gemini-2.5-flash"
+          editor_agent_test_fallback: "gemini/gemini-2.5-flash"
+          rag_agent: "gemini/gemini-2.5-flash"             # oracle model for heal + debate
+          ocr_agent: "gemini/gemini-2.5-flash"             # local: "glm-ocr-f16:LATEST"
+          # grounding_agent: "openai/minicheck-flan-t5-large"  # requires grounding_agent_api
+      files:
+          target_files:
+              # Review output files — one per paper. Oracle generates these.
+              # Place source PDFs in .aider_factory/markdown/lanceDB/my_papers/
+              - ".aider_factory/markdown/lanceDB/my_papers/literary_review/Paper-Title-One.md"
+              - ".aider_factory/markdown/lanceDB/my_papers/literary_review/Paper-Title-Two.md"
+          extra_editable_files: []
+          test_files:
+              # Deterministic evidence grounding gate script
+              - ".aider_factory/tests/validations/validations_context_check.sh"
+          context_files_job: []
+          context_files_test: []
+      ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
+      plans:
+          # Infrastructure template — do not edit without understanding tag semantics.
+          # Instructs the architect to apply oracle corrections to failing [evidence] quotes.
+          iterate_plan: "markdown/internal/contextual_revalidation_template.md"
+          # deliberate_plan and apply_plan use hardcoded defaults from markdown/internal/
+

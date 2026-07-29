@@ -1,0 +1,45 @@
+# rsync_include.txt
+# Include specific directories and their contents
+#+ images/***
+
+# Include specific files
++ CONTEXT_MAP.md
++ CONTEXT_SUMMARY.md
++ QUANT_SUMMARY.pdf
++ QUANT_SUMMARY.rmd
++ rsync_include.txt
++ spread_features.qmd
++ cgb_guide_futures_roll_analysis_en.txt
++ websites-context
++ .aider.chat.history.md
++ .aider.conf.yml
++ orchestrator_workflow/***
++ .env_*
++ CONVENTIONS.md
++ orchestrate.py
++ plan_*
++ run_workflow.py
++ technical*
++ implement*
++ testing*
++ validate*
++ *.sh
++ *.yaml
++ *.yml
++ integrate*
+
+# New chief include
++ gitDiffs/***
++ logs/***
++ extraContext/***
++ python/***
++ R/***
++ markdown/***
++ bash/***
++ temp/***
++ apply_edit*
++ tests/***
+
+# Exclude everything else (Crucial: First match wins, so this must be last)
+- *
+

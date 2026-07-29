@@ -1,0 +1,32 @@
+name: "E2E Persistent Aider Smoke Test"
+working_directory: "."
+
+endpoints:
+  architect_api_base: "http://localhost:11435/v1"
+  editor_ollama_api: "http://localhost:11434"
+  editor_test_ollama_api: "http://localhost:11434"
+  rag_agent_api: "http://localhost:11434"
+
+phases:
+  - name: "Persistent Aider Phase"
+    enabled: true
+    toggles:
+      run_job_one: false
+      run_job_two: false
+      iterate_test: false
+      pair_programming: false
+    oracle_toggles:
+      debate_loops: 2
+    oracle:
+      template: "BaseFeatures/.aider_factory/tests/aider_factory_tests/end-to-end/oracle_prompt.md"
+      architect_oracle_chat: true
+    models:
+      architect_agent: "openai/minimax-229b-ud-iq4nl:LATEST"
+      editor_agent: "ollama/qwen3-coder-64k:latest"
+      editor_agent_test: "ollama/qwen3-coder-64k:latest"
+      rag_agent: "ollama/qwen3-coder-64k:latest"
+    files:
+      target_files:
+        - "BaseFeatures/.aider_factory/tests/aider_factory_tests/end-to-end/fut_aac.R"
+      context_files_job:
+        - "BaseFeatures/.aider_factory/tests/aider_factory_tests/end-to-end/test_dummy.sh"

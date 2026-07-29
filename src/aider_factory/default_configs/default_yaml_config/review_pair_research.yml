@@ -1,0 +1,83 @@
+name: "Research Session"
+working_directory: "/path/to/project"
+
+# Not required for research-only sessions; uncomment if running validation
+# test_command_prefix: "bash"
+# test_runner: "{file}"
+loop_aider_test: 3
+
+# RAG settings — OCR + embedding for paper ingestion and interactive querying
+rag:
+    collection_name: "research_papers"
+    overwrite: false
+    ocr_agent: "gemini/gemini-2.5-flash"       # local: "glm-ocr-f16:LATEST"
+    ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
+    ocr_parallel: 4
+    ocr_max_retries: 2
+    cer_threshold: 0.05
+    embed_model: "BAAI/bge-m3"
+    embed_backend: "sentence-transformers"
+    chunk_size_chars: 800
+    chunk_overlap_chars: 100
+    top_k: 30
+    retrieval_mode: top_k
+    query_prefix: "Instruct: Given an academic or financial query, retrieve relevant passages\nQuery: "
+
+# Uncomment for local model endpoints
+# endpoints:
+#     rag_agent_api: "http://localhost:8080/v1"
+
+phases:
+    # Interactive research session: ingest papers, then query the knowledge base
+    # via the oracle to gather evidence, compare findings, and draft notes.
+    # Place PDFs in: .aider_factory/markdown/lanceDB/research_papers/
+    - name: "Research — Interactive Oracle Session"
+      enabled: true
+      batch: false                             # per-document tables for targeted per-paper queries
+      vector_store:
+          collection_name: "research_papers"
+      toggles:
+          pair_programming: true               # interactive — you query and direct
+          run_job_one: false
+          run_job_two: false
+          iterate_test: false
+          auto_test: false
+          sticky_context: false
+          run_ocr_rag: true                    # ingest papers (set false once built to reuse)
+          vectordb_overwrite: false
+      models:
+          architect_agent: "gemini/gemini-2.5-flash"
+          editor_agent: "gemini/gemini-2.5-flash"
+          rag_agent: "gemini/gemini-2.5-flash"
+          ocr_agent: "gemini/gemini-2.5-flash"
+      files:
+          target_files:
+              # Your research output — notes, literature review draft, analysis
+              - "research/notes.md"
+          extra_editable_files: []
+          context_files_job: []
+      plans: {}
+
+# ---- Interactive Research Commands (type in the aider session) ----
+#
+# Query the knowledge base:
+#   /run .aider_factory/bash/oracle "what methodology does this paper use?"
+#   /run .aider_factory/bash/oracle "compare results across all papers on topic X"
+#   /run .aider_factory/bash/oracle "exact formula for Z from paper W"
+#
+# Target a specific paper (batch: false gives each paper its own table):
+#   /run .aider_factory/bash/oracle --collection Paper-Title "summarize key findings"
+#
+# Cross-paper synthesis (debate mode):
+#   /run .aider_factory/bash/oracle --debate review --loops 4 "synthesize findings on volatility"
+#   /run .aider_factory/bash/oracle --debate review --loops 4 --rounds 2 "resolve contradictions"
+#
+# Browse and manage:
+#   /run .aider_factory/bash/oracle --list                    # list all tables
+#   /run .aider_factory/bash/oracle --list-files              # list indexed files
+#   /run .aider_factory/bash/oracle --add-file path/to/new.pdf
+#   /run .aider_factory/bash/oracle --add-table path/to/dir/
+#   /run .aider_factory/bash/oracle --rm-file old_paper.pdf
+#   /run .aider_factory/bash/oracle --rm-table old_collection
+#   /run .aider_factory/bash/oracle --rm-db                   # wipe entire database
+

@@ -1,0 +1,17 @@
+# Ignore RAG database, logs, and caches
+.aider_factory/
+
+# Ignore temp folders
+temp/
+
+# Ignore package-level build, documentation, and installation folders
+man/
+inst/
+
+# Ignore any large data, media, or document folders
+docs/strategy_papers/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif

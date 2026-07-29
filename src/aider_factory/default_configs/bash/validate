@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+if [ -z "$AIDER_PY" ]; then
+    if [ -f "$HOME/.local/share/uv/tools/aider-factory/bin/python" ]; then
+        AIDER_PY="$HOME/.local/share/uv/tools/aider-factory/bin/python"
+    elif [ -f "$HOME/.local/share/uv/tools/aider-chat/bin/python" ]; then
+        AIDER_PY="$HOME/.local/share/uv/tools/aider-chat/bin/python"
+    elif [ -n "$VIRTUAL_ENV" ] && [ -f "$VIRTUAL_ENV/bin/python" ]; then
+        AIDER_PY="$VIRTUAL_ENV/bin/python"
+    else
+        AIDER_PY=$(which python3 || which python)
+    fi
+fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$AIDER_PY" "$SCRIPT_DIR/python/validator.py" "$@"

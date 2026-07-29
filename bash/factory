@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Canonical launcher for the AI Factory pipeline. Runs run_workflow.py under aider's
+# own uv tool interpreter, which has every dependency the pipeline can touch
+# in-process (yaml + RAG/OCR stack: lancedb, sentence-transformers, langchain,
+# pymupdf, rapidfuzz, litellm). Mirrors .aider_factory/bash/oracle and bash/validate.
+#
+#   .aider_factory/bash/factory [path/to/.env.yml]
+#   (defaults to .aider_factory/.env.yml when no config is given)
+# Dynamically resolve the python interpreter of the aider-chat uv tool or virtualenv
+if [ -z "$AIDER_PY" ]; then
+    if [ -f "$HOME/.local/share/uv/tools/aider-chat/bin/python" ]; then
+        AIDER_PY="$HOME/.local/share/uv/tools/aider-chat/bin/python"
+    elif [ -n "$VIRTUAL_ENV" ] && [ -f "$VIRTUAL_ENV/bin/python" ]; then
+        AIDER_PY="$VIRTUAL_ENV/bin/python"
+    else
+        AIDER_PY=$(which python3 || which python)
+    fi
+fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# 1. Resolve configuration path (default to .env.yml)
+if [ -n "$1" ]; then
+    CONFIG_FILE="$1"
+else
+    if [ -f "$SCRIPT_DIR/.aider_factory/.env.yml" ]; then
+        CONFIG_FILE="$SCRIPT_DIR/.aider_factory/.env.yml"
+    else
+        CONFIG_FILE="$SCRIPT_DIR/.env.yml"
+    fi
+fi
+
+# 2. Derive log file name from config file stem and timestamp
+CONFIG_BASE=$(basename "$CONFIG_FILE")
+CONFIG_STEM="${CONFIG_BASE%.*}"
+CONFIG_STEM="${CONFIG_STEM#.}" # Strip leading dot if any
+
+LOGS_DIR="$SCRIPT_DIR/logs"
+mkdir -p "$LOGS_DIR"
+
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+LOG_FILE="$LOGS_DIR/${CONFIG_STEM}_run_${TIMESTAMP}.log"
+
+echo "======================================================================"
+echo "Starting AI Factory Pipeline"
+echo "   Config: $CONFIG_FILE"
+echo "   Log:    $LOG_FILE"
+echo "======================================================================"
+
+# 3. Run the workflow and tee the output to the log file, preserving exit status
+# FORCE_COLOR=1 tells rich (Aider's terminal library) to emit ANSI colors even
+# when stdout is a pipe (tee). The log file captures raw ANSI codes (use less -R).
+set -o pipefail
+FORCE_COLOR=1 "$AIDER_PY" "$SCRIPT_DIR/src/aider_factory/python/run_workflow.py" "$@" 2>&1 | tee "$LOG_FILE"
+EXIT_CODE=$?
+set +o pipefail
+
+# 4. Run the Cost Aggregator script on the generated log file
+echo ""
+echo "======================================================================"
+echo "Run Completed. Aggregating Costs..."
+echo "======================================================================"
+"$AIDER_PY" "$SCRIPT_DIR/src/aider_factory/python/aggregate_costs.py" "$LOG_FILE"
+
+exit $EXIT_CODE

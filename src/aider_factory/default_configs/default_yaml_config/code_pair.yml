@@ -1,0 +1,86 @@
+name: "My Project"
+working_directory: "/path/to/project"
+
+test_command_prefix: ""
+test_runner: "pytest {file}"
+test_naming_and_path: "tests/test_{stem}.py"
+loop_aider_test: 3
+
+# RAG settings for oracle queries during pair programming
+rag:
+    collection_name: "project_docs"
+    overwrite: false
+    embed_model: "BAAI/bge-m3"
+    embed_backend: "sentence-transformers"
+    query_prefix: "Instruct: Given a coding query, retrieve relevant passages\nQuery: "
+    chunk_size_chars: 800
+    chunk_overlap_chars: 100
+    top_k: 30
+    retrieval_mode: top_k
+
+# Uncomment for local model endpoints
+# endpoints:
+#     architect_api_base: "http://localhost:8080/v1"
+#     editor_ollama_api: "http://localhost:8080/v1"
+#     editor_test_ollama_api: "http://localhost:8080/v1"
+#     rag_agent_api: "http://localhost:8080/v1"
+
+phases:
+    - name: "Code — Pair Programming"
+      enabled: true
+      batch: true
+      vector_store:
+          collection_name: "project_docs"
+      toggles:
+          pair_programming: true               # interactive session — you drive
+          run_job_one: true                     # plan loaded as context
+          run_job_two: false                    # direct test writing in conversation
+          iterate_test: true                    # test-fix loop available
+          auto_test: false
+          sticky_context: true                  # prior file work carries forward
+          run_ocr_rag: false                    # true on first run to ingest code/docs
+          vectordb_overwrite: false
+      models:
+          architect_agent: "gemini/gemini-2.5-flash"
+          editor_agent: "gemini/gemini-2.5-flash"
+          editor_agent_test: "gemini/gemini-2.5-flash"
+          editor_agent_test_fallback: "gemini/gemini-2.5-flash"
+          rag_agent: "gemini/gemini-2.5-flash"
+      files:
+          target_files:
+              - "src/my_module.py"
+          extra_editable_files:
+              - "src/helpers.py"
+          test_files:
+              - "tests/test_my_module.py"
+          context_files_job:
+              - "src/utils.py"
+          context_files_test:
+              - "src/utils.py"
+      plans:
+          job_one_plan: "markdown/templates/implement.md"
+          job_two_plan: "markdown/templates/testing.md"
+          iterate_plan: "markdown/templates/testing_unit_iterate.md"
+
+# ---- Interactive Commands (type in the aider session) ----
+#
+# Oracle queries:
+#   /run .aider_factory/bash/oracle "what does function X do?"
+#   /run .aider_factory/bash/oracle "find edge cases for the leverage calculation"
+#
+# Target a specific file or collection:
+#   /run .aider_factory/bash/oracle --file src/helpers.py "explain the caching logic"
+#   /run .aider_factory/bash/oracle --collection my_collection "query here"
+#
+# Lightweight debates (in-session, no pipeline restart):
+#   /run .aider_factory/bash/oracle --debate code --loops 4 "why is test Z failing?"
+#   /run .aider_factory/bash/oracle --debate code --loops 4 --rounds 2 "propose fix for bug"
+#
+# Browse and manage the knowledge base:
+#   /run .aider_factory/bash/oracle --list                    # list all tables
+#   /run .aider_factory/bash/oracle --list-files              # list files in collection
+#   /run .aider_factory/bash/oracle --add-file path/to/doc.md # add file to collection
+#   /run .aider_factory/bash/oracle --add-table path/to/dir/  # add folder to collection
+#   /run .aider_factory/bash/oracle --rm-file doc.md          # remove from collection
+#   /run .aider_factory/bash/oracle --rm-table old_collection # remove entire table
+

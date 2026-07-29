@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aider-factory"
+version = "1.0.0"
+description = "An industrial-grade, high-precision software engineering agent fabric and validation engine."
+readme = "README.md"
+requires-python = "==3.12.*"
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Software Development :: Code Generators",
+]
+dependencies = [
+    "aider-chat==0.86.2",             # Lock Aider to our tested version
+    "lancedb>=0.4.0",                 # Lock LanceDB to prevent API drift
+    "sentence-transformers>=2.2.2",   # Lock embeddings runner
+    "pyarrow>=14.0.1",                # Pin PyArrow to match LanceDB wheel
+    "requests>=2.31.0",
+    "pyyaml>=6.0.1",
+    "litellm>=1.35.0",                # Lock LiteLLM to prevent routing breaks
+    "pypdf>=4.0.1",
+    "pymupdf>=1.23.9",
+    "rapidfuzz>=3.6.1",
+    "Levenshtein>=0.20.0",
+    "rich>=13.7.0",
+    "pillow>=10.0.0",                 # For PIL image handling in OCR/RAG
+    "langchain-text-splitters>=0.2.0", # For header-aware markdown/doc chunking
+    "tree-sitter-language-pack>=0.9.0", # For AST-aware code parsing
+    "tree-sitter>=0.21.0",            # For AST-aware code parsing
+    "trafilatura>=1.8.0",             # Web main-text & HTML-to-Markdown extraction
+    "httpx>=0.27.0",                  # Async/sync HTTP client for web fetching
+]
+
+[project.scripts]
+aider-factory = "aider_factory.cli:main"
+aider-oracle = "aider_factory.cli:oracle_cli"
+aider-validate = "aider_factory.cli:validate_cli"
+aider-research = "aider_factory.cli:research_cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aider_factory"]

@@ -1,0 +1,137 @@
+name: "E2E Golden Smoke Test"
+working_directory: "/home/bryanr/wf/BaseFeatures"
+
+# Execution wrapper for running tests (Rocker Docker container)
+test_command_prefix: "docker exec -i --user bryanr -w /home/bryanr/wf/BaseFeatures -e RETICULATE_PYTHON=/home/bryanr/.venv-rocker/bin/python3 rocker-rstudio"
+test_runner: "Rscript .aider_factory/tests/run_tests.R {file}"
+test_naming_and_path: "tests/testthat/test-{stem}.R"
+
+loop_aider_test: 1
+
+# --- Knowledge Oracle + OCR RAG ---
+ocr_api_base: "" # Empty to route OCR to cloud Gemini model
+rag:
+    collection_name: "e2e_golden_smoke"
+    overwrite: true
+    ocr_agent: "gemini/gemini-2.5-flash" # Gemini cloud model for OCR
+    ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
+    embed_model: "qwen3-embedding-8b-8k:LATEST" # Local embedding model
+    embed_backend: "openai"
+    embed_api_base: "http://192.168.100.1:8080/v1"
+    query_prefix: "Instruct: Given a query, retrieve relevant passages\nQuery: "
+    chunk_size_chars: 800
+    chunk_overlap_chars: 100
+    top_k: 30
+    retrieval_mode: top_k
+    cer_threshold: 0.05
+    ocr_max_retries: 2
+    ocr_parallel: 2
+
+# Global Endpoints
+endpoints:
+    architect_api_base: "http://192.168.100.2:8081/v1"
+    editor_ollama_api: "http://192.168.100.1:8080/v1"
+    editor_test_ollama_api: "http://192.168.100.1:8080/v1"
+    rag_agent_api: "http://192.168.100.1:8080/v1"
+    grounding_agent_api: "http://192.168.100.1:8090/v1"
+
+phases:
+    # ------------------------------------------------------------------------
+    # Phase 1: Literary Review (Academic Pathway)
+    # ------------------------------------------------------------------------
+    - name: "Literary Review — E2E Golden Smoke"
+      enabled: true
+      batch: false
+      oracle:
+          template: ".aider_factory/tests/aider_factory_tests/end-to-end/oracle_prompt.md"
+          full_document: false
+          start_job: true
+      vector_store:
+          collection_name: "e2e_golden_smoke"
+      toggles:
+          sticky_context: false
+          pair_programming: false
+          run_job_one: false
+          run_job_two: false
+          iterate_test: true # Run the validation heal step
+          auto_test: false
+          run_ocr_rag: true # Run OCR/RAG ingestion
+          vectordb_overwrite: true
+      oracle_toggles:
+          post_validate: true # Enable grounding/heal loop
+          redo_oracle_job: true
+          debate_loops: 2
+          validation_tag: "evidence"
+          region_threshold: 0.60
+          region_margin: 2
+          region_top_k: 5
+          validation_loops: 2
+          debate_rounds: 1
+          verify_all_claims: false
+          entail_threshold: 0.5
+      models:
+          architect_agent: "gemini/gemini-3.1-pro-preview"
+          editor_agent: "gemini/gemini-2.5-flash"
+          editor_agent_test: "gemini/gemini-2.5-flash"
+          editor_agent_test_fallback: "gemini/gemini-2.5-flash"
+          rag_agent: "gemini/gemini-3.5-flash"
+          grounding_agent: "openai/minicheck-flan-t5-large"
+          ocr_agent: "gemini/gemini-2.5-flash"
+      files:
+          target_files:
+              - ".aider_factory/tests/aider_factory_tests/end-to-end/January-2026-FX-Report.md"
+          extra_editable_files: []
+          test_files:
+              - ".aider_factory/tests/aider_factory_tests/end-to-end/validations_context_check.sh"
+          context_files_job: []
+          context_files_test: []
+      ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
+      plans:
+          job_one_plan: []
+          job_two_plan: []
+          iterate_plan: "markdown/internal/contextual_revalidation_template.md"
+
+    # ------------------------------------------------------------------------
+    # Phase 2: Code Implementation & Testing (Code Pathway)
+    # ------------------------------------------------------------------------
+    - name: "Code — E2E Golden Smoke"
+      enabled: true
+      batch: true # Unified table for code mode
+      oracle:
+          job_debate_template: []
+          template: ".aider_factory/markdown/internal/analyze_bugs.md"
+          start_job: false # Code mode: template seeds debate
+          architect_oracle_chat: true
+      vector_store:
+          collection_name: "e2e_code_golden_smoke"
+      toggles:
+          sticky_context: false
+          pair_programming: false
+          run_job_one: false # fut_aac.R is already implemented
+          run_job_two: false # Skip drafting since we pre-create the passing test
+          iterate_test: true # Run test-fix loop inside Rocker Docker
+          auto_test: false
+          run_ocr_rag: true # Ingest fut_aac.R into LanceDB
+          vectordb_overwrite: true
+      oracle_toggles:
+          debate_loops: 2
+          debate_rounds: 1
+      models:
+          architect_agent: "gemini/gemini-3.1-pro-preview"
+          editor_agent: "gemini/gemini-2.5-flash"
+          editor_agent_test: "gemini/gemini-2.5-flash"
+          editor_agent_test_fallback: "gemini/gemini-2.5-flash"
+          rag_agent: "gemini/gemini-3.5-flash"
+          ocr_agent: "gemini/gemini-2.5-flash"
+      files:
+          target_files:
+              - ".aider_factory/tests/aider_factory_tests/end-to-end/fut_aac.R"
+          extra_editable_files: []
+          test_files:
+              - "tests/testthat/test-unit-fut_aac.R" # Write tests where rocker container can find them
+          context_files_job: []
+          context_files_test: []
+      plans:
+          job_one_plan: "markdown/templates/implement.md"
+          job_two_plan: "markdown/templates/general.md"
+          iterate_plan: "markdown/templates/testing_unit_iterate.md"

@@ -1,0 +1,532 @@
+# =====================================================================
+# OLLAMA ENDPOINTS (ollama/)
+# =====================================================================
+
+- name: ollama/qwen3.6-35B-80k:latest
+  edit_format: editor-diff
+  use_repo_map: true
+  examples_as_sys_msg: true # NEW: Locks down examples into the system block
+  reminder: sys # NEW: Forces structural reminders to the top
+  caches_by_default: true # NEW: Explicitly instructs Aider to cache prefixes
+  extra_params:
+      temperature: 0.1 # NEW: Ensures determinism
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.03
+      repetition_penalty: 1
+      # think: false
+      # thinking_tokens: 0
+  # accepts_settings:
+  #     - thinking_tokens
+
+- name: ollama/qwen3-coder-80k:latest
+  edit_format: editor-diff
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true # NEW: Locks down examples into the system block
+  reminder: sys # NEW: Forces structural reminders to the top
+  caches_by_default: true # NEW: Explicitly instructs Aider to cache prefixes
+  extra_params:
+      think: false
+      # thinking_tokens: 0
+      temperature: 0.1 # NEW: Ensures determinism
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.02
+      repetition_penalty: 1.08
+  accepts_settings:
+      - thinking_tokens
+
+- name: ollama/qwen3.6-27B-90k-think:latest
+  edit_format: ask
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true # NEW: Locks down examples into system block
+  reminder: sys # NEW: Forces structural reminders to the top
+  caches_by_default: false # NEW: Explicitly instructs Aider to cache prefixes
+  extra_params:
+      think: true
+      thinking_tokens: 4096
+      temperature: 0.4 # NEW: Ensures determinism
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.03
+      repetition_penalty: 1.08
+  accepts_settings:
+      - thinking_tokens
+
+- name: ollama/qwen3.6-27B-90k-udq4kxl:latest
+  edit_format: editor-diff
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true # NEW: Locks down examples into the system block
+  reminder: sys # NEW: Forces structural reminders to the top
+  caches_by_default: true # NEW: Explicitly instructs Aider to cache prefixes
+  extra_params:
+      think: false
+      # thinking_tokens: 0
+      temperature: 0.1 # NEW: Ensures determinism
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.02
+      repetition_penalty: 1.08
+  accepts_settings:
+      - thinking_tokens
+
+- name: ollama/qwen3.5-122B-80k:latest
+  edit_format: editor-diff
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true # NEW: Locks down examples into the system block
+  reminder: sys # NEW: Forces structural reminders to the top
+  caches_by_default: true # NEW: Explicitly instructs Aider to cache prefixes
+  extra_params:
+      think: false
+      # temperature: 0.0         # NEW: Ensures determinism
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: false
+  accepts_settings:
+      - thinking_tokens
+
+- name: ollama/gemma4-12B-90k-cpu:latest
+  edit_format: editor-diff
+  use_repo_map: false
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: false
+  extra_params:
+      temperature: 0.3
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.03
+      num_thread: 16
+      thinking_tokens: 0 # Editor: THINKING OFF (saves DDR5 bandwidth)
+  accepts_settings:
+      - thinking_tokens
+
+# =====================================================================
+# LM STUDIO / LLAMA.CPP ENDPOINTS (lm_studio/)
+# =====================================================================
+- name: lm_studio/qwen3.6-35B-80k:latest
+  edit_format: editor-diff
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true # NEW: Locks down examples into the system block
+  reminder: sys # NEW: Forces structural reminders to the top
+  caches_by_default: true # NEW: Explicitly instructs Aider to cache prefixes
+  extra_params:
+      think: false
+      thinking_tokens: 0
+      temperature: 0.2
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.03
+      repetition_penalty: 1.08
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: false
+  accepts_settings:
+      - thinking_tokens
+
+- name: lm_studio/qwen3-coder-80k:latest
+  edit_format: editor-diff
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true # NEW: Locks down examples into the system block
+  reminder: sys # NEW: Forces structural reminders to the top
+  caches_by_default: true # NEW: Explicitly instructs Aider to cache prefixes
+  extra_params:
+      think: false
+      # thinking_tokens: 0
+      temperature: 0.1 # NEW: Ensures determinism
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.02
+      repetition_penalty: 1.08
+  accepts_settings:
+      - thinking_tokens
+
+- name: lm_studio/qwen3.6-27B-90k-think:LATEST
+  edit_format: ask
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true # NEW: Locks down examples into system block
+  reminder: sys # NEW: Forces structural reminders to the top
+  caches_by_default: false # NEW: Explicitly instructs Aider to cache prefixes
+  extra_params:
+      think: true
+      thinking_tokens: 4096
+      temperature: 1.0 # NEW: Ensures determinism
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.08
+      repetition_penalty: 1.08
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: true
+  accepts_settings:
+      - thinking_tokens
+
+- name: lm_studio/qwen3.6-27B-90k-udq4kxl:LATEST
+  edit_format: editor-diff
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      think: false
+      thinking_tokens: 0
+      temperature: 0.2
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.03
+      repetition_penalty: 1.08
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: false
+  accepts_settings:
+      - thinking_tokens
+
+- name: lm_studio/qwen3.6-27B-90k-udq4kxl-rag:latest
+  edit_format: ask
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      think: false
+      thinking_tokens: 0
+      temperature: 0.7
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.05
+      repetition_penalty: 1.08
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: false
+  accepts_settings:
+      - thinking_tokens
+
+- name: lm_studio/qwen3.5-122B-80k:latest
+  edit_format: editor-diff
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true # NEW: Locks down examples into the system block
+  reminder: sys # NEW: Forces structural reminders to the top
+  caches_by_default: true # NEW: Explicitly instructs Aider to cache prefixes
+  extra_params:
+      think: false
+      thinking_tokens: 0
+      temperature: 0.4
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.02
+      repetition_penalty: 1.08
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: false
+  accepts_settings:
+      - thinking_tokens
+
+- name: lm_studio/gemma4-12B-90k-cpu:latest
+  edit_format: editor-diff
+  use_repo_map: false
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: false
+  extra_params:
+      think: false
+      temperature: 0.3
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.03
+      num_thread: 16
+      thinking_tokens: 0 # Editor: THINKING OFF (saves DDR5 bandwidth)
+  accepts_settings:
+      - thinking_tokens
+
+# =====================================================================
+# OPENAI COMPATIBLE ENDPOINTS (openai/)
+# =====================================================================
+
+- name: openai/qwen3.6-27B-90k-udq4kxl-rag:latest
+  edit_format: ask
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      think: false
+      temperature: 0.2
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.03
+      repetition_penalty: 1.08
+      thinking_tokens: 0
+  accepts_settings:
+      - thinking_tokens
+
+- name: openai/minimax-229b-ud-iq4nl:latest
+  edit_format: ask # Uses standard diff since it is the Architect target
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: false
+  extra_params:
+      temperature: 1
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.08
+
+- name: openai/minimax229b-67k:latest
+  edit_format: ask # Uses standard diff since it is the Architect target
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      # temperature: 0.0
+      #
+
+- name: openai/qwen3.6-27b-90k:latest
+  edit_format: ask
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true # NEW: Locks down examples into system block
+  reminder: sys # NEW: Forces structural reminders to the top
+  caches_by_default: true # NEW: Explicitly instructs Aider to cache prefixes
+  extra_params:
+      think: true
+      thinking_tokens: 4096
+      temperature: 0.8 # NEW: Ensures determinism
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.07
+      repetition_penalty: 1.08
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: true
+  accepts_settings:
+      - thinking_tokens
+
+- name: openai/qwen3.5-122b-a10b-90k:latest
+  edit_format: ask # use 'diff' to leverage shell suggestions
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      think: true
+      thinking_tokens: 4096
+      temperature: 0.8
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.07
+      repetition_penalty: 1.08
+      # tool_choice: "none"
+      # NEW: Ensures determinism
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: true
+  accepts_settings:
+      - thinking_tokens
+
+- name: openai/qwen35-212B-80k:latest
+  edit_format: ask
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true # NEW: Locks down examples into the system block
+  reminder: sys # NEW: Forces structural reminders to the top
+  caches_by_default: false # NEW: Explicitly instructs Aider to cache prefixes
+  extra_params:
+      think: true
+      thinking_tokens: 4096
+      temperature: 0.6
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.08
+      # NEW: Ensures determinism
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: true
+  accepts_settings:
+      - thinking_tokens
+
+- name: openai/qwen-262b
+  edit_format: ask
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true # NEW: Locks down examples into the system block
+  reminder: sys # NEW: Forces structural reminders to the top
+  caches_by_default: false # NEW: Explicitly instructs Aider to cache prefixes
+  extra_params:
+      think: true
+      thinking_tokens: 4096
+      temperature: 0.6
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.06
+      # NEW: Ensures determinism
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: true
+  accepts_settings:
+      - thinking_tokens
+
+- name: openai/gemma4-12B-90k-halo:latest
+  edit_format: ask
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      temperature: 0.8
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.06
+      # num_thread: 16
+      thinking_tokens: 0 # Editor: THINKING OFF (saves DDR5 bandwidth)
+  accepts_settings:
+      - thinking_tokens
+
+# =====================================================================
+# GEMINI ENDPOINTS (gemini/)
+# =====================================================================
+
+- name: gemini/gemini-2.5-flash
+  edit_format: editor-diff
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      temperature: 0.1
+      thinking_tokens: 0 # Editor: THINKING OFF
+  accepts_settings:
+      - thinking_tokens
+
+- name: gemini/gemini-3.5-flash
+  edit_format: ask
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      temperature: 0.6
+      thinking_tokens: 8192 # Editor: THINKING OFF
+  accepts_settings:
+      - thinking_tokens
+
+- name: gemini/gemini-3.6-flash
+  edit_format: ask
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      temperature: 0.6
+      thinking_tokens: 8192
+  accepts_settings:
+      - thinking_tokens
+
+- name: vertex_ai/gemini-3.5-flash
+  edit_format: ask
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      temperature: 0.6
+      thinking_tokens: 4096 # Editor: THINKING OFF
+  accepts_settings:
+      - thinking_tokens
+
+- name: gemini/gemini-3-flash-preview
+  edit_format: editor-diff
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      temperature: 0.1
+      thinking_tokens: 0 # Editor: THINKING OFF
+  accepts_settings:
+      - thinking_tokens
+
+- name: gemini/gemini-3.1-pro-preview
+  edit_format: ask
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  # This tells Aider what model/format to spin up for the Editor pass
+  # editor_model_name: gemini/gemini-3.1-pro-preview
+  # editor_edit_format: editor-diff
+  extra_params:
+      temperature: 0.4
+      thinking_tokens: 32000 # Editor: THINKING OFF
+  accepts_settings:
+      - thinking_tokens
+
+# =====================================================================
+# VERTEX AI ENDPOINTS (vertex_ai/)
+# =====================================================================
+
+- name: vertex_ai-anthropic_models/vertex_ai/claude-sonnet-4-6@default
+  edit_format: ask
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      temperature: 0.6
+      # Claude 3.7: Set budget to 0 to disable extended reasoning mode
+      thinking_tokens: 8192
+  accepts_settings:
+      - thinking_tokens
+
+- name: vertex_ai-anthropic_models/vertex_ai/claude-opus-4-6@default
+  edit_format: ask
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      temperature: 0.4
+      # Claude 3.7: Set budget to 0 to disable extended reasoning mode
+      thinking_tokens: 32000
+  accepts_settings:
+      - thinking_tokens
+
+- name: vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas
+  edit_format: ask
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      temperature: 0.6
+      # Qwen: Disable reasoning via standard open-model flags
+      think: true
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: true
+
+- name: vertex_ai/qwen/qwen3-235b-a22b-instruct-2507-maas
+  edit_format: editor_diff
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      temperature: 0.2
+      # Qwen: Disable reasoning via standard open-model flags
+      think: false
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: false

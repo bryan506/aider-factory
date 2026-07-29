@@ -1,0 +1,12 @@
+{
+  "attempts": [
+    {
+      "attempt": 0,
+      "tripped": [],
+      "validated": 0,
+      "fixed": 0,
+      "flagged": 0,
+      "warns": 0
+    }
+  ]
+}

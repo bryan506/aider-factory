@@ -1,0 +1,47 @@
+name: "My Project"
+working_directory: "/path/to/project"
+
+# Test execution — adapt to your language and environment
+test_command_prefix: ""                        # wrapper: "docker exec -i my-container"
+test_runner: "pytest {file}"                   # R: "Rscript .aider_factory/tests/run_tests.R {file}"
+test_naming_and_path: "tests/test_{stem}.py"   # auto-generates test path when test_files omitted
+loop_aider_test: 3                             # max test-fix attempts per target file
+
+# Uncomment for local model endpoints (not needed for gemini/ or github_copilot/ prefixes)
+# endpoints:
+#     architect_api_base: "http://localhost:8080/v1"     # openai/ prefix models
+#     editor_ollama_api: "http://localhost:11434"         # ollama/ prefix models
+#     editor_test_ollama_api: "http://localhost:11434"
+
+phases:
+    - name: "Implement and Test"
+      enabled: true
+      toggles:
+          run_job_one: true            # architect plans implementation, editor writes code
+          run_job_two: true            # architect plans tests, editor writes them
+          iterate_test: true           # test-fix loop (up to loop_aider_test attempts)
+          auto_test: true              # true = 3 editor-only attempts then architect; false = architect every attempt
+          pair_programming: false      # fully autonomous
+          sticky_context: false        # true = completed file becomes read-context for the next
+          run_ocr_rag: false
+          vectordb_overwrite: false
+      models:
+          architect_agent: "gemini/gemini-2.5-flash"
+          editor_agent: "gemini/gemini-2.5-flash"
+          editor_agent_test: "gemini/gemini-2.5-flash"
+          editor_agent_test_fallback: "gemini/gemini-2.5-flash"
+      files:
+          target_files:
+              - "src/my_module.py"
+          extra_editable_files: []             # additional files the editor may modify
+          test_files:
+              - "tests/test_my_module.py"
+          context_files_job:                   # read-only context for implementation
+              - "src/helpers.py"
+          context_files_test:                  # read-only context for test writing + iterate
+              - "src/helpers.py"
+      plans:
+          job_one_plan: "markdown/templates/implement.md"
+          job_two_plan: "markdown/templates/testing.md"
+          # iterate_plan: "markdown/templates/testing_unit_iterate.md"
+

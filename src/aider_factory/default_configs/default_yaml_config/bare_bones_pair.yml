@@ -1,0 +1,46 @@
+name: "My Project"
+working_directory: "/path/to/project"
+
+test_command_prefix: ""
+test_runner: "pytest {file}"
+test_naming_and_path: "tests/test_{stem}.py"
+loop_aider_test: 3
+
+# Uncomment for local model endpoints
+# endpoints:
+#     architect_api_base: "http://localhost:8080/v1"
+#     editor_ollama_api: "http://localhost:11434"
+#     editor_test_ollama_api: "http://localhost:11434"
+
+phases:
+    - name: "Pair Programming Session"
+      enabled: true
+      toggles:
+          pair_programming: true       # interactive — you drive the conversation
+          run_job_one: true            # plan template loaded as read-only context
+          run_job_two: false           # direct test writing manually in conversation
+          iterate_test: true           # test-fix loop available when you trigger tests
+          auto_test: false             # architect participates every attempt
+          sticky_context: false
+          run_ocr_rag: false
+          vectordb_overwrite: false
+      models:
+          architect_agent: "gemini/gemini-2.5-flash"
+          editor_agent: "gemini/gemini-2.5-flash"
+          editor_agent_test: "gemini/gemini-2.5-flash"
+          editor_agent_test_fallback: "gemini/gemini-2.5-flash"
+      files:
+          target_files:
+              - "src/my_module.py"
+          extra_editable_files:
+              - "src/helpers.py"
+          test_files:
+              - "tests/test_my_module.py"
+          context_files_job:
+              - "src/utils.py"
+          context_files_test:
+              - "src/utils.py"
+      plans:
+          job_one_plan: "markdown/templates/implement.md"
+          job_two_plan: "markdown/templates/testing.md"
+

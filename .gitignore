@@ -1,0 +1,26 @@
+# Ephemeral and Local Workspace Files
+.aider_factory/
+.ai_factory/
+temp/
+logs/
+extraContext/
+gitDiffs/
+markdown/
+
+# Aider and Oracle Session Caches
+.aider.chat.history.md
+.aider.input.history
+.oracle_session.json
+.oracle_chat.history.md
+.oracle_debate_session.json
+.debate_aider_history.md
+.pair_capture.log
+
+# Local virtual environments and python caches
+.venv/
+__pycache__/
+*.pyc
+
+# Local system files
+.DS_Store
+.aider*

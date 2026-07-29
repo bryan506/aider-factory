@@ -7,28 +7,42 @@
 [![Platform: Linux](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)](https://www.kernel.org/)
 [![Powered by Aider](https://img.shields.io/badge/Powered%20by-Aider-orange.svg)](https://aider.chat)
 
-**aider-factory** is an industrial-grade, local-first software engineering agent fabric and validation engine. It acts as a highly optimized, YAML-driven automation harness built on top of [Aider](https://aider.chat).
+**aider-factory** is a modular, lightweight, YAML-driven automation harness, grounding validator, and RAG/debate engine built on top of [Aider](https://aider.chat).
 
-By separating planning from execution, preserving local LLM Key-Value (KV) caches, and enforcing a **deterministic-first validation ladder**, `aider-factory` allows you to run complex, multi-file codebase mutations and academic research pipelines safely, securely, and at a fraction of the cost of cloud-only agent platforms.
-
----
-
-## 🚀 Why aider-factory?
-
-Most autonomous agent frameworks suffer from two fatal flaws:
-1. **The Agentic Death Loop:** You delegate a task, the agent makes a minor logical error, spins in a loop trying to fix it, burns $50 of API credits, and hands you an unsalvageable codebase.
-2. **KV Cache Invalidation:** Every time an agent fetches a web page, rebuilds a repository map, or auto-commits, the LLM\'s context window shifts. This flushes the KV cache, making local model inference incredibly slow and expensive.
-
-### The aider-factory Solution:
-* **Deterministic-First Grounding:** We treat LLM output as fundamentally untrustworthy. Before any agent is called, deterministic code performs exact-substring grounding, auto-stitches ellipsis splices, and runs test suites. LLMs are reserved strictly for high-level judgment.
-* **Decoupled RAG & Web Research:** The main coding agent never reads raw web pages or documentation. `aider-research` metasearches privately via local SearXNG, and `aider-oracle` indexes the documents incrementally into LanceDB. The coder only receives highly targeted, grounded answers, keeping your **KV cache 100% locked in VRAM.**
-* **Language-Agnostic DAG Pipelines:** Define your workflows as a Directed Acyclic Graph (DAG) in a simple `.env.yml` file. Run the same robust `produce → verify → escalate → finalize` skeleton whether you are refactoring a Rust codebase, writing R unit tests, or compiling a literature review.
+Designed with a "bolt-on, bolt-off" UNIX philosophy, `aider-factory` can be run as a complete file-coupled DAG pipeline, or its components can be used as standalone command-line clients in your standard terminal, shell scripts, or CI/CD pipelines.
 
 ---
 
-## 🛠️ The Four Standalone Superpowers
+## 🚀 The Core Draws
 
-`aider-factory` is built on the UNIX philosophy: a suite of modular, CLI-first tools that can be bolted together or used completely independently.
+### 1. A Barebones, YAML-Configured Aider Harness
+If you want a simple, lightweight, and repeatable way to automate Aider without the bloat of heavy agent frameworks, `aider-factory` does this out of the box. 
+* Fully customizable options through a simple `.env.yml` file to cater to your specific pipeline or workflow needs.
+* Easily define phase-based tasks, manage target/editable files, and run test-driven self-healing loops.
+
+### 2. Modular, Standalone CLI Clients
+You do not have to buy into a monolithic ecosystem. Each component of `aider-factory` is exposed as a global, standalone command-line client that you can lift and use anywhere:
+* **`aider-oracle`**: A blazing-fast local RAG client.
+* **`aider-validate`**: A deterministic fact-checker and quote-sticher for CI/CD.
+* **`aider-research`**: A private metasearch CLI.
+* **`aider-factory`**: The pipeline orchestrator.
+
+### 3. Deterministic Grounding & Validation (Code & Review)
+A multi-tiered, deterministic-first validation system that can be used in both **code** or **review** paths, and in **autonomous** or **pair programming** modes.
+* **The tags are the state:** The LLM cannot award itself a passing grade. Only the deterministic validator promotes tags from `[evidence]` to `[validated]` or `[fixed]`.
+* **Exact Substring Proof:** A quote is either an exact verbatim substring of the source, or it is a tripwire. No fuzzy thresholds.
+* **Free Ellipsis Auto-Stitching:** Automatically splits quotes on `...`, matches the fragments in the source, and auto-replaces them with the continuous source span if the gap is small—saving massive token costs with 0 LLM calls.
+* **Unique commands and flags** make it a treat to use across different workflows.
+
+### 4. Structured, Refereed Debates Anywhere
+Run structured, adversarial debates between the Architect and a specialized, reactive Knowledge Oracle.
+* Can be run **anywhere**, in both **autonomous** or **pair programming** modes.
+* **Persistent Oracle Sessions:** Unlike standard RAG which flushes context on every turn, the Oracle session accumulates and persists context across debate turns and rounds, ensuring deep, multi-turn reasoning.
+* **Deterministic Referee:** A simple script reads the `PROPOSAL:` and `VERDICT:` lines to resolve the debate (agreement or deadlock), preventing credit-burning loops.
+
+---
+
+## 🛠️ The Four Superpowers
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
@@ -106,7 +120,7 @@ aider-factory
 
 ## 📖 Standalone CLI Examples
 
-### metasearch the Web Privately
+### Metasearch the Web Privately
 ```bash
 aider-research search \"negative income tax labor supply\" --academic --top 5
 ```

@@ -15,6 +15,10 @@ factory = AiderFactory(script_dir)
 test_task = Task(
     id="test_oracle_task",
     oracle={"template": "my_template.md", "out": "out.md", "full_document": True},
+    rag_env={
+        "ORACLE_COLLECTION": "my_collection",
+        "ORACLE_RAG_DB_DIR": "my_db_dir"
+    },
     skip_aider=True
 )
 

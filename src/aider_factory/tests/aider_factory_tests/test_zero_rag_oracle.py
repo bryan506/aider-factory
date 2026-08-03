@@ -81,8 +81,12 @@ try:
         "phases": [{
             "name": "Phase1",
             "enabled": True,
-            "vector_store": {"collection_name": []},
-            "toggles": {"run_ocr_rag": True, "run_job_one": False, "run_job_two": False, "iterate_test": False},
+            "rag": {
+                "collection_name": "",
+                "batch": True,
+                "run_ocr_rag": True
+            },
+            "toggles": {"run_job_one": False, "run_job_two": False, "iterate_test": False},
             "oracle": {"start_job": True},
             "models": {"architect_agent": "mock", "editor_agent": "mock"},
             "files": {
@@ -107,8 +111,18 @@ try:
         "phases": [{
             "name": "Phase2",
             "enabled": True,
-            "vector_store": {"collection_name": []},
-            "oracle": {"start_job": False, "architect_oracle_chat": True},
+            "rag": {
+                "collection_name": "",
+                "batch": True,
+                "run_ocr_rag": False
+            },
+            "oracle": {
+                "start_job": False,
+                "pre_edit_debate": {
+                    "enabled": True,
+                    "job_debate_template": []
+                }
+            },
             "toggles": {"run_job_one": True},
             "models": {"architect_agent": "mock", "editor_agent": "mock"},
             "files": {

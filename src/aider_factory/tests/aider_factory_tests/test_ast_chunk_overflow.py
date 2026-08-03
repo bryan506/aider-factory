@@ -6,8 +6,12 @@ Covers:
   - _ast_chunk: oversized leaf nodes split instead of emitted as-is
   - Regression: normal code unchanged by the fix
 """
-import sys, os
-sys.path.insert(0, ".aider_factory/python")
+import sys
+import os
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+python_module_dir = os.path.abspath(os.path.join(script_dir, "../../python"))
+sys.path.insert(0, python_module_dir)
 
 from rag_manager import _ast_chunk, _text_split_fallback
 

@@ -92,13 +92,19 @@ class AiderFactory:
         )
 
     def _run_oracle_job(self, task: Task) -> bool:
-        """Run oracle_agent.py in programmatic job mode via the bash wrapper (which uses
-        the aider venv interpreter that has litellm/lancedb). Failure is non-fatal so the
-        remaining per-document jobs still run; the task is just marked FAILED."""
+        """Run oracle_agent.py in programmatic job mode directly via the active interpreter."""
         job = task.oracle or {}
-        oracle = os.path.join(self.project_dir, ".aider_factory", "bash", "oracle")
-        if not os.path.exists(oracle):
-            oracle = "aider-oracle"
+        
+        # Resolve script path relative to this file
+        pkg_python_dir = os.path.dirname(os.path.abspath(__file__))
+        oracle_script = os.path.join(pkg_python_dir, "oracle_agent.py")
+        
+        import sys
+        if os.path.exists(oracle_script):
+            cmd = [sys.executable, oracle_script]
+        else:
+            oracle = os.path.join(self.project_dir, ".aider_factory", "bash", "oracle")
+            cmd = [oracle] if os.path.exists(oracle) else ["aider-oracle"]
 
         # Reuse an existing output instead of re-running the oracle job (e.g.
         # when iterating on the downstream validation/fix loop only). No model call
@@ -136,7 +142,7 @@ class AiderFactory:
             f"'{env.get('ORACLE_COLLECTION')}' -> {job.get('out')}"
         )
         try:
-            proc = subprocess.run([oracle], env=env, cwd=self.project_dir)
+            proc = subprocess.run(cmd, env=env, cwd=self.project_dir)
         except Exception as e:
             log.error(f"❌ ORACLE JOB EXCEPTION [{task.id}]: {e} (continuing)")
             return False
@@ -149,19 +155,25 @@ class AiderFactory:
         return False
 
     def _run_validate(self, task: "Task") -> bool:
-        """Evidence grounding audit (deterministic, no Aider). Runs the auditor via
-        the bash/validate wrapper. The audit always SUCCEEDS
-        as a DAG node — any ungrounded quotes are recorded in the report, which the
-        Tier-2 (post_validate) task keys off. Non-fatal on error."""
+        """Evidence grounding audit (deterministic, no Aider). Runs the auditor directly.
+        The audit always SUCCEEDS as a DAG node — any ungrounded quotes are recorded in the
+        report, which the Tier-2 (post_validate) task keys off. Non-fatal on error."""
         v = task.validate or {}
-        validate = os.path.join(self.project_dir, ".aider_factory", "bash", "validate")
-        if not os.path.exists(validate):
-            validate = "aider-validate"
+        
+        pkg_python_dir = os.path.dirname(os.path.abspath(__file__))
+        validate_script = os.path.join(pkg_python_dir, "validator.py")
+        
+        import sys
+        if os.path.exists(validate_script):
+            base_cmd = [sys.executable, validate_script]
+        else:
+            validate = os.path.join(self.project_dir, ".aider_factory", "bash", "validate")
+            base_cmd = [validate] if os.path.exists(validate) else ["aider-validate"]
+            
         env = os.environ.copy()
         if task.rag_env:
             env.update(task.rag_env)
-        cmd = [
-            validate,
+        cmd = base_cmd + [
             "--file",
             str(v.get("review", "")),
             "--source",

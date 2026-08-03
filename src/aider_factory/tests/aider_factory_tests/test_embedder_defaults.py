@@ -1,7 +1,11 @@
 import sys
 import os
 import lancedb
-sys.path.insert(0, ".aider_factory/python")
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+python_module_dir = os.path.abspath(os.path.join(script_dir, "../../python"))
+sys.path.insert(0, python_module_dir)
+
 from rag_manager import embed_texts
 
 def main():

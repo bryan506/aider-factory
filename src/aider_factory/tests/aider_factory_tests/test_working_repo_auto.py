@@ -8,8 +8,13 @@ Covers:
   - _walk_repo exclusion logic works with auto-derived repo name
   - End-to-end: active files are excluded from ingestion
 """
-import sys, os, shutil
-sys.path.insert(0, ".aider_factory/python")
+import sys
+import os
+import shutil
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+python_module_dir = os.path.abspath(os.path.join(script_dir, "../../python"))
+sys.path.insert(0, python_module_dir)
 
 import rag_manager
 

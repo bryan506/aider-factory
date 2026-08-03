@@ -8,8 +8,15 @@ Covers:
   - ocr_parallel threads through ingest() cfg correctly
   - _ocr_one_page: CER retries work per-page
 """
-import sys, os, time, shutil, threading
-sys.path.insert(0, ".aider_factory/python")
+import sys
+import os
+import time
+import shutil
+import threading
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+python_module_dir = os.path.abspath(os.path.join(script_dir, "../../python"))
+sys.path.insert(0, python_module_dir)
 
 import rag_manager
 

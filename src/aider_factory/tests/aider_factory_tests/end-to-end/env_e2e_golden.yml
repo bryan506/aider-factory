@@ -1,31 +1,12 @@
 name: "E2E Golden Smoke Test"
-working_directory: "/home/bryanr/wf/BaseFeatures"
+working_directory: "."
 
-# Execution wrapper for running tests (Rocker Docker container)
-test_command_prefix: "docker exec -i --user bryanr -w /home/bryanr/wf/BaseFeatures -e RETICULATE_PYTHON=/home/bryanr/.venv-rocker/bin/python3 rocker-rstudio"
-test_runner: "Rscript .aider_factory/tests/run_tests.R {file}"
+# Execution wrapper for running tests (Natively on Host)
+test_command_prefix: ""
+test_runner: "Rscript -e 'res <- testthat::test_file(\"{file}\"); df <- as.data.frame(res); if (any(df$failed > 0) || any(df$error > 0)) quit(status = 1)'"
 test_naming_and_path: "tests/testthat/test-{stem}.R"
 
 loop_aider_test: 1
-
-# --- Knowledge Oracle + OCR RAG ---
-ocr_api_base: "" # Empty to route OCR to cloud Gemini model
-rag:
-    collection_name: "e2e_golden_smoke"
-    overwrite: true
-    ocr_agent: "gemini/gemini-2.5-flash" # Gemini cloud model for OCR
-    ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
-    embed_model: "qwen3-embedding-8b-8k:LATEST" # Local embedding model
-    embed_backend: "openai"
-    embed_api_base: "http://192.168.100.1:8080/v1"
-    query_prefix: "Instruct: Given a query, retrieve relevant passages\nQuery: "
-    chunk_size_chars: 800
-    chunk_overlap_chars: 100
-    top_k: 30
-    retrieval_mode: top_k
-    cer_threshold: 0.05
-    ocr_max_retries: 2
-    ocr_parallel: 2
 
 # Global Endpoints
 endpoints:
@@ -34,6 +15,11 @@ endpoints:
     editor_test_ollama_api: "http://192.168.100.1:8080/v1"
     rag_agent_api: "http://192.168.100.1:8080/v1"
     grounding_agent_api: "http://192.168.100.1:8090/v1"
+    ocr_api_base: "" # Empty to route OCR to cloud Gemini model
+    embed_api_base: "http://192.168.100.1:8080/v1"
+
+models:
+    embed_model: "qwen3-embedding-8b-8k:LATEST"
 
 phases:
     # ------------------------------------------------------------------------
@@ -41,13 +27,31 @@ phases:
     # ------------------------------------------------------------------------
     - name: "Literary Review — E2E Golden Smoke"
       enabled: true
-      batch: false
+
+      rag:
+          collection_name: "e2e_golden_smoke"
+          batch: false
+          retrieval_mode: top_k
+          run_ocr_rag: true # Run OCR/RAG ingestion
+          vectordb_overwrite: true
+          ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
+          query_prefix: "Instruct: Given a query, retrieve relevant passages\nQuery: "
+          chunk_size_chars: 800
+          chunk_overlap_chars: 100
+          top_k: 30
+          cer_threshold: 0.05
+          ocr_max_retries: 2
+          ocr_parallel: 2
+          ocr_max_tokens: 4096
+
       oracle:
+          start_job: true
           template: ".aider_factory/tests/aider_factory_tests/end-to-end/oracle_prompt.md"
           full_document: false
-          start_job: true
-      vector_store:
-          collection_name: "e2e_golden_smoke"
+          pre_edit_debate:
+              enabled: false
+              job_debate_template: []
+
       toggles:
           sticky_context: false
           pair_programming: false
@@ -55,20 +59,24 @@ phases:
           run_job_two: false
           iterate_test: true # Run the validation heal step
           auto_test: false
-          run_ocr_rag: true # Run OCR/RAG ingestion
-          vectordb_overwrite: true
-      oracle_toggles:
-          post_validate: true # Enable grounding/heal loop
-          redo_oracle_job: true
-          debate_loops: 2
+
+      validation:
+          enabled: true # Enable grounding/heal loop
           validation_tag: "evidence"
           region_threshold: 0.60
           region_margin: 2
+          region_paragraphs: 0
           region_top_k: 5
           validation_loops: 2
-          debate_rounds: 1
+          redo_oracle_job: true
           verify_all_claims: false
           entail_threshold: 0.5
+
+      escalation_debate:
+          loops: 2
+          rounds: 1
+          pass_history: false
+
       models:
           architect_agent: "gemini/gemini-3.1-pro-preview"
           editor_agent: "gemini/gemini-2.5-flash"
@@ -77,6 +85,7 @@ phases:
           rag_agent: "gemini/gemini-3.5-flash"
           grounding_agent: "openai/minicheck-flan-t5-large"
           ocr_agent: "gemini/gemini-2.5-flash"
+
       files:
           target_files:
               - ".aider_factory/tests/aider_factory_tests/end-to-end/January-2026-FX-Report.md"
@@ -85,7 +94,7 @@ phases:
               - ".aider_factory/tests/aider_factory_tests/end-to-end/validations_context_check.sh"
           context_files_job: []
           context_files_test: []
-      ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
+
       plans:
           job_one_plan: []
           job_two_plan: []
@@ -96,14 +105,31 @@ phases:
     # ------------------------------------------------------------------------
     - name: "Code — E2E Golden Smoke"
       enabled: true
-      batch: true # Unified table for code mode
-      oracle:
-          job_debate_template: []
-          template: ".aider_factory/markdown/internal/analyze_bugs.md"
-          start_job: false # Code mode: template seeds debate
-          architect_oracle_chat: true
-      vector_store:
+
+      rag:
           collection_name: "e2e_code_golden_smoke"
+          batch: true # Unified table for code mode
+          retrieval_mode: top_k
+          run_ocr_rag: true # Ingest fut_aac.R into LanceDB
+          vectordb_overwrite: true
+          ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
+          query_prefix: "Instruct: Given a query, retrieve relevant passages\nQuery: "
+          chunk_size_chars: 800
+          chunk_overlap_chars: 100
+          top_k: 30
+          cer_threshold: 0.05
+          ocr_max_retries: 2
+          ocr_parallel: 2
+          ocr_max_tokens: 4096
+
+      oracle:
+          start_job: false # Code mode: template seeds debate
+          template: ".aider_factory/markdown/internal/analyze_bugs.md"
+          full_document: false
+          pre_edit_debate:
+              enabled: true
+              job_debate_template: []
+
       toggles:
           sticky_context: false
           pair_programming: false
@@ -111,11 +137,24 @@ phases:
           run_job_two: false # Skip drafting since we pre-create the passing test
           iterate_test: true # Run test-fix loop inside Rocker Docker
           auto_test: false
-          run_ocr_rag: true # Ingest fut_aac.R into LanceDB
-          vectordb_overwrite: true
-      oracle_toggles:
-          debate_loops: 2
-          debate_rounds: 1
+
+      validation:
+          enabled: false
+          validation_tag: "evidence"
+          region_threshold: 0.60
+          region_margin: 2
+          region_paragraphs: 0
+          region_top_k: 5
+          validation_loops: 2
+          redo_oracle_job: false
+          verify_all_claims: false
+          entail_threshold: 0.5
+
+      escalation_debate:
+          loops: 2
+          rounds: 1
+          pass_history: false
+
       models:
           architect_agent: "gemini/gemini-3.1-pro-preview"
           editor_agent: "gemini/gemini-2.5-flash"
@@ -123,6 +162,7 @@ phases:
           editor_agent_test_fallback: "gemini/gemini-2.5-flash"
           rag_agent: "gemini/gemini-3.5-flash"
           ocr_agent: "gemini/gemini-2.5-flash"
+
       files:
           target_files:
               - ".aider_factory/tests/aider_factory_tests/end-to-end/fut_aac.R"
@@ -131,6 +171,7 @@ phases:
               - "tests/testthat/test-unit-fut_aac.R" # Write tests where rocker container can find them
           context_files_job: []
           context_files_test: []
+
       plans:
           job_one_plan: "markdown/templates/implement.md"
           job_two_plan: "markdown/templates/general.md"

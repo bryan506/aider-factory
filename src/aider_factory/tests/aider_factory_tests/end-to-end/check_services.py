@@ -35,7 +35,31 @@ except Exception as e:
     print(f"  ❌ Embedding Server is OFFLINE or unreachable: {e}", file=sys.stderr)
     sys.exit(1)
 
-# 2. Check MiniCheck Entailment Verifier
+# 2. Check SearXNG Meta-Search Engine
+searxng_url = "http://localhost:8088/search?q=Nighthawk+SmartNIC&format=json"
+print(f"\nSending probe to SearXNG Server: {searxng_url} ...")
+try:
+    req = urllib.request.Request(
+        searxng_url,
+        headers={"User-Agent": "Mozilla/5.0 (AI-Factory/1.0)"},
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        res_data = json.loads(response.read().decode("utf-8"))
+        if "results" in res_data:
+            results_count = len(res_data["results"])
+            print(f"  ✅ SearXNG Server is ONLINE. Returned {results_count} search results.")
+        else:
+            print(
+                f"  ❌ SearXNG Server returned unexpected response (missing 'results'): {res_data}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+except Exception as e:
+    print(f"  ❌ SearXNG Server is OFFLINE or unreachable on port 8088: {e}", file=sys.stderr)
+    sys.exit(1)
+
+# 3. Check MiniCheck Entailment Verifier
 minicheck_url = "http://192.168.100.1:8090/v1/chat/completions"
 minicheck_payload = {
     "model": "openai/minicheck-flan-t5-large",

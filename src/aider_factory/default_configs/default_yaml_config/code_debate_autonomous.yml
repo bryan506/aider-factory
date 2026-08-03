@@ -6,24 +6,25 @@ test_runner: "pytest {file}"
 test_naming_and_path: "tests/test_{stem}.py"
 loop_aider_test: 3
 
-# RAG embedding (sentence-transformers runs locally — no endpoint needed)
-rag:
-    collection_name: "project_docs"
-    overwrite: false                           # true = rebuild vector store from scratch
-    embed_model: "BAAI/bge-m3"
-    embed_backend: "sentence-transformers"     # local embedding; no embed_api_base required
-    query_prefix: "Instruct: Given a coding query, retrieve relevant passages\nQuery: "
-    chunk_size_chars: 800
-    chunk_overlap_chars: 100
-    top_k: 30
-    retrieval_mode: top_k
-
 # Uncomment for local model endpoints (not needed for gemini/ prefixes)
 # endpoints:
 #     architect_api_base: "http://localhost:8080/v1"
 #     editor_ollama_api: "http://localhost:8080/v1"
 #     editor_test_ollama_api: "http://localhost:8080/v1"
 #     rag_agent_api: "http://localhost:8080/v1"
+
+models:
+    architect_agent: "gemini/gemini-2.5-flash"
+    editor_agent: "gemini/gemini-2.5-flash"
+    editor_agent_test: "gemini/gemini-2.5-flash"
+    editor_agent_test_fallback: "gemini/gemini-2.5-flash"
+    rag_agent: "gemini/gemini-2.5-flash"
+    embed_model: "BAAI/bge-m3"
+
+plans:
+    job_one_plan: "markdown/templates/implement.md"
+    job_two_plan: "markdown/templates/testing.md"
+    iterate_plan: "markdown/templates/testing_unit_iterate.md"
 
 phases:
     # Phase 0: architect + oracle debate to build an implementation strategy.
@@ -34,38 +35,68 @@ phases:
     # job_two and iterate_test are off — this phase only builds the strategy document.
     - name: "Strategy — Debate and Plan"
       enabled: true
-      batch: true
-      oracle:
-          # Create this template with your problem-specific debate instructions.
-          # Architect analyzes the problem, consults the oracle for evidence, and
-          # produces a strategy. Must end with: PROPOSAL: <one-line summary>
-          job_debate_template: ".aider_factory/markdown/templates/strategy_debate.md"
-          template: ".aider_factory/markdown/internal/analyze_bugs.md"
-          start_job: false                     # CODE mode
-          architect_oracle_chat: true          # debate before job_one
-      vector_store:
+
+      rag:
           collection_name: "project_docs"
+          batch: true
+          retrieval_mode: top_k
+          run_ocr_rag: false                   # true on first run to ingest code/docs
+          vectordb_overwrite: false
+          ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
+          query_prefix: "Instruct: Given a coding query, retrieve relevant passages\nQuery: "
+          chunk_size_chars: 800
+          chunk_overlap_chars: 100
+          top_k: 30
+          cer_threshold: 0.05
+          ocr_max_retries: 2
+          ocr_parallel: 1
+          ocr_max_tokens: 4096
+          code_chunk_size: 2000
+          working_repo: ""
+          code_exts: null
+          text_doc_exts: null
+          ignore: null
+
+      oracle:
+          start_job: false                     # CODE mode
+          template: ".aider_factory/markdown/internal/analyze_bugs.md"
+          full_document: false
+          pre_edit_debate:
+              enabled: true                    # debate before job_one
+              job_debate_template: ".aider_factory/markdown/templates/strategy_debate.md"
+
       toggles:
+          pair_programming: false
           run_job_one: true                    # verdict feeds job_one, which writes to target
           run_job_two: false                   # no tests for the strategy document
           iterate_test: false                  # no test loop for strategy
-          pair_programming: false
+          auto_test: false
           sticky_context: true                 # strategy_template.md carries to Phase 1
-          run_ocr_rag: false                   # true on first run to ingest code/docs
-          vectordb_overwrite: false
-      oracle_toggles:
-          debate_loops: 4                      # max architect/oracle turns
-          debate_rounds: 2                     # full debate cycles
-          pass_round_history: true             # persist context across rounds
-      models:
-          architect_agent: "gemini/gemini-2.5-flash"
-          editor_agent: "gemini/gemini-2.5-flash"
-          rag_agent: "gemini/gemini-2.5-flash"
+
+      validation:
+          enabled: false
+          validation_tag: "evidence"
+          region_threshold: 0.60
+          region_margin: 2
+          region_paragraphs: 0
+          region_top_k: 5
+          validation_loops: 3
+          redo_oracle_job: false
+          verify_all_claims: false
+          entail_threshold: 0.5
+
+      escalation_debate:
+          loops: 4                             # max architect/oracle turns
+          rounds: 2                            # full debate cycles
+          pass_history: true                   # persist context across rounds
+
       files:
           target_files:
               - ".aider_factory/markdown/oracle_pre_plan/strategy_template.md"
-      plans:
-          job_one_plan: "markdown/templates/general.md"
+          extra_editable_files: []
+          test_files: []
+          context_files_job: []
+          context_files_test: []
 
     # Phase 1: implement from the strategy with pre-edit debates and escalation.
     # sticky_context carries strategy_template.md as read context for all jobs.
@@ -75,14 +106,36 @@ phases:
     #   3. Post-iterate escalation (debate_loops > 0) — diagnose test failures
     - name: "Implementation — Debate and Build"
       enabled: true
-      batch: true
-      oracle:
-          job_debate_template: ".aider_factory/markdown/templates/strategy_debate.md"
-          template: ".aider_factory/markdown/internal/analyze_bugs.md"
-          start_job: false
-          architect_oracle_chat: true          # debates before job_one AND job_two
-      vector_store:
+
+      rag:
           collection_name: "project_docs"
+          batch: true
+          retrieval_mode: top_k
+          run_ocr_rag: false                   # already ingested in Phase 0
+          vectordb_overwrite: false
+          ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
+          query_prefix: "Instruct: Given a coding query, retrieve relevant passages\nQuery: "
+          chunk_size_chars: 800
+          chunk_overlap_chars: 100
+          top_k: 30
+          cer_threshold: 0.05
+          ocr_max_retries: 2
+          ocr_parallel: 1
+          ocr_max_tokens: 4096
+          code_chunk_size: 2000
+          working_repo: ""
+          code_exts: null
+          text_doc_exts: null
+          ignore: null
+
+      oracle:
+          start_job: false
+          template: ".aider_factory/markdown/internal/analyze_bugs.md"
+          full_document: false
+          pre_edit_debate:
+              enabled: true                    # debates before job_one AND job_two
+              job_debate_template: ".aider_factory/markdown/templates/strategy_debate.md"
+
       toggles:
           run_job_one: true
           run_job_two: true
@@ -90,18 +143,24 @@ phases:
           auto_test: false                     # architect every attempt
           pair_programming: false
           sticky_context: true                 # carries strategy from Phase 0
-          run_ocr_rag: false                   # already ingested in Phase 0
-          vectordb_overwrite: false
-      oracle_toggles:
-          debate_loops: 4                      # pre-job + escalation debate turns
-          debate_rounds: 2                     # escalation cycles on test failure
-          pass_round_history: true
-      models:
-          architect_agent: "gemini/gemini-2.5-flash"
-          editor_agent: "gemini/gemini-2.5-flash"
-          editor_agent_test: "gemini/gemini-2.5-flash"
-          editor_agent_test_fallback: "gemini/gemini-2.5-flash"
-          rag_agent: "gemini/gemini-2.5-flash"
+
+      validation:
+          enabled: false
+          validation_tag: "evidence"
+          region_threshold: 0.60
+          region_margin: 2
+          region_paragraphs: 0
+          region_top_k: 5
+          validation_loops: 3
+          redo_oracle_job: false
+          verify_all_claims: false
+          entail_threshold: 0.5
+
+      escalation_debate:
+          loops: 4                             # pre-job + escalation debate turns
+          rounds: 2                            # escalation cycles on test failure
+          pass_history: true
+
       files:
           target_files:
               - "src/my_module.py"
@@ -113,8 +172,4 @@ phases:
               - "src/utils.py"
           context_files_test:
               - "src/utils.py"
-      plans:
-          job_one_plan: "markdown/templates/implement.md"
-          job_two_plan: "markdown/templates/testing.md"
-          iterate_plan: "markdown/templates/testing_unit_iterate.md"
 

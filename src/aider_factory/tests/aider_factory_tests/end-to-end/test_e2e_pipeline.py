@@ -13,9 +13,7 @@ print("==================================================")
 
 # 1. Path Resolution
 script_dir = os.path.dirname(os.path.abspath(__file__))
-project_dir = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.dirname(script_dir)))
-)
+project_dir = os.path.abspath(os.path.join(script_dir, "../../../../.."))
 
 academic_config_path = os.path.join(script_dir, "env_e2e_academic.yml")
 code_config_path = os.path.join(script_dir, "env_e2e_code.yml")
@@ -26,12 +24,14 @@ academic_collection = "e2e_golden_smoke"
 academic_job_dir = os.path.join(
     project_dir, ".aider_factory", "markdown", "lanceDB", academic_collection
 )
-academic_output_md = os.path.join(script_dir, "January-2026-FX-Report.md")
+academic_output_md = os.path.join(
+    project_dir, ".aider_factory", "tests", "aider_factory_tests", "end-to-end", "January-2026-FX-Report.md"
+)
 validation_report = os.path.join(
-    script_dir, "validations", "January-2026-FX-Report.gate.md"
+    project_dir, ".aider_factory", "logs", "validations", "January-2026-FX-Report.gate.md"
 )
 validation_ledger = os.path.join(
-    script_dir, "validations", "January-2026-FX-Report.ledger.json"
+    project_dir, ".aider_factory", "logs", "validations", "January-2026-FX-Report.ledger.json"
 )
 
 # Code paths
@@ -48,8 +48,8 @@ print("[E2E] Cleaning up previous run artifacts...")
 for d in (
     academic_job_dir,
     code_job_dir,
-    os.path.join(script_dir, "validations"),
-    os.path.join(script_dir, "deliberations"),
+    os.path.join(script_dir, ".aider_factory", "logs", "validations"),
+    os.path.join(script_dir, ".aider_factory", "logs", "debates"),
 ):
     if os.path.exists(d):
         shutil.rmtree(d)
@@ -65,6 +65,11 @@ dest_pdf = os.path.join(academic_job_dir, "January-2026-FX-Report.pdf")
 print(f"[E2E] Copying source PDF: {source_pdf} -> {dest_pdf}")
 shutil.copy2(source_pdf, dest_pdf)
 
+# Copy validation scripts to .aider_factory/tests/aider_factory_tests/end-to-end/ so the pipeline finds them
+dest_val_dir = os.path.join(project_dir, ".aider_factory", "tests", "aider_factory_tests", "end-to-end")
+os.makedirs(dest_val_dir, exist_ok=True)
+shutil.copy2(os.path.join(script_dir, "validations_context_check.sh"), os.path.join(dest_val_dir, "validations_context_check.sh"))
+
 # Bootstrap Code Collection & Copy Source Code
 code_repo_dir = os.path.join(code_job_dir, "BaseFeatures", "R")
 print(f"[E2E] Bootstrapping code collection directory: {code_repo_dir}")
@@ -77,7 +82,7 @@ shutil.copy2(source_code, dest_code)
 # 4. Execute Phase 1: Academic / Literary Review
 print("\n[E2E] Execute Phase 1: Academic Pathway...")
 python_bin = sys.executable
-workflow_script = os.path.join(project_dir, ".aider_factory", "python", "run_workflow.py")
+workflow_script = os.path.join(project_dir, "src", "aider_factory", "python", "run_workflow.py")
 
 try:
     res = subprocess.run(

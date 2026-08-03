@@ -977,19 +977,30 @@ def _from_config(yaml_path):
     with open(yaml_path, "r") as f:
         cfg = yaml.safe_load(f) or {}
     project_dir = str(cfg.get("working_directory", os.getcwd()))
-    rag = cfg.get("rag", {}) or {}
+    endpoints = cfg.get("endpoints", {}) or {}
+    models_cfg = cfg.get("models", {}) or {}
+    
+    phases = cfg.get("phases", []) or []
+    active_phase = next((ph for ph in phases if ph.get("enabled")), {}) if phases else {}
+    phase_rag = active_phase.get("rag", {}) or {}
+    collection_name = phase_rag.get("collection_name") or "knowledge"
+    embed_model = models_cfg.get("embed_model", "BAAI/bge-m3")
+    embed_backend = "openai" if "embedding" in embed_model.lower() else "sentence-transformers"
+    
     return ingest(
         context_root=os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB"),
-        collection_name=rag.get("collection_name", "knowledge"),
-        embed_model=rag.get("embed_model", "BAAI/bge-m3"),
-        ocr_api_base=cfg.get("ocr_api_base"),
-        ocr_agent=rag.get("ocr_agent", ""),
-        ocr_prompt=rag.get("ocr_prompt", DEFAULT_OCR_PROMPT),
-        overwrite=bool(rag.get("overwrite", False)),
-        cer_threshold=float(rag.get("cer_threshold", 0.05)),
-        ocr_max_retries=int(rag.get("ocr_max_retries", 2)),
-        ocr_parallel=int(rag.get("ocr_parallel", 1)),
-        batch=bool(rag.get("batch", True)),
+        collection_name=collection_name,
+        embed_model=embed_model,
+        embed_backend=embed_backend,
+        embed_api_base=endpoints.get("embed_api_base"),
+        ocr_api_base=endpoints.get("ocr_api_base"),
+        ocr_agent=models_cfg.get("ocr_agent", ""),
+        ocr_prompt=DEFAULT_OCR_PROMPT,
+        overwrite=False,
+        cer_threshold=0.05,
+        ocr_max_retries=2,
+        ocr_parallel=1,
+        batch=True,
     )
 
 

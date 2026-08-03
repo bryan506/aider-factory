@@ -32,6 +32,17 @@ def _expand_file_list(file_patterns, base_dir):
     return expanded
 
 
+# Ensure user project space and bash wrappers are initialized and up-to-date
+try:
+    # Add parent directory of python/ to path to allow importing cli
+    _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _parent_dir not in sys.path:
+        sys.path.insert(0, _parent_dir)
+    from cli import init_user_project
+    init_user_project()
+except Exception as e:
+    print(f"⚠️ [run_workflow] Auto-initialization warning: {e}", file=sys.stderr)
+
 # Defaults to .env.yml config file
 if len(sys.argv) > 1:
     yaml_path = sys.argv[1]
@@ -81,8 +92,10 @@ factory: AiderFactory = AiderFactory(project_dir=str(project_directory))
 file_last_tasks = {}
 completed_files = []
 
-# Parse Endpoints
+# Parse Endpoints and Models
 endpoints = config.get("endpoints", {})
+models_cfg = config.get("models", {})
+
 global_architect_api_base = endpoints.get("architect_api_base")
 global_editor_api = endpoints.get("editor_ollama_api")
 global_editor_test_api = endpoints.get("editor_test_ollama_api")
@@ -90,41 +103,37 @@ global_rag_agent_api = endpoints.get("rag_agent_api")
 global_grounding_api = endpoints.get("grounding_agent_api")
 
 # --- RAG / Oracle globals: infrastructure + DEFAULTS ---
-# Per-phase blocks (toggles.run_ocr_rag, vector_store.collection_name, models.ocr_agent,
-# ocr_prompt) override these so RAG/OCR is a movable DAG node.
 DEFAULT_OCR_PROMPT = (
     "Extract the text, tables, and mathematical formulas from this page into "
     "clean Markdown. Preserve all structural integrity."
 )
-ocr_api_base = config.get("ocr_api_base")
-rag_cfg = config.get("rag", {}) or {}
+ocr_api_base = endpoints.get("ocr_api_base")
 rag_context_root = os.path.join(
     str(project_directory), ".aider_factory", "markdown", "lanceDB"
 )
-rag_embed_model = rag_cfg.get("embed_model", "BAAI/bge-m3")
-rag_embed_backend = rag_cfg.get("embed_backend", "sentence-transformers")
-rag_embed_api_base = rag_cfg.get("embed_api_base")
-rag_query_prefix = rag_cfg.get("query_prefix", "")
-rag_chunk_size = int(rag_cfg.get("chunk_size_chars", 800))
-rag_chunk_overlap = int(rag_cfg.get("chunk_overlap_chars", 100))
-rag_top_k = str(rag_cfg.get("top_k", 5))
-rag_default_collection = rag_cfg.get("collection_name", "knowledge")
-rag_default_overwrite = bool(rag_cfg.get("overwrite", False))
-rag_default_ocr_agent = rag_cfg.get("ocr_agent", "")
-rag_default_ocr_prompt = rag_cfg.get("ocr_prompt", DEFAULT_OCR_PROMPT)
-rag_cer_threshold = float(rag_cfg.get("cer_threshold", 0.05))
-rag_ocr_max_retries = int(rag_cfg.get("ocr_max_retries", 2))
-rag_ocr_parallel = int(rag_cfg.get("ocr_parallel", 1))
-rag_ocr_max_tokens = int(rag_cfg.get("ocr_max_tokens", 4096))
+rag_embed_model = models_cfg.get("embed_model", "BAAI/bge-m3")
+rag_embed_backend = "openai" if "embedding" in rag_embed_model.lower() else "sentence-transformers"
+rag_embed_api_base = endpoints.get("embed_api_base")
+rag_query_prefix = "Query: "
+rag_chunk_size = 800
+rag_chunk_overlap = 100
+rag_top_k = "5"
+rag_default_collection = ""
+rag_default_overwrite = False
+rag_default_ocr_agent = models_cfg.get("ocr_agent", "")
+rag_default_ocr_prompt = DEFAULT_OCR_PROMPT
+rag_cer_threshold = 0.05
+rag_ocr_max_retries = 2
+rag_ocr_parallel = 1
+rag_ocr_max_tokens = 4096
+
 # Write embed config into os.environ so in-process validator._region() calls
-# get the correct backend (rag_env is only applied to subprocesses).
+# get the correct backend
 os.environ["ORACLE_EMBED_MODEL"] = rag_embed_model
 os.environ["ORACLE_EMBED_BACKEND"] = rag_embed_backend
 if rag_embed_api_base:
     os.environ["ORACLE_EMBED_API_BASE"] = rag_embed_api_base
-# Oracle retrieval strategy (top_k | no_retrieve | full_document). Global default,
-# overridable per phase via `retrieval_mode`. top_k is the pair-programming-safe default.
-rag_default_retrieval = rag_cfg.get("retrieval_mode", "top_k")
+rag_default_retrieval = "top_k"
 
 # --- Pipeline display colors (non-Aider output) ---
 # Parsed once at startup; injected as env vars so orchestrate.py and oracle_agent.py
@@ -199,7 +208,6 @@ def resolve_template_path(path_val):
         return pkg_flat
 
     return local_exact
-    return local_path
 
 
 conventions_path = resolve_template_path(".aider_factory/markdown/CONVENTIONS.md")
@@ -219,55 +227,36 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
     sticky_context = toggles.get("sticky_context", True)
     auto_test = toggles.get("auto_test", False)
     pair_programming = toggles.get("pair_programming", False)
-    phase_run_ocr_rag = toggles.get("run_ocr_rag", False)
-    phase_overwrite = toggles.get("vectordb_overwrite", rag_default_overwrite)
 
-    # Side-agent output validation for the literary pipeline. Each node below is an
-    # independent, composable DAG step (generate / heal / autofix+debate), gated by the
-    # established knobs in oracle_toggles. No parallel `deliberate:` block.
-    oracle_toggles = phase.get("oracle_toggles", {}) or {}
-    post_validate = oracle_toggles.get("post_validate", False)
-    validation_tag = oracle_toggles.get("validation_tag", "evidence")
-    # When false, reuse an existing oracle output instead of re-running the programmatic
-    # oracle job (lets you test the validation/resolve chain on a fixed review without
-    # paying for regeneration).
-    redo_oracle_job = oracle_toggles.get("redo_oracle_job", True)
-    # Evidence-resolution chain knob (deterministic-first: autofix BEFORE any agent):
-    #   unset / None -> resolve OFF (no autofix, no debate)
-    #   0            -> autofix only (deterministic ellipsis-stitch + tag promotion;
-    #                   residuals stay [evidence] for a human)
-    #   N > 0        -> autofix + debate(N) + apply + finalize
-    # `debate_loops` lives in oracle_toggles, exactly like post_validate — heal and the
-    # resolve chain are fully independent (any combination of the two is valid).
-    _dl_raw = oracle_toggles.get("debate_loops", None)
+    # Phase-level RAG settings
+    rag_phase_cfg = phase.get("rag", {}) or {}
+    phase_run_ocr_rag = rag_phase_cfg.get("run_ocr_rag", False)
+    phase_overwrite = rag_phase_cfg.get("vectordb_overwrite", rag_default_overwrite)
+    phase_batch = bool(rag_phase_cfg.get("batch", True))
+    phase_retrieval_mode = rag_phase_cfg.get("retrieval_mode", rag_default_retrieval)
+
+    # Validation settings
+    validation_cfg = phase.get("validation", {}) or {}
+    post_validate = validation_cfg.get("enabled", False)
+    validation_tag = validation_cfg.get("validation_tag", "evidence")
+    redo_oracle_job = validation_cfg.get("redo_oracle_job", True)
+    validation_loops = int(validation_cfg.get("validation_loops", global_max_aider_loops))
+    region_threshold = float(validation_cfg.get("region_threshold", 0.60))
+    region_margin = int(validation_cfg.get("region_margin", 2))
+    region_paragraphs = int(validation_cfg.get("region_paragraphs", 0))
+    region_top_k = int(validation_cfg.get("region_top_k", 5))
+    verify_all_claims = bool(validation_cfg.get("verify_all_claims", False))
+    entail_threshold = float(validation_cfg.get("entail_threshold", 0.5))
+
+    # Escalation Debate settings
+    escalation_cfg = phase.get("escalation_debate", {}) or {}
+    _dl_raw = escalation_cfg.get("loops", None)
     debate_loops = int(_dl_raw) if _dl_raw is not None else None
-    debate_rounds = int(oracle_toggles.get("debate_rounds", 1))
-    pass_round_history = bool(oracle_toggles.get("pass_round_history", False))
+    debate_rounds = int(escalation_cfg.get("rounds", 1))
+    pass_round_history = bool(escalation_cfg.get("pass_history", False))
     resolve_evidence = debate_loops is not None
-    # Per-phase override of the iterate loop ceiling (defaults to global loop_aider_test).
-    validation_loops = int(
-        oracle_toggles.get("validation_loops", global_max_aider_loops)
-    )
-    # Region grounding (semantic) of the REVIEW passage around a failing quote against
-    # the paper's LanceDB table. Annotation only: every tripped quote still goes to the
-    # agent; the score informs the report and the human.
-    region_threshold = float(oracle_toggles.get("region_threshold", 0.60))
-    region_margin = int(oracle_toggles.get("region_margin", 2))
-    region_paragraphs = int(oracle_toggles.get("region_paragraphs", 0))
-    region_top_k = int(oracle_toggles.get("region_top_k", 5))
-    # Entailment-grounded claim verification. Retrieval stays cosine/bge; the CLAIM decision
-    # is entailment when models.grounding_agent is set (cosine fallback otherwise).
-    #   verify_all_claims=false (b): entailment only on failing/candidate claims (fast path).
-    #   verify_all_claims=true  (c): entailment on EVERY claim; grounded-but-drifted prose is
-    #                                annotated in the report (escalation is a later build).
-    verify_all_claims = bool(oracle_toggles.get("verify_all_claims", False))
-    entail_threshold = float(oracle_toggles.get("entail_threshold", 0.5))
 
-    # batch=True (default) -> one shared LanceDB table for the whole collection.
-    # batch=False          -> one isolated table per document (focused side-agent).
-    phase_batch = bool(phase.get("batch", True))
-    # oracle (optional): run the side-agent programmatically (no Aider) to fill
-    # a template from each document and write the result straight to disk.
+    # Programmatic side-agent and pre-edit debate configuration
     oracle_cfg = phase.get("oracle") or None
 
     if (
@@ -301,12 +290,8 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
         None if "gemini/" in EDITOR_AGENT_TEST else global_editor_test_api
     )
 
-    # Per-phase RAG collection: this phase's vector_store, else the global default.
-    vec_store = phase.get("vector_store")
-    if vec_store is not None and "collection_name" in vec_store:
-        phase_collection = vec_store.get("collection_name")
-    else:
-        phase_collection = rag_default_collection
+    # Per-phase RAG collection
+    phase_collection = rag_phase_cfg.get("collection_name", rag_default_collection)
 
     # Zero-RAG mode bypass: if collection_name is explicitly [], "", or None
     if not phase_collection or phase_collection == []:
@@ -331,7 +316,7 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
         else global_grounding_api
     )
     # Per-phase retrieval strategy, else the global default.
-    phase_retrieval_mode = phase.get("retrieval_mode", rag_default_retrieval)
+    phase_retrieval_mode = rag_phase_cfg.get("retrieval_mode", rag_default_retrieval)
     rag_env = {
         "ORACLE_CONFIG_FILE": str(yaml_path),
         "ORACLE_PHASE_INDEX": str(phase_idx),
@@ -439,16 +424,16 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
         )
         sys.exit(1)
 
-    rag_code_chunk = int(rag_cfg.get("code_chunk_size", 2000))
+    rag_code_chunk = int(rag_phase_cfg.get("code_chunk_size", 2000))
     # Auto-derive from working_directory if not explicitly set. Active target,
     # editable, and context files must always be excluded from the vector store
     # to prevent stale code from polluting oracle retrieval.
-    rag_working_repo = rag_cfg.get("working_repo") or os.path.basename(
+    rag_working_repo = rag_phase_cfg.get("working_repo") or os.path.basename(
         str(project_directory).rstrip("/")
     )
-    rag_code_exts = rag_cfg.get("code_exts")
-    rag_text_doc_exts = rag_cfg.get("text_doc_exts")
-    rag_ignore = rag_cfg.get("ignore")
+    rag_code_exts = rag_phase_cfg.get("code_exts")
+    rag_text_doc_exts = rag_phase_cfg.get("text_doc_exts")
+    rag_ignore = rag_phase_cfg.get("ignore")
 
     _active = (
         (target_files or [])
@@ -572,13 +557,10 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
             ingest_attached = True
 
         # ---- mode discriminator ----
-        # Code mode when a code produce-job is requested (run_job_one/two), OR when the
-        # phase explicitly declares it via oracle.start_job:false. Otherwise it's
-        # the grounding/review pipeline. start_job defaults True so legacy review is
-        # unchanged; code mode NEVER runs generate, so oracle can't clobber a source.
         _oa = oracle_cfg or {}
         _start_job = bool(_oa.get("start_job", True))
-        architect_oracle_chat = bool(_oa.get("architect_oracle_chat", False))
+        pre_edit_cfg = _oa.get("pre_edit_debate", {}) or {}
+        architect_oracle_chat = bool(pre_edit_cfg.get("enabled", False))
 
         # A "grounding signal" means this phase intends the evidence-grounding/review path.
         grounding_signal = (
@@ -805,7 +787,7 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
                     )
 
                     _debate_template = resolve_template_path(
-                        _oa.get("job_debate_template")
+                        pre_edit_cfg.get("job_debate_template")
                     )
 
                     _debate_reads = (
@@ -919,7 +901,7 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
                         )
 
                         _debate_template = resolve_template_path(
-                            _oa.get("job_debate_template")
+                            pre_edit_cfg.get("job_debate_template")
                         )
 
                         _debate_reads = (

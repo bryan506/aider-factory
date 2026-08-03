@@ -7,8 +7,13 @@ Covers:
   - Backward compat: sentence-transformers path unchanged
   - Batch iteration works on both paths
 """
-import sys, os, types
-sys.path.insert(0, ".aider_factory/python")
+import sys
+import os
+import types
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+python_module_dir = os.path.abspath(os.path.join(script_dir, "../../python"))
+sys.path.insert(0, python_module_dir)
 
 from rag_manager import embed_texts
 
@@ -133,6 +138,8 @@ def test_empty_input():
 
 
 # ---- Test 5: sentence-transformers path unchanged ----
+
+from unittest.mock import patch
 
 def test_sentence_transformers_unchanged():
     """sentence-transformers backend still works regardless of api_base."""

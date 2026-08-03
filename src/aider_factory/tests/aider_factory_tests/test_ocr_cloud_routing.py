@@ -9,8 +9,14 @@ Covers:
   - Backward compat: existing mock_ocr pattern still works
   - Integration: ingest cfg routes correctly for cloud and local
 """
-import sys, os, types, shutil
-sys.path.insert(0, ".aider_factory/python")
+import sys
+import os
+import types
+import shutil
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+python_module_dir = os.path.abspath(os.path.join(script_dir, "../../python"))
+sys.path.insert(0, python_module_dir)
 
 import rag_manager
 from rag_manager import _ocr_image

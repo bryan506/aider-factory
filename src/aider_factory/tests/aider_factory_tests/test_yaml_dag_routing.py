@@ -80,6 +80,11 @@ try:
         "phases": [{
             "name": "Phase1",
             "enabled": True,
+            "rag": {
+                "collection_name": "",
+                "batch": True,
+                "run_ocr_rag": False
+            },
             "toggles": {"run_job_one": False, "run_job_two": True},
             "models": {"architect_agent": "mock", "editor_agent": "mock", "editor_agent_test": "mock"},
             "files": {
@@ -97,6 +102,11 @@ try:
         "phases": [{
             "name": "Phase2",
             "enabled": True,
+            "rag": {
+                "collection_name": "",
+                "batch": True,
+                "run_ocr_rag": False
+            },
             "toggles": {"run_job_one": False, "run_job_two": True},
             "models": {"architect_agent": "mock", "editor_agent": "mock", "editor_agent_test": "mock"},
             "files": {
@@ -115,6 +125,11 @@ try:
         "phases": [{
             "name": "Phase3",
             "enabled": True,
+            "rag": {
+                "collection_name": "",
+                "batch": True,
+                "run_ocr_rag": False
+            },
             "toggles": {"run_job_one": False, "run_job_two": True},
             "models": {"architect_agent": "mock", "editor_agent": "mock", "editor_agent_test": "mock"},
             "files": {
@@ -133,6 +148,11 @@ try:
         "phases": [{
             "name": "Phase4",
             "enabled": True,
+            "rag": {
+                "collection_name": "",
+                "batch": True,
+                "run_ocr_rag": False
+            },
             "toggles": {"run_job_one": False, "run_job_two": True},
             "models": {"architect_agent": "mock", "editor_agent": "mock", "editor_agent_test": "mock"},
             "files": {

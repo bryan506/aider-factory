@@ -2,7 +2,10 @@ import os
 import sys
 import shutil
 
-sys.path.insert(0, ".aider_factory/python")
+script_dir = os.path.dirname(os.path.abspath(__file__))
+python_module_dir = os.path.abspath(os.path.join(script_dir, "../../python"))
+sys.path.insert(0, python_module_dir)
+
 from oracle_agent import _retrieve
 
 base_dir = "temp/mock_rag_fuse"

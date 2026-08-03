@@ -924,7 +924,7 @@ def _resolve_active_collection(cfg):
     """Resolve collection name for maintenance commands (--add-file, --add-web, etc.).
 
     Explicit CLI --collection overrides take highest priority. Otherwise, reads the
-    phase or global collection_name from config, avoiding inherited per-doc table names.
+    phase collection_name from config, avoiding inherited per-doc table names.
     """
     if os.environ.get("ORACLE_EXPLICIT_COLLECTION") == "1" and os.environ.get("ORACLE_COLLECTION"):
         return os.environ.get("ORACLE_COLLECTION")
@@ -943,13 +943,9 @@ def _resolve_active_collection(cfg):
         if active_phase is None:
             active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
 
-        vec_store = active_phase.get("vector_store", {}) or {}
-        if isinstance(vec_store, dict) and vec_store.get("collection_name"):
-            return vec_store.get("collection_name")
-
-    rag_cfg = cfg.get("rag", {}) or {}
-    if rag_cfg.get("collection_name"):
-        return rag_cfg.get("collection_name")
+        rag_phase = active_phase.get("rag", {}) or {}
+        if isinstance(rag_phase, dict) and rag_phase.get("collection_name"):
+            return rag_phase.get("collection_name")
 
     return "knowledge"
 
@@ -984,7 +980,8 @@ def _add_maintenance(action, paths):
         print(f"[oracle] failed to load config: {e}", file=sys.stderr)
         return 1
 
-    rag_cfg = cfg.get("rag", {}) or {}
+    endpoints = cfg.get("endpoints", {}) or {}
+    models_cfg = cfg.get("models", {}) or {}
 
     # 3. Resolve active collection
     collection = _resolve_active_collection(cfg)
@@ -1044,15 +1041,51 @@ def _add_maintenance(action, paths):
             print(f"[oracle] Copying file {p} -> {dest_p}...", file=sys.stderr)
             shutil.copy2(p, dest_p)
 
-    # 6. Determine batch setting from active phase
+    # 6. Determine settings from active phase
     batch_setting = True
+    chunk_size = 800
+    chunk_overlap = 100
+    cer_thresh = 0.05
+    max_retries = 2
+    parallel = 1
+    
     phases = cfg.get("phases", [])
     if phases:
         active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
-        batch_setting = bool(active_phase.get("batch", True))
+        phase_rag = active_phase.get("rag", {}) or {}
+        phase_val = active_phase.get("validation", {}) or {}
+        batch_setting = bool(phase_rag.get("batch", True))
+        chunk_size = int(phase_rag.get("chunk_size_chars", 800))
+        chunk_overlap = int(phase_rag.get("chunk_overlap_chars", 100))
+        cer_thresh = float(phase_rag.get("cer_threshold", 0.05))
+        max_retries = int(phase_rag.get("ocr_max_retries", 2))
+        parallel = int(phase_rag.get("ocr_parallel", 1))
+
+    # Resolve embedding settings with proper fallbacks to rag blocks
+    global_rag = cfg.get("rag", {}) or {}
+    phase_rag = {}
+    if phases:
+        active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
+        phase_rag = active_phase.get("rag", {}) or {}
+
+    embed_model = (
+        phase_rag.get("embed_model")
+        or global_rag.get("embed_model")
+        or models_cfg.get("embed_model", "BAAI/bge-m3")
+    )
+    embed_backend = (
+        phase_rag.get("embed_backend")
+        or global_rag.get("embed_backend")
+        or ("openai" if "embedding" in embed_model.lower() else "sentence-transformers")
+    )
+    embed_api_base = (
+        phase_rag.get("embed_api_base")
+        or global_rag.get("embed_api_base")
+        or endpoints.get("embed_api_base")
+    )
 
     print(
-        f"[oracle] Running incremental ingestion (batch={batch_setting})...",
+        f"[oracle] Running incremental ingestion (batch={batch_setting}, model={embed_model}, backend={embed_backend})...",
         file=sys.stderr,
     )
 
@@ -1061,18 +1094,18 @@ def _add_maintenance(action, paths):
         success = rag_manager.ingest(
             context_root=context_root,
             collection_name=collection,
-            embed_model=rag_cfg.get("embed_model", "BAAI/bge-m3"),
-            embed_backend=rag_cfg.get("embed_backend", "sentence-transformers"),
-            embed_api_base=rag_cfg.get("embed_api_base"),
-            chunk_size_chars=int(rag_cfg.get("chunk_size_chars", 800)),
-            chunk_overlap_chars=int(rag_cfg.get("chunk_overlap_chars", 100)),
-            ocr_api_base=cfg.get("ocr_api_base"),
-            ocr_agent=rag_cfg.get("ocr_agent"),
-            ocr_prompt=rag_cfg.get("ocr_prompt", rag_manager.DEFAULT_OCR_PROMPT),
+            embed_model=embed_model,
+            embed_backend=embed_backend,
+            embed_api_base=embed_api_base,
+            chunk_size_chars=chunk_size,
+            chunk_overlap_chars=chunk_overlap,
+            ocr_api_base=endpoints.get("ocr_api_base"),
+            ocr_agent=models_cfg.get("ocr_agent"),
+            ocr_prompt=rag_manager.DEFAULT_OCR_PROMPT,
             overwrite=False,  # CRITICAL: incremental update!
-            cer_threshold=float(rag_cfg.get("cer_threshold", 0.05)),
-            ocr_max_retries=int(rag_cfg.get("ocr_max_retries", 2)),
-            ocr_parallel=int(rag_cfg.get("ocr_parallel", 1)),
+            cer_threshold=cer_thresh,
+            ocr_max_retries=max_retries,
+            ocr_parallel=parallel,
             batch=batch_setting,
         )
         if success:
@@ -1116,7 +1149,8 @@ def _add_web_maintenance(urls):
         print(f"[oracle] failed to load config: {e}", file=sys.stderr)
         return 1
 
-    rag_cfg = cfg.get("rag", {}) or {}
+    endpoints = cfg.get("endpoints", {}) or {}
+    models_cfg = cfg.get("models", {}) or {}
     collection = _resolve_active_collection(cfg)
     os.environ["ORACLE_COLLECTION"] = collection
 
@@ -1167,31 +1201,67 @@ def _add_web_maintenance(urls):
         return 1
 
     batch_setting = True
+    chunk_size = 800
+    chunk_overlap = 100
+    cer_thresh = 0.05
+    max_retries = 2
+    parallel = 1
+
     phases = cfg.get("phases", [])
     if phases:
         active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
-        batch_setting = bool(active_phase.get("batch", True))
+        phase_rag = active_phase.get("rag", {}) or {}
+        batch_setting = bool(phase_rag.get("batch", True))
+        chunk_size = int(phase_rag.get("chunk_size_chars", 800))
+        chunk_overlap = int(phase_rag.get("chunk_overlap_chars", 100))
+        cer_thresh = float(phase_rag.get("cer_threshold", 0.05))
+        max_retries = int(phase_rag.get("ocr_max_retries", 2))
+        parallel = int(phase_rag.get("ocr_parallel", 1))
+
+    # Resolve embedding settings with proper fallbacks to rag blocks
+    global_rag = cfg.get("rag", {}) or {}
+    phase_rag = {}
+    if phases:
+        active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
+        phase_rag = active_phase.get("rag", {}) or {}
+
+    embed_model = (
+        phase_rag.get("embed_model")
+        or global_rag.get("embed_model")
+        or models_cfg.get("embed_model", "BAAI/bge-m3")
+    )
+    embed_backend = (
+        phase_rag.get("embed_backend")
+        or global_rag.get("embed_backend")
+        or ("openai" if "embedding" in embed_model.lower() else "sentence-transformers")
+    )
+    embed_api_base = (
+        phase_rag.get("embed_api_base")
+        or global_rag.get("embed_api_base")
+        or endpoints.get("embed_api_base")
+    )
 
     print(
-        f"[oracle] Incremental LanceDB ingestion for collection '{collection}'...",
+        f"[oracle] Incremental LanceDB ingestion for collection '{collection}' (model={embed_model}, backend={embed_backend})...",
         file=sys.stderr,
     )
+
     try:
         success = rag_manager.ingest(
             context_root=context_root,
             collection_name=collection,
-            embed_model=rag_cfg.get("embed_model", "BAAI/bge-m3"),
-            embed_backend=rag_cfg.get("embed_backend", "sentence-transformers"),
-            embed_api_base=rag_cfg.get("embed_api_base"),
-            chunk_size_chars=int(rag_cfg.get("chunk_size_chars", 800)),
-            chunk_overlap_chars=int(rag_cfg.get("chunk_overlap_chars", 100)),
-            ocr_api_base=cfg.get("ocr_api_base"),
-            ocr_agent=rag_cfg.get("ocr_agent"),
-            ocr_prompt=rag_cfg.get("ocr_prompt", rag_manager.DEFAULT_OCR_PROMPT),
+            embed_model=embed_model,
+            embed_backend=embed_backend,
+            embed_api_base=embed_api_base,
+            chunk_size_chars=chunk_size,
+            chunk_overlap_chars=chunk_overlap,
+            ocr_api_base=endpoints.get("ocr_api_base"),
+            ocr_agent=models_cfg.get("ocr_agent"),
+            ocr_prompt=rag_manager.DEFAULT_OCR_PROMPT,
             overwrite=False,
-            cer_threshold=float(rag_cfg.get("cer_threshold", 0.05)),
-            ocr_max_retries=int(rag_cfg.get("ocr_max_retries", 2)),
-            ocr_parallel=int(rag_cfg.get("ocr_parallel", 1)),
+            cer_threshold=cer_thresh,
+            ocr_max_retries=max_retries,
+            ocr_parallel=parallel,
             batch=batch_setting,
         )
         if success:
@@ -1276,8 +1346,8 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
                     for f_pat in files.get(k, []) or []:
                         if f_pat and f_pat not in _reads:
                             _reads.append(f_pat)
-                _ot = phase.get("oracle_toggles", {})
-                _pass_round_history = bool(_ot.get("pass_round_history", False))
+                _ot = phase.get("escalation_debate", {}) or {}
+                _pass_round_history = bool(_ot.get("pass_history", False))
                 break
         except Exception:
             pass

@@ -74,6 +74,13 @@ search:
   formats:
     - html
     - json
+engines:
+  - name: wikidata
+    disabled: true  # Disable wikidata to prevent startup 403 suspension errors
+enabled_plugins:
+  - 'Hash plugin'
+  - 'Self-contained tracker'
+  # Omitting 'Limiter' plugin disables bot detection / rate limiting
 """
         with open(searxng_settings_file, "w", encoding="utf-8") as f:
             f.write(settings_content)
@@ -143,15 +150,25 @@ def ensure_bash_wrappers(project_aider_factory_dir):
     os.makedirs(bash_dir, exist_ok=True)
 
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
-    templates_dir = os.path.join(pkg_dir, "default_configs", "bash")
+    python_dir = os.path.join(pkg_dir, "python")
+    
+    # Determine the best python interpreter to use
+    aider_py = sys.executable or "python3"
 
-    for script in ["factory", "oracle", "validate", "research"]:
+    # Define wrappers dynamically to point to the actual package scripts
+    wrappers = {
+        "factory": f'#!/bin/bash\nexec "{aider_py}" "{os.path.join(python_dir, "run_workflow.py")}" "$@"\n',
+        "oracle": f'#!/bin/bash\nexec "{aider_py}" "{os.path.join(python_dir, "oracle_agent.py")}" "$@"\n',
+        "validate": f'#!/bin/bash\nexec "{aider_py}" "{os.path.join(python_dir, "validator.py")}" "$@"\n',
+        "research": f'#!/bin/bash\nexec "{aider_py}" "{os.path.join(python_dir, "research_agent.py")}" "$@"\n',
+    }
+
+    for script, content in wrappers.items():
         target_path = os.path.join(bash_dir, script)
-        if not os.path.exists(target_path):
-            src_path = os.path.join(templates_dir, script)
-            if os.path.exists(src_path):
-                shutil.copy(src_path, target_path)
-                os.chmod(target_path, 0o755)
+        # Always overwrite or update wrappers to ensure they point to the correct active package path
+        with open(target_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.chmod(target_path, 0o755)
 
 
 def init_user_project():
@@ -168,6 +185,21 @@ def init_user_project():
     ensure_bash_wrappers(local_aider_factory_dir)
     ensure_searxng_service()
 
+    # Ensure Playwright browser binaries are installed automatically if playwright is present
+    try:
+        import playwright
+        # Check if the browser cache directory exists and is populated
+        playwright_cache = os.path.expanduser("~/.cache/ms-playwright")
+        if not os.path.exists(playwright_cache) or not os.listdir(playwright_cache):
+            print("📦 [aider-factory] Provisioning Playwright browser binaries...")
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                check=False,
+                capture_output=True,
+            )
+    except ImportError:
+        pass  # Playwright not installed in this environment; skip
+
     local_env_yaml = os.path.join(local_aider_factory_dir, ".env.yml")
     local_aider_ignore = os.path.join(cwd, ".aiderignore")
     local_aider_conf = os.path.join(local_aider_factory_dir, ".aider.conf.yml")
@@ -181,7 +213,33 @@ def init_user_project():
         print(
             f"📦 First run detected! Initializing default '.env.yml' in {local_aider_factory_dir}..."
         )
-        shutil.copy(os.path.join(default_configs_dir, "env.yml"), local_env_yaml)
+        import getpass
+        username = getpass.getuser()
+        with open(os.path.join(default_configs_dir, "env.yml"), "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        # Replace hardcoded home directory and username dynamically
+        content = content.replace("/home/bryanr/wf/BaseFeatures", cwd)
+        content = content.replace("bryanr", username)
+        
+        with open(local_env_yaml, "w", encoding="utf-8") as f:
+            f.write(content)
+    else:
+        # If the file exists but was initialized with the default template's hardcoded path, patch it
+        import getpass
+        username = getpass.getuser()
+        if username != "bryanr":
+            try:
+                with open(local_env_yaml, "r", encoding="utf-8") as f:
+                    content = f.read()
+                if "/home/bryanr/wf/BaseFeatures" in content:
+                    print(f"📦 Patching hardcoded template paths in {local_env_yaml}...")
+                    content = content.replace("/home/bryanr/wf/BaseFeatures", cwd)
+                    content = content.replace("bryanr", username)
+                    with open(local_env_yaml, "w", encoding="utf-8") as f:
+                        f.write(content)
+            except Exception:
+                pass
 
     # 2. Create .aiderignore at root if missing
     if not os.path.exists(local_aider_ignore):

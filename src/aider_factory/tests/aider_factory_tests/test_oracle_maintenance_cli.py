@@ -213,13 +213,35 @@ def test_add_operations():
     orig_rag_root = getattr(oracle_agent, "rag_context_root", None)
     oracle_agent.rag_context_root = context_root
 
+    # Mock yaml.safe_load to return a unified nested configuration dict
+    from unittest.mock import patch
+    mock_cfg = {
+        "endpoints": {},
+        "models": {
+            "embed_model": "BAAI/bge-m3"
+        },
+        "phases": [{
+            "enabled": True,
+            "rag": {
+                "collection_name": test_collection,
+                "batch": True,
+                "chunk_size_chars": 800,
+                "chunk_overlap_chars": 100,
+                "cer_threshold": 0.05,
+                "ocr_max_retries": 2,
+                "ocr_parallel": 1
+            }
+        }]
+    }
+
     try:
         # Set environment override for collection
         os.environ["ORACLE_COLLECTION"] = test_collection
         os.environ["ORACLE_EXPLICIT_COLLECTION"] = "1"
 
-        # 1. Test adding a file
-        rc = _add_maintenance("file", [external_file])
+        # 1. Test adding a file with patched yaml configuration
+        with patch("yaml.safe_load", return_value=mock_cfg):
+            rc = _add_maintenance("file", [external_file])
         assert rc == 0, f"Expected 0, got {rc}"
 
         # Verify that collection directory was bootstrapped
@@ -242,7 +264,8 @@ def test_add_operations():
         assert kwargs["overwrite"] is False
 
         # 2. Test adding a directory (table)
-        rc = _add_maintenance("table", [external_dir])
+        with patch("yaml.safe_load", return_value=mock_cfg):
+            rc = _add_maintenance("table", [external_dir])
         assert rc == 0, f"Expected 0, got {rc}"
 
         # Verify that directory was copied recursively
@@ -264,7 +287,8 @@ def test_add_operations():
 
         # 3. Test self-containment (adding a file that is already inside the collection directory)
         # It should skip copying but still run ingestion
-        rc = _add_maintenance("file", [copied_file])
+        with patch("yaml.safe_load", return_value=mock_cfg):
+            rc = _add_maintenance("file", [copied_file])
         assert rc == 0
         assert len(ingest_calls) == 3
 

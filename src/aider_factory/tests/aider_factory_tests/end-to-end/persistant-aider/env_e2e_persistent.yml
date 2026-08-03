@@ -10,23 +10,56 @@ endpoints:
 phases:
   - name: "Persistent Aider Phase"
     enabled: true
+
+    rag:
+      collection_name: ""
+      batch: true
+      retrieval_mode: top_k
+      run_ocr_rag: false
+      vectordb_overwrite: false
+
+    oracle:
+      start_job: false
+      template: "src/aider_factory/tests/aider_factory_tests/end-to-end/oracle_prompt.md"
+      full_document: false
+      pre_edit_debate:
+        enabled: true
+        job_debate_template: []
+
     toggles:
       run_job_one: false
       run_job_two: false
-      iterate_test: false
+      iterate_test: true
       pair_programming: false
-    oracle_toggles:
-      debate_loops: 2
-    oracle:
-      template: "BaseFeatures/.aider_factory/tests/aider_factory_tests/end-to-end/oracle_prompt.md"
-      architect_oracle_chat: true
+
+    validation:
+      enabled: false
+      validation_tag: "evidence"
+      region_threshold: 0.60
+      region_margin: 2
+      region_paragraphs: 0
+      region_top_k: 5
+      validation_loops: 3
+      redo_oracle_job: false
+      verify_all_claims: false
+      entail_threshold: 0.5
+
+    escalation_debate:
+      loops: 2
+      rounds: 1
+      pass_history: false
+
     models:
       architect_agent: "openai/minimax-229b-ud-iq4nl:LATEST"
       editor_agent: "ollama/qwen3-coder-64k:latest"
       editor_agent_test: "ollama/qwen3-coder-64k:latest"
       rag_agent: "ollama/qwen3-coder-64k:latest"
+
     files:
       target_files:
-        - "BaseFeatures/.aider_factory/tests/aider_factory_tests/end-to-end/fut_aac.R"
+        - "src/aider_factory/tests/aider_factory_tests/end-to-end/fut_aac.R"
+      extra_editable_files: []
+      test_files: []
       context_files_job:
-        - "BaseFeatures/.aider_factory/tests/aider_factory_tests/end-to-end/test_dummy.sh"
+        - "src/aider_factory/tests/aider_factory_tests/end-to-end/test_dummy.sh"
+      context_files_test: []

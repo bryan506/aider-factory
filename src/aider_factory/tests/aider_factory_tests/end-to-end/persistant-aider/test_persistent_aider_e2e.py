@@ -4,10 +4,10 @@ import sys
 from unittest.mock import MagicMock, patch
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-project_dir = os.path.abspath(os.path.join(script_dir, "../../../../.."))
-python_module_dir = os.path.join(project_dir, ".aider_factory", "python")
-
+python_module_dir = os.path.abspath(os.path.join(script_dir, "../../../../python"))
 sys.path.insert(0, python_module_dir)
+
+from unittest.mock import MagicMock, patch
 
 print("==================================================")
 print("Starting E2E Persistent Aider Smoke Test...")
@@ -50,8 +50,8 @@ with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_ru
     def mock_run_side_effect(*args, **kwargs):
         cmd = args[0]
         res = MagicMock()
-        # If running validate or checking the gate, return failure to trigger debate
-        if any(x in str(cmd) for x in ["validate", "apply_evidence", "test_dummy.sh"]):
+        # If running validate, checking the gate, or any other non-oracle test, return failure to trigger debate
+        if "oracle" not in str(cmd) or any(x in str(cmd) for x in ["validate", "apply_evidence", "test_dummy.sh"]):
             res.returncode = 1
             res.stdout = "Validation failed: tripped quotes detected."
             res.stderr = ""
@@ -70,6 +70,17 @@ with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_ru
     # Execute the pipeline
     run_workflow.factory.execute_pipeline()
 
+    # Print diagnostic information to help identify why mock_popen was not called
+    print("\n--- DIAGNOSTIC DEBUG INFO ---")
+    print(f"mock_run call count: {mock_run.call_count}")
+    for i, call in enumerate(mock_run.call_args_list):
+        print(f"  mock_run call {i}: {call}")
+    print(f"mock_popen call count: {mock_popen.call_count}")
+    print("Registered tasks and statuses:")
+    for t_id, task in run_workflow.factory.tasks.items():
+        print(f"  Task: {t_id}, Status: {task.status}")
+    print("-----------------------------\n")
+
     # Verify Aider Popen was called
     assert mock_popen.called, "Aider subprocess.Popen was never called"
     assert mock_popen.call_count >= 1, (
@@ -79,13 +90,18 @@ with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_ru
     # Verify Oracle run was called
     assert mock_run.called, "Oracle subprocess.run was never called"
 
-    # Check Aider arguments
-    all_popen_calls = mock_popen.call_args_list
+    # Check Aider arguments (filter popen calls to find the debate turns)
+    debate_popen_calls = [
+        call for call in mock_popen.call_args_list 
+        if "--restore-chat-history" in (call.args[0] if call.args else "")
+    ]
+
+    assert len(debate_popen_calls) >= 1, "No debate popen calls found with --restore-chat-history"
 
     # First turn of the debate
-    turn1_args = all_popen_calls[0].args[0]
-    turn1_env = all_popen_calls[0].kwargs.get("env", {})
-    assert "aider" in turn1_args[0]
+    turn1_args = debate_popen_calls[0].args[0]
+    turn1_env = debate_popen_calls[0].kwargs.get("env", {})
+    assert "aider" in turn1_args
     assert "--restore-chat-history" in turn1_args, (
         "Turn 1 must specify restore history to write to custom file"
     )
@@ -93,9 +109,10 @@ with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_ru
     assert turn1_env.get("PYTHONHASHSEED") == "0", "Missing PYTHONHASHSEED=0 on Turn 1"
 
     # Second turn of the debate (if we simulated multiple turns)
-    if len(all_popen_calls) > 1:
-        turn2_args = all_popen_calls[1].args[0]
-        turn2_env = all_popen_calls[1].kwargs.get("env", {})
+    if len(debate_popen_calls) > 1:
+        turn2_args = debate_popen_calls[1].args[0]
+        turn2_env = debate_popen_calls[1].kwargs.get("env", {})
+        assert "aider" in turn2_args
         assert "--restore-chat-history" in turn2_args, (
             "Turn 2 must restore chat history"
         )

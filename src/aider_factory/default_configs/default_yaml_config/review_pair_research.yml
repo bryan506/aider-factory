@@ -6,26 +6,19 @@ working_directory: "/path/to/project"
 # test_runner: "{file}"
 loop_aider_test: 3
 
-# RAG settings — OCR + embedding for paper ingestion and interactive querying
-rag:
-    collection_name: "research_papers"
-    overwrite: false
-    ocr_agent: "gemini/gemini-2.5-flash"       # local: "glm-ocr-f16:LATEST"
-    ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
-    ocr_parallel: 4
-    ocr_max_retries: 2
-    cer_threshold: 0.05
+models:
+    architect_agent: "gemini/gemini-2.5-flash"
+    editor_agent: "gemini/gemini-2.5-flash"
+    rag_agent: "gemini/gemini-2.5-flash"
+    ocr_agent: "gemini/gemini-2.5-flash"
     embed_model: "BAAI/bge-m3"
-    embed_backend: "sentence-transformers"
-    chunk_size_chars: 800
-    chunk_overlap_chars: 100
-    top_k: 30
-    retrieval_mode: top_k
-    query_prefix: "Instruct: Given an academic or financial query, retrieve relevant passages\nQuery: "
 
 # Uncomment for local model endpoints
 # endpoints:
 #     rag_agent_api: "http://localhost:8080/v1"
+#     ocr_api_base: "http://localhost:8080/v1"
+
+plans: {}
 
 phases:
     # Interactive research session: ingest papers, then query the knowledge base
@@ -33,9 +26,36 @@ phases:
     # Place PDFs in: .aider_factory/markdown/lanceDB/research_papers/
     - name: "Research — Interactive Oracle Session"
       enabled: true
-      batch: false                             # per-document tables for targeted per-paper queries
-      vector_store:
+
+      rag:
           collection_name: "research_papers"
+          batch: false                         # per-document tables for targeted per-paper queries
+          retrieval_mode: top_k
+          run_ocr_rag: true                    # ingest papers (set false once built to reuse)
+          vectordb_overwrite: false
+          ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
+          query_prefix: "Instruct: Given an academic or financial query, retrieve relevant passages\nQuery: "
+          chunk_size_chars: 800
+          chunk_overlap_chars: 100
+          top_k: 30
+          cer_threshold: 0.05
+          ocr_max_retries: 2
+          ocr_parallel: 4
+          ocr_max_tokens: 4096
+          code_chunk_size: 2000
+          working_repo: ""
+          code_exts: null
+          text_doc_exts: null
+          ignore: null
+
+      oracle:
+          start_job: false
+          template: ""
+          full_document: false
+          pre_edit_debate:
+              enabled: false
+              job_debate_template: []
+
       toggles:
           pair_programming: true               # interactive — you query and direct
           run_job_one: false
@@ -43,20 +63,32 @@ phases:
           iterate_test: false
           auto_test: false
           sticky_context: false
-          run_ocr_rag: true                    # ingest papers (set false once built to reuse)
-          vectordb_overwrite: false
-      models:
-          architect_agent: "gemini/gemini-2.5-flash"
-          editor_agent: "gemini/gemini-2.5-flash"
-          rag_agent: "gemini/gemini-2.5-flash"
-          ocr_agent: "gemini/gemini-2.5-flash"
+
+      validation:
+          enabled: false
+          validation_tag: "evidence"
+          region_threshold: 0.60
+          region_margin: 2
+          region_paragraphs: 0
+          region_top_k: 5
+          validation_loops: 3
+          redo_oracle_job: false
+          verify_all_claims: false
+          entail_threshold: 0.5
+
+      escalation_debate:
+          loops: 0
+          rounds: 1
+          pass_history: false
+
       files:
           target_files:
               # Your research output — notes, literature review draft, analysis
               - "research/notes.md"
           extra_editable_files: []
+          test_files: []
           context_files_job: []
-      plans: {}
+          context_files_test: []
 
 # ---- Interactive Research Commands (type in the aider session) ----
 #

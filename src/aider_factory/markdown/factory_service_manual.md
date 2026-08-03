@@ -847,11 +847,8 @@ endpoints:
   editor_ollama_api: "http://localhost:11434" # Local Ollama
   editor_test_ollama_api: "http://localhost:11434" # Local Ollama (test instance)
   rag_agent_api: "http://192.168.100.2:8081/v1" # Remote llama-server
-
-# RAG infrastructure endpoints (set under top-level `rag:` and `ocr_api_base:`, not `endpoints:`)
-ocr_api_base: "http://192.168.100.2:8081/v1" # Vision model for OCR (set = local, "" = cloud via litellm)
-rag:
-  embed_api_base: "http://192.168.100.1:8080/v1" # Embedding model (set = local, "" = cloud via litellm)
+  ocr_api_base: "http://192.168.100.2:8081/v1" # Vision model for OCR (set = local, "" = cloud via litellm)
+  embed_api_base: "http://192.168.100.2:8080/v1" # Embedding model (set = local, "" = cloud via litellm)
 
 phases:
   - name: "Phase 1: Implementation"
@@ -1021,12 +1018,12 @@ Every plan, debate instruction, and oracle template is a **user-editable Markdow
 
 There are two resolution schemes depending on the YAML block:
 
-| YAML block               | Relative to         | Example path in YAML                              | Resolves to                                                         |
-| ------------------------ | ------------------- | ------------------------------------------------- | ------------------------------------------------------------------- |
-| `plans:` (all sub-keys)  | `.aider_factory/`      | `"markdown/templates/implement.md"`               | `.aider_factory/markdown/templates/implement.md`                       |
-| `oracle:` (all sub-keys) | `working_directory` | `".aider_factory/markdown/internal/analyze_bugs.md"` | `<working_directory>/.aider_factory/markdown/internal/analyze_bugs.md` |
+| YAML block                     | Relative to         | Example path in YAML                              | Resolves to                                                         |
+| ------------------------------ | ------------------- | ------------------------------------------------- | ------------------------------------------------------------------- |
+| Phase `plans:` (all sub-keys)  | `.aider_factory/`      | `"markdown/templates/implement.md"`               | `.aider_factory/markdown/templates/implement.md`                       |
+| Phase `oracle:` (all sub-keys) | `working_directory` | `".aider_factory/markdown/internal/alt_apply_oracle_output_template.md"` | `<working_directory>/.aider_factory/markdown/internal/alt_apply_oracle_output_template.md` |
 
-This means `plans:` paths omit the `.aider_factory/` prefix, while `oracle:` paths must include it.
+This means phase-level `plans:` paths omit the `.aider_factory/` prefix, while phase-level `oracle:` paths must include it.
 
 #### Template Directory Map
 

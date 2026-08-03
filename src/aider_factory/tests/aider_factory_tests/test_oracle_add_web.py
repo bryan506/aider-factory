@@ -6,7 +6,8 @@ import sys
 import unittest
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(script_dir, "../../python"))
+python_module_dir = os.path.abspath(os.path.join(script_dir, "../../python"))
+sys.path.insert(0, python_module_dir)
 
 import oracle_agent
 

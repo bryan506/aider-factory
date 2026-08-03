@@ -51,10 +51,32 @@ def check_topology(test_name, config, required_substrings, forbidden_substrings)
 code_config = {
     "working_directory": script_dir,
     "phases": [{
-        "name": "Code", "enabled": True, "batch": True,
-        "oracle": {"start_job": False, "architect_oracle_chat": True},
-        "toggles": {"run_job_one": True, "run_job_two": True, "iterate_test": True},
-        "oracle_toggles": {"debate_loops": 2, "debate_rounds": 1},
+        "name": "Code",
+        "enabled": True,
+        "rag": {
+            "collection_name": "",
+            "batch": True,
+            "run_ocr_rag": False
+        },
+        "oracle": {
+            "start_job": False,
+            "pre_edit_debate": {
+                "enabled": True,
+                "job_debate_template": []
+            }
+        },
+        "toggles": {
+            "run_job_one": True,
+            "run_job_two": True,
+            "iterate_test": True
+        },
+        "validation": {
+            "enabled": False
+        },
+        "escalation_debate": {
+            "loops": 2,
+            "rounds": 1
+        },
         "models": {"architect_agent": "mock", "editor_agent": "mock", "editor_agent_test": "mock"},
         "files": {"target_files": ["mock.R"]}
     }]
@@ -67,10 +89,29 @@ check_topology("Code Mode Topology", code_config,
 review_config = {
     "working_directory": script_dir,
     "phases": [{
-        "name": "Review", "enabled": True, "batch": False,
-        "oracle": {"start_job": True},
-        "toggles": {"run_job_one": False, "run_job_two": False, "iterate_test": False},
-        "oracle_toggles": {"post_validate": True, "debate_loops": 2, "debate_rounds": 1},
+        "name": "Review",
+        "enabled": True,
+        "rag": {
+            "collection_name": "",
+            "batch": False,
+            "run_ocr_rag": False
+        },
+        "oracle": {
+            "start_job": True
+        },
+        "toggles": {
+            "run_job_one": False,
+            "run_job_two": False,
+            "iterate_test": False
+        },
+        "validation": {
+            "enabled": True,
+            "validation_loops": 2
+        },
+        "escalation_debate": {
+            "loops": 2,
+            "rounds": 1
+        },
         "models": {"architect_agent": "mock", "editor_agent": "mock", "editor_agent_test": "mock"},
         "files": {"target_files": ["mock.md"], "test_files": ["heal.sh"]}
     }]

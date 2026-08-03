@@ -7,6 +7,8 @@ from rag_manager import embed_texts
 
 print("Starting Embedder Routing Tests...\n")
 
+from unittest.mock import patch
+
 def test_embed_texts_st():
     # Test sentence-transformers fallback directly
     try:

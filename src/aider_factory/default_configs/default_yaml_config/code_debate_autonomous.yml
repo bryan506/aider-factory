@@ -13,14 +13,6 @@ loop_aider_test: 3
 #     editor_test_ollama_api: "http://localhost:8080/v1"
 #     rag_agent_api: "http://localhost:8080/v1"
 
-models:
-    architect_agent: "gemini/gemini-2.5-flash"
-    editor_agent: "gemini/gemini-2.5-flash"
-    editor_agent_test: "gemini/gemini-2.5-flash"
-    editor_agent_test_fallback: "gemini/gemini-2.5-flash"
-    rag_agent: "gemini/gemini-2.5-flash"
-    embed_model: "BAAI/bge-m3"
-
 plans:
     job_one_plan: "markdown/templates/implement.md"
     job_two_plan: "markdown/templates/testing.md"
@@ -106,6 +98,14 @@ phases:
     #   3. Post-iterate escalation (debate_loops > 0) — diagnose test failures
     - name: "Implementation — Debate and Build"
       enabled: true
+
+      models:
+          architect_agent: "gemini/gemini-2.5-flash"
+          editor_agent: "gemini/gemini-2.5-flash"
+          editor_agent_test: "gemini/gemini-2.5-flash"
+          editor_agent_test_fallback: "gemini/gemini-2.5-flash"
+          rag_agent: "gemini/gemini-2.5-flash"
+          embed_model: "BAAI/bge-m3"
 
       rag:
           collection_name: "project_docs"

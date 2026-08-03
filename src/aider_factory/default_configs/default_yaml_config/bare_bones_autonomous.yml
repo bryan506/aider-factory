@@ -13,12 +13,6 @@ loop_aider_test: 3                             # max test-fix attempts per targe
 #     editor_ollama_api: "http://localhost:11434"         # ollama/ prefix models
 #     editor_test_ollama_api: "http://localhost:11434"
 
-models:
-    architect_agent: "gemini/gemini-2.5-flash"
-    editor_agent: "gemini/gemini-2.5-flash"
-    editor_agent_test: "gemini/gemini-2.5-flash"
-    editor_agent_test_fallback: "gemini/gemini-2.5-flash"
-
 plans:
     job_one_plan: "markdown/templates/implement.md"
     job_two_plan: "markdown/templates/testing.md"
@@ -27,6 +21,12 @@ plans:
 phases:
     - name: "Implement and Test"
       enabled: true
+
+      models:
+          architect_agent: "gemini/gemini-2.5-flash"
+          editor_agent: "gemini/gemini-2.5-flash"
+          editor_agent_test: "gemini/gemini-2.5-flash"
+          editor_agent_test_fallback: "gemini/gemini-2.5-flash"
 
       rag:
           collection_name: ""

@@ -9,16 +9,6 @@ loop_aider_test: 3
 # OCR endpoint — uncomment for local vision model; omit for cloud OCR via gemini/
 # ocr_api_base: "http://localhost:8080/v1"
 
-models:
-    architect_agent: "gemini/gemini-2.5-flash"
-    editor_agent: "gemini/gemini-2.5-flash"
-    editor_agent_test: "gemini/gemini-2.5-flash"
-    editor_agent_test_fallback: "gemini/gemini-2.5-flash"
-    rag_agent: "gemini/gemini-2.5-flash"             # oracle model for heal + debate
-    ocr_agent: "gemini/gemini-2.5-flash"             # local: "glm-ocr-f16:LATEST"
-    # grounding_agent: "openai/minicheck-flan-t5-large"  # requires grounding_agent_api
-    embed_model: "BAAI/bge-m3"
-
 # Uncomment for local model endpoints
 # endpoints:
 #     architect_api_base: "http://localhost:8080/v1"
@@ -43,6 +33,16 @@ phases:
     # only the relevant source when generating/healing each review.
     - name: "Literary Review — Full Pipeline"
       enabled: true
+
+      models:
+          architect_agent: "gemini/gemini-2.5-flash"
+          editor_agent: "gemini/gemini-2.5-flash"
+          editor_agent_test: "gemini/gemini-2.5-flash"
+          editor_agent_test_fallback: "gemini/gemini-2.5-flash"
+          rag_agent: "gemini/gemini-2.5-flash"             # oracle model for heal + debate
+          ocr_agent: "gemini/gemini-2.5-flash"             # local: "glm-ocr-f16:LATEST"
+          # grounding_agent: "openai/minicheck-flan-t5-large"  # requires grounding_agent_api
+          embed_model: "BAAI/bge-m3"
 
       rag:
           collection_name: "my_papers"

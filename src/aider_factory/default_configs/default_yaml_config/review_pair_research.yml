@@ -6,13 +6,6 @@ working_directory: "/path/to/project"
 # test_runner: "{file}"
 loop_aider_test: 3
 
-models:
-    architect_agent: "gemini/gemini-2.5-flash"
-    editor_agent: "gemini/gemini-2.5-flash"
-    rag_agent: "gemini/gemini-2.5-flash"
-    ocr_agent: "gemini/gemini-2.5-flash"
-    embed_model: "BAAI/bge-m3"
-
 # Uncomment for local model endpoints
 # endpoints:
 #     rag_agent_api: "http://localhost:8080/v1"
@@ -26,6 +19,13 @@ phases:
     # Place PDFs in: .aider_factory/markdown/lanceDB/research_papers/
     - name: "Research — Interactive Oracle Session"
       enabled: true
+
+      models:
+          architect_agent: "gemini/gemini-2.5-flash"
+          editor_agent: "gemini/gemini-2.5-flash"
+          rag_agent: "gemini/gemini-2.5-flash"
+          ocr_agent: "gemini/gemini-2.5-flash"
+          embed_model: "BAAI/bge-m3"
 
       rag:
           collection_name: "research_papers"

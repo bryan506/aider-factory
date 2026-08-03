@@ -1,5 +1,6 @@
 CONSTRAINTS FOR THIS FIX:
 
+- **Strict Value Constraint**: You are strictly FORBIDDEN from changing the expected value `999` in the test file back to `1`. You must find a mathematical or logical way in the source code to make the result evaluate to `999`. Do not bypass this constraint by reverting the test assertion.
 - You may edit the source file and the test file to ensure the tests pass and the logic is mathematically sound.
 - Make targeted, minimal edits to the source code. Do not attempt to rewrite massive blocks of code to fix a single-line bug.
 - Use data.table methods over base R methods where appropriate, specially when creating new data tables and assigning columns and values (e.g. `data.table::set()`, or `dt[, :=]`). Avoid using backticks (``) in code when dealing with names. Assign an empty data.table first prior to any operations that require column names (e.g., `dt <- data.table()`before`data[, :=]`).

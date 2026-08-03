@@ -1,0 +1,68 @@
+name: "Local E2E Golden Integration Test"
+working_directory: "/home/ares/R/aider_factory_dev"
+
+colors:
+    architect_debate: "#38bdf8"
+    oracle_debate: "#d3869b"
+
+test_command_prefix: ""
+test_runner: "Rscript src/aider_factory/tests/run_tests.R {file}"
+test_naming_and_path: "tests/testthat/test-{stem}.R"
+loop_aider_test: 3
+
+endpoints:
+    architect_api_base: "http://192.168.100.2:8081/v1"
+    editor_ollama_api: "http://192.168.100.1:8080/v1"
+    editor_test_ollama_api: "http://192.168.100.1:8080/v1"
+    rag_agent_api: "http://192.168.100.2:8081/v1"
+    grounding_agent_api: "http://192.168.100.1:8090/v1"
+    ocr_api_base: "http://192.168.100.2:8081/v1"
+    embed_api_base: "http://192.168.100.1:8080/v1"
+
+plans:
+    job_one_plan: "markdown/templates/general.md"
+    job_two_plan: "markdown/templates/testing.md"
+    iterate_plan: "markdown/templates/testing_unit_iterate.md"
+
+phases:
+  - name: "Golden Integration Phase"
+    enabled: true
+    rag:
+        collection_name: "e2e_web_smoke"
+        batch: true
+        retrieval_mode: top_k
+        run_ocr_rag: false
+        vectordb_overwrite: false
+    oracle:
+        start_job: false
+        template: ".aider_factory/markdown/internal/analyze_bugs.md"
+        full_document: false
+        architect_oracle_chat: true
+        job_debate_template: ".aider_factory/markdown/templates/job_debate.md"
+    toggles:
+        pair_programming: false
+        run_job_one: false
+        run_job_two: false
+        iterate_test: true
+        auto_test: false
+        sticky_context: true
+    validation:
+        enabled: false
+    escalation_debate:
+        loops: 4
+        rounds: 2
+        pass_history: true
+    models:
+        architect_agent: "openai/qwen3.6-27b-90k:LATEST"
+        editor_agent: "lm_studio/qwen3.6-27B-90k-udq4kxl:LATEST"
+        editor_agent_test: "lm_studio/qwen3.6-27B-90k-udq4kxl:LATEST"
+        editor_agent_test_fallback: "lm_studio/qwen3.6-27B-90k-udq4kxl:LATEST"
+        rag_agent: "openai/qwen3.6-27B-90k-udq4kxl:LATEST"
+        ocr_agent: "glm-ocr-f16:LATEST"
+        embed_model: "qwen3-embedding-8b-8k:LATEST"
+        grounding_agent: "openai/minicheck-flan-t5-large"
+    files:
+        target_files:
+            - "src/aider_factory/default_configs/.env_ocr_rag.yml"
+        test_files:
+            - "tests/testthat/test-unit-fut_aac.R"

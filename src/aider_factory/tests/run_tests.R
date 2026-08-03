@@ -30,7 +30,7 @@ options(warn = -1)
 options(bit64.promoteInteger64ToCharacter = TRUE)
 
 # Run tests and let the output stream to stdout natively
-res <- devtools::test(filter = test_filter)
+res <- testthat::test_dir("tests/testthat", filter = test_filter)
 
 # If res is empty, no tests were executed (e.g. fatal package load error)
 if (length(res) == 0) {

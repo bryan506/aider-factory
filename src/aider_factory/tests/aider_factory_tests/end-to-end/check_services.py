@@ -35,6 +35,58 @@ except Exception as e:
     print(f"  ❌ Embedding Server is OFFLINE or unreachable: {e}", file=sys.stderr)
     sys.exit(1)
 
+# 1b. Check Local Editor Server (192.168.100.1:8080)
+editor_url = "http://192.168.100.1:8080/v1/chat/completions"
+editor_payload = {
+    "model": "qwen3.6-27B-90k-udq4kxl:LATEST",
+    "messages": [{"role": "user", "content": "ping"}],
+    "max_tokens": 5
+}
+print(f"Sending probe to Editor Server: {editor_url} ...")
+try:
+    req = urllib.request.Request(
+        editor_url,
+        data=json.dumps(editor_payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        res_data = json.loads(response.read().decode("utf-8"))
+        if "choices" in res_data:
+            print("  ✅ Editor Server is ONLINE and responding.")
+        else:
+            print(f"  ❌ Editor Server returned unexpected response: {res_data}", file=sys.stderr)
+            sys.exit(1)
+except Exception as e:
+    print(f"  ❌ Editor Server is OFFLINE or unreachable: {e}", file=sys.stderr)
+    sys.exit(1)
+
+# 1c. Check Primary Router & OCR Server (192.168.100.2:8081)
+router_url = "http://192.168.100.2:8081/v1/chat/completions"
+router_payload = {
+    "model": "qwen3.6-27b-90k:LATEST",
+    "messages": [{"role": "user", "content": "ping"}],
+    "max_tokens": 5
+}
+print(f"Sending probe to Primary Router: {router_url} ...")
+try:
+    req = urllib.request.Request(
+        router_url,
+        data=json.dumps(router_payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        res_data = json.loads(response.read().decode("utf-8"))
+        if "choices" in res_data:
+            print("  ✅ Primary Router Server is ONLINE and responding.")
+        else:
+            print(f"  ❌ Primary Router Server returned unexpected response: {res_data}", file=sys.stderr)
+            sys.exit(1)
+except Exception as e:
+    print(f"  ❌ Primary Router Server is OFFLINE or unreachable: {e}", file=sys.stderr)
+    sys.exit(1)
+
 # 2. Check SearXNG Meta-Search Engine
 searxng_url = "http://localhost:8088/search?q=Nighthawk+SmartNIC&format=json"
 print(f"\nSending probe to SearXNG Server: {searxng_url} ...")

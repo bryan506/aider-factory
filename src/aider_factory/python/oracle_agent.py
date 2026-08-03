@@ -981,7 +981,11 @@ def _add_maintenance(action, paths):
         return 1
 
     endpoints = cfg.get("endpoints", {}) or {}
-    models_cfg = cfg.get("models", {}) or {}
+    
+    # Find the active phase to resolve models
+    phases = cfg.get("phases", []) or []
+    active_phase = next((ph for ph in phases if ph.get("enabled")), {}) if phases else {}
+    phase_models = active_phase.get("models", {}) or {}
 
     # 3. Resolve active collection
     collection = _resolve_active_collection(cfg)
@@ -1071,7 +1075,7 @@ def _add_maintenance(action, paths):
     embed_model = (
         phase_rag.get("embed_model")
         or global_rag.get("embed_model")
-        or models_cfg.get("embed_model", "BAAI/bge-m3")
+        or phase_models.get("embed_model", "BAAI/bge-m3")
     )
     embed_backend = (
         phase_rag.get("embed_backend")
@@ -1100,7 +1104,7 @@ def _add_maintenance(action, paths):
             chunk_size_chars=chunk_size,
             chunk_overlap_chars=chunk_overlap,
             ocr_api_base=endpoints.get("ocr_api_base"),
-            ocr_agent=models_cfg.get("ocr_agent"),
+            ocr_agent=phase_models.get("ocr_agent"),
             ocr_prompt=rag_manager.DEFAULT_OCR_PROMPT,
             overwrite=False,  # CRITICAL: incremental update!
             cer_threshold=cer_thresh,
@@ -1150,7 +1154,9 @@ def _add_web_maintenance(urls):
         return 1
 
     endpoints = cfg.get("endpoints", {}) or {}
-    models_cfg = cfg.get("models", {}) or {}
+    phases = cfg.get("phases", []) or []
+    active_phase = next((ph for ph in phases if ph.get("enabled")), {}) if phases else {}
+    phase_models = active_phase.get("models", {}) or {}
     collection = _resolve_active_collection(cfg)
     os.environ["ORACLE_COLLECTION"] = collection
 
@@ -1228,7 +1234,7 @@ def _add_web_maintenance(urls):
     embed_model = (
         phase_rag.get("embed_model")
         or global_rag.get("embed_model")
-        or models_cfg.get("embed_model", "BAAI/bge-m3")
+        or phase_models.get("embed_model", "BAAI/bge-m3")
     )
     embed_backend = (
         phase_rag.get("embed_backend")
@@ -1256,7 +1262,7 @@ def _add_web_maintenance(urls):
             chunk_size_chars=chunk_size,
             chunk_overlap_chars=chunk_overlap,
             ocr_api_base=endpoints.get("ocr_api_base"),
-            ocr_agent=models_cfg.get("ocr_agent"),
+            ocr_agent=phase_models.get("ocr_agent"),
             ocr_prompt=rag_manager.DEFAULT_OCR_PROMPT,
             overwrite=False,
             cer_threshold=cer_thresh,

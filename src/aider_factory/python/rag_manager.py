@@ -978,13 +978,13 @@ def _from_config(yaml_path):
         cfg = yaml.safe_load(f) or {}
     project_dir = str(cfg.get("working_directory", os.getcwd()))
     endpoints = cfg.get("endpoints", {}) or {}
-    models_cfg = cfg.get("models", {}) or {}
     
     phases = cfg.get("phases", []) or []
     active_phase = next((ph for ph in phases if ph.get("enabled")), {}) if phases else {}
+    phase_models = active_phase.get("models", {}) or {}
     phase_rag = active_phase.get("rag", {}) or {}
     collection_name = phase_rag.get("collection_name") or "knowledge"
-    embed_model = models_cfg.get("embed_model", "BAAI/bge-m3")
+    embed_model = phase_models.get("embed_model") or "BAAI/bge-m3"
     embed_backend = "openai" if "embedding" in embed_model.lower() else "sentence-transformers"
     
     return ingest(
@@ -994,7 +994,7 @@ def _from_config(yaml_path):
         embed_backend=embed_backend,
         embed_api_base=endpoints.get("embed_api_base"),
         ocr_api_base=endpoints.get("ocr_api_base"),
-        ocr_agent=models_cfg.get("ocr_agent", ""),
+        ocr_agent=phase_models.get("ocr_agent", ""),
         ocr_prompt=DEFAULT_OCR_PROMPT,
         overwrite=False,
         cer_threshold=0.05,

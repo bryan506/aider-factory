@@ -609,6 +609,9 @@ class AiderFactory:
         import deliberate
 
         d = task.deliberate or {}
+        # Ensure the Oracle model is explicitly set in the environment for the sub-agent
+        if task.rag_env and "ORACLE_AGENT_MODEL" in task.rag_env:
+            os.environ["ORACLE_AGENT_MODEL"] = task.rag_env["ORACLE_AGENT_MODEL"]
 
         # Early exit: if the previous round already reached agreement, skip this round.
         # The DAG statically pre-builds all rounds at parse time; this runtime check

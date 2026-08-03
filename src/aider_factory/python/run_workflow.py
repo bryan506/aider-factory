@@ -94,13 +94,16 @@ completed_files = []
 
 # Parse Endpoints and Models
 endpoints = config.get("endpoints", {})
-models_cfg = config.get("models", {})
 
 global_architect_api_base = endpoints.get("architect_api_base")
 global_editor_api = endpoints.get("editor_ollama_api")
 global_editor_test_api = endpoints.get("editor_test_ollama_api")
 global_rag_agent_api = endpoints.get("rag_agent_api")
 global_grounding_api = endpoints.get("grounding_agent_api")
+
+# Find the first enabled phase to extract default RAG models if present
+first_enabled_phase = next((p for p in config.get("phases", []) if p.get("enabled", True)), {})
+phase_models = first_enabled_phase.get("models", {})
 
 # --- RAG / Oracle globals: infrastructure + DEFAULTS ---
 DEFAULT_OCR_PROMPT = (
@@ -111,7 +114,7 @@ ocr_api_base = endpoints.get("ocr_api_base")
 rag_context_root = os.path.join(
     str(project_directory), ".aider_factory", "markdown", "lanceDB"
 )
-rag_embed_model = models_cfg.get("embed_model", "BAAI/bge-m3")
+rag_embed_model = phase_models.get("embed_model") or "BAAI/bge-m3"
 rag_embed_backend = "openai" if "embedding" in rag_embed_model.lower() else "sentence-transformers"
 rag_embed_api_base = endpoints.get("embed_api_base")
 rag_query_prefix = "Query: "
@@ -120,7 +123,7 @@ rag_chunk_overlap = 100
 rag_top_k = "5"
 rag_default_collection = ""
 rag_default_overwrite = False
-rag_default_ocr_agent = models_cfg.get("ocr_agent", "")
+rag_default_ocr_agent = phase_models.get("ocr_agent", "")
 rag_default_ocr_prompt = DEFAULT_OCR_PROMPT
 rag_cer_threshold = 0.05
 rag_ocr_max_retries = 2

@@ -15,8 +15,15 @@ print("==================================================")
 script_dir = os.path.dirname(os.path.abspath(__file__))
 project_dir = os.path.abspath(os.path.join(script_dir, "../../../../.."))
 
-academic_config_path = os.path.join(script_dir, "env_e2e_academic.yml")
-code_config_path = os.path.join(script_dir, "env_e2e_code.yml")
+test_mode = os.environ.get("AI_FACTORY_TEST_MODE", "cloud").lower()
+if test_mode == "local":
+    print("[E2E] Running in LOCAL test mode (using local endpoints)...")
+    academic_config_path = os.path.join(script_dir, "env_e2e_local_academic.yml")
+    code_config_path = os.path.join(script_dir, "env_e2e_local_code.yml")
+else:
+    print("[E2E] Running in CLOUD test mode (using cloud fallbacks)...")
+    academic_config_path = os.path.join(script_dir, "env_e2e_academic.yml")
+    code_config_path = os.path.join(script_dir, "env_e2e_code.yml")
 source_pdf = os.path.join(script_dir, "January-2026-FX-Report.pdf")
 
 # Academic paths

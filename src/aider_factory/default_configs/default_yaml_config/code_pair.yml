@@ -13,11 +13,6 @@ loop_aider_test: 3
 #     editor_test_ollama_api: "http://localhost:8080/v1"
 #     rag_agent_api: "http://localhost:8080/v1"
 
-plans:
-    job_one_plan: "markdown/templates/implement.md"
-    job_two_plan: "markdown/templates/testing.md"
-    iterate_plan: "markdown/templates/testing_unit_iterate.md"
-
 phases:
     - name: "Code — Pair Programming"
       enabled: true
@@ -95,6 +90,11 @@ phases:
               - "src/utils.py"
           context_files_test:
               - "src/utils.py"
+
+      plans:
+          job_one_plan: "markdown/templates/implement.md"
+          job_two_plan: "markdown/templates/testing.md"
+          iterate_plan: "markdown/templates/testing_unit_iterate.md"
 
 # ---- Interactive Commands (type in the aider session) ----
 #

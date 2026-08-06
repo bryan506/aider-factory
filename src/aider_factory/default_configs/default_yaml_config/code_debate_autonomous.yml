@@ -13,11 +13,6 @@ loop_aider_test: 3
 #     editor_test_ollama_api: "http://localhost:8080/v1"
 #     rag_agent_api: "http://localhost:8080/v1"
 
-plans:
-    job_one_plan: "markdown/templates/implement.md"
-    job_two_plan: "markdown/templates/testing.md"
-    iterate_plan: "markdown/templates/testing_unit_iterate.md"
-
 phases:
     # Phase 0: architect + oracle debate to build an implementation strategy.
     # The pre-edit debate (architect_oracle_chat) runs before job_one. The debate
@@ -97,6 +92,11 @@ phases:
           test_files: []
           context_files_job: []
           context_files_test: []
+
+      plans:
+          job_one_plan: "markdown/templates/implement.md"
+          job_two_plan: "markdown/templates/testing.md"
+          iterate_plan: "markdown/templates/testing_unit_iterate.md"
 
     # Phase 1: implement from the strategy with pre-edit debates and escalation.
     # sticky_context carries strategy_template.md as read context for all jobs.
@@ -180,4 +180,9 @@ phases:
               - "src/utils.py"
           context_files_test:
               - "src/utils.py"
+
+      plans:
+          job_one_plan: "markdown/templates/implement.md"
+          job_two_plan: "markdown/templates/testing.md"
+          iterate_plan: "markdown/templates/testing_unit_iterate.md"
 

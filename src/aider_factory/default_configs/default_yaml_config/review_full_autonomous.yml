@@ -1,4 +1,4 @@
-name: "Literature Review"
+name: "My Project"
 working_directory: "/path/to/project"
 
 # Literary review validation runs .sh gate scripts
@@ -16,12 +16,6 @@ loop_aider_test: 3
 #     editor_test_ollama_api: "http://localhost:8080/v1"
 #     rag_agent_api: "http://localhost:8080/v1"
 #     grounding_agent_api: "http://localhost:8090/v1"   # MiniCheck entailment shim (Section 7.12)
-
-plans:
-    # Infrastructure template — do not edit without understanding tag semantics.
-    # Instructs the architect to apply oracle corrections to failing [evidence] quotes.
-    iterate_plan: "markdown/internal/contextual_revalidation_template.md"
-    # deliberate_plan and apply_plan use hardcoded defaults from markdown/internal/
 
 phases:
     # Full pipeline: ingest PDFs -> OCR -> embed -> oracle generates review ->
@@ -111,3 +105,8 @@ phases:
           context_files_job: []
           context_files_test: []
 
+      plans:
+          # Infrastructure template — do not edit without understanding tag semantics.
+          # Instructs the architect to apply oracle corrections to failing [evidence] quotes.
+          iterate_plan: "markdown/internal/contextual_revalidation_template.md"
+          # deliberate_plan and apply_plan use hardcoded defaults from markdown/internal/

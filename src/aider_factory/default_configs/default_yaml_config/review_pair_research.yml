@@ -1,4 +1,4 @@
-name: "Research Session"
+name: "My Project"
 working_directory: "/path/to/project"
 
 # Not required for research-only sessions; uncomment if running validation
@@ -10,8 +10,6 @@ loop_aider_test: 3
 # endpoints:
 #     rag_agent_api: "http://localhost:8080/v1"
 #     ocr_api_base: "http://localhost:8080/v1"
-
-plans: {}
 
 phases:
     # Interactive research session: ingest papers, then query the knowledge base
@@ -90,6 +88,8 @@ phases:
           context_files_job: []
           context_files_test: []
 
+      plans: {}
+
 # ---- Interactive Research Commands (type in the aider session) ----
 #
 # Query the knowledge base:
@@ -112,4 +112,3 @@ phases:
 #   /run .aider_factory/bash/oracle --rm-file old_paper.pdf
 #   /run .aider_factory/bash/oracle --rm-table old_collection
 #   /run .aider_factory/bash/oracle --rm-db                   # wipe entire database
-

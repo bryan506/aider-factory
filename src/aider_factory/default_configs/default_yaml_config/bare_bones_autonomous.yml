@@ -13,11 +13,6 @@ loop_aider_test: 3                             # max test-fix attempts per targe
 #     editor_ollama_api: "http://localhost:11434"         # ollama/ prefix models
 #     editor_test_ollama_api: "http://localhost:11434"
 
-plans:
-    job_one_plan: "markdown/templates/implement.md"
-    job_two_plan: "markdown/templates/testing.md"
-    # iterate_plan: "markdown/templates/testing_unit_iterate.md"
-
 phases:
     - name: "Implement and Test"
       enabled: true
@@ -92,4 +87,9 @@ phases:
               - "src/helpers.py"
           context_files_test:                  # read-only context for test writing + iterate
               - "src/helpers.py"
+
+      plans:
+          job_one_plan: "markdown/templates/implement.md"
+          job_two_plan: "markdown/templates/testing.md"
+          # iterate_plan: "markdown/templates/testing_unit_iterate.md"
 

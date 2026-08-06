@@ -1,0 +1,21 @@
+name: "E2E Helper Smoke Test"
+working_directory: "."
+
+test_command_prefix: ""
+test_runner: "echo"
+test_naming_and_path: "tests/test_{stem}.py"
+loop_aider_test: 1
+
+endpoints:
+    architect_api_base: "http://localhost:11434/v1"
+    editor_ollama_api: "http://localhost:11434"
+
+phases:
+  - name: "E2E Helper Phase"
+    enabled: true
+    models:
+        architect_agent: "gemini/gemini-2.5-flash"
+        editor_agent: "gemini/gemini-2.5-flash"
+    files:
+        target_files:
+            - "src/dummy.py"

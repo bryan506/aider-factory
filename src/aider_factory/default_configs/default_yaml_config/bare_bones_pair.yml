@@ -12,10 +12,6 @@ loop_aider_test: 3
 #     editor_ollama_api: "http://localhost:11434"
 #     editor_test_ollama_api: "http://localhost:11434"
 
-plans:
-    job_one_plan: "markdown/templates/implement.md"
-    job_two_plan: "markdown/templates/testing.md"
-
 phases:
     - name: "Pair Programming Session"
       enabled: true
@@ -91,4 +87,8 @@ phases:
               - "src/utils.py"
           context_files_test:
               - "src/utils.py"
+
+      plans:
+          job_one_plan: "markdown/templates/implement.md"
+          job_two_plan: "markdown/templates/testing.md"
 

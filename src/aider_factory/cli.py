@@ -171,9 +171,10 @@ def ensure_bash_wrappers(project_aider_factory_dir):
         os.chmod(target_path, 0o755)
 
 
-def init_user_project():
+def init_user_project(cwd=None):
     """Onboarding: Auto-creates default config files in the CWD if they are missing."""
-    cwd = os.getcwd()
+    if cwd is None:
+        cwd = os.getcwd()
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
     default_configs_dir = os.path.join(pkg_dir, "default_configs")
 
@@ -207,39 +208,57 @@ def init_user_project():
         local_aider_factory_dir, ".aider.model.settings.yml"
     )
     local_conventions = os.path.join(local_aider_factory_dir, "CONVENTIONS.md")
+    local_tests_dir = os.path.join(local_aider_factory_dir, "tests")
+
+    # DRY framework-to-extension mapping
+    framework_map = {
+        "Rscript": "R",
+        "pytest": "py",
+        "cargo": "rs",
+        "go test": "go",
+        "npm": "js",
+    }
+    chosen_ext = "py"  # Default fallback
+    if os.path.exists(local_aider_factory_dir):
+        try:
+            for item in os.listdir(local_aider_factory_dir):
+                if item.endswith(".yml"):
+                    yaml_path = os.path.join(local_aider_factory_dir, item)
+                    with open(yaml_path, "r", encoding="utf-8") as f:
+                        yaml_content = f.read()
+                        for kw, ext in framework_map.items():
+                            if kw in yaml_content:
+                                chosen_ext = ext
+                                break
+                    if chosen_ext != "py":
+                        break
+        except Exception:
+            pass
+
+    # Provision language-specific optimized test runner dynamically
+    os.makedirs(local_tests_dir, exist_ok=True)
+    pkg_tests_dir = os.path.join(pkg_dir, "tests")
+    if os.path.exists(pkg_tests_dir):
+        src_runner = os.path.join(pkg_tests_dir, f"run_tests.{chosen_ext}")
+        dst_runner = os.path.join(local_tests_dir, f"run_tests.{chosen_ext}")
+        if os.path.exists(src_runner) and not os.path.exists(dst_runner):
+            shutil.copy(src_runner, dst_runner)
 
     # 1. Create .env.yml inside .aider_factory/ if missing (zero-clutter workspace)
     if not os.path.exists(local_env_yaml):
         print(
             f"📦 First run detected! Initializing default '.env.yml' in {local_aider_factory_dir}..."
         )
-        import getpass
-        username = getpass.getuser()
+        sensible_name = f"{os.path.basename(cwd).replace('_', ' ').replace('-', ' ').title()} Pipeline"
         with open(os.path.join(default_configs_dir, "env.yml"), "r", encoding="utf-8") as f:
             content = f.read()
         
-        # Replace hardcoded home directory and username dynamically
-        content = content.replace("/home/bryanr/wf/BaseFeatures", cwd)
-        content = content.replace("bryanr", username)
+        # Standardized dynamic instantiation
+        content = content.replace('name: "My Project"', f'name: "{sensible_name}"')
+        content = content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
         
         with open(local_env_yaml, "w", encoding="utf-8") as f:
             f.write(content)
-    else:
-        # If the file exists but was initialized with the default template's hardcoded path, patch it
-        import getpass
-        username = getpass.getuser()
-        if username != "bryanr":
-            try:
-                with open(local_env_yaml, "r", encoding="utf-8") as f:
-                    content = f.read()
-                if "/home/bryanr/wf/BaseFeatures" in content:
-                    print(f"📦 Patching hardcoded template paths in {local_env_yaml}...")
-                    content = content.replace("/home/bryanr/wf/BaseFeatures", cwd)
-                    content = content.replace("bryanr", username)
-                    with open(local_env_yaml, "w", encoding="utf-8") as f:
-                        f.write(content)
-            except Exception:
-                pass
 
     # 2. Create .aiderignore at root if missing
     if not os.path.exists(local_aider_ignore):
@@ -315,4 +334,48 @@ def research_cli():
 
     research_path = os.path.join(pkg_dir, "python", "research_agent.py")
     runpy.run_path(research_path, run_name="__main__")
+
+
+def helper_cli():
+    """Global 'aider-helper' CLI entry point."""
+    import argparse
+    parser = argparse.ArgumentParser(description="aider-helper: Your lifetime AI Factory configuration assistant.")
+    subparsers = parser.add_subparsers(dest="command")
+    
+    # Bootstrap command
+    subparsers.add_parser("bootstrap", help="Bootstrap a new workspace configuration.")
+    
+    # Query command (default)
+    query_parser = subparsers.add_parser("query", help="Query or modify configurations.")
+    query_parser.add_argument("instruction", nargs="?", help="The instruction or question for the helper.")
+    query_parser.add_argument("--file", "-f", default=None, help="Target configuration YAML file.")
+    query_parser.add_argument("--context", "-c", default="", help="Comma-separated extra context files.")
+    query_parser.add_argument("--ask", action="store_true", help="Conversational mode (no file writing).")
+    
+    # Parse args
+    args, unknown = parser.parse_known_args()
+    
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, os.path.join(pkg_dir, "python"))
+    os.environ["AI_FACTORY_PKG_DIR"] = pkg_dir
+    
+    from bootstrap import run_bootstrap, run_query
+    
+    if args.command == "bootstrap":
+        run_bootstrap(".")
+    else:
+        # Fallback to query command if no subcommand matches
+        instruction = args.instruction if hasattr(args, "instruction") else None
+        if not instruction and unknown:
+            instruction = " ".join(unknown)
+        
+        file_val = args.file if hasattr(args, "file") else None
+        context_val = args.context if hasattr(args, "context") else ""
+        ask_val = args.ask if hasattr(args, "ask") else False
+        
+        if not instruction:
+            parser.print_help()
+            sys.exit(0)
+            
+        run_query(instruction, file_val, context_val, ask_val)
 

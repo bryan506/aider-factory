@@ -410,6 +410,18 @@
   accepts_settings:
       - reasoning_effort # Exposes /reasoning-effort command in Aider
 
+- name: gemini/gemini-3.5-flash-lite
+  edit_format: editor-diff
+  use_repo_map: false
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      temperature: 0.2             # Low temperature works safely when reasoning is off
+      reasoning_effort: "minimal"   # Minimizes reasoning overhead for maximum speed
+  accepts_settings:
+      - reasoning_effort
+
 - name: gemini/gemini-3.5-flash
   edit_format: editor-diff
   use_repo_map: true
@@ -418,7 +430,7 @@
   caches_by_default: true
   extra_params:
       temperature: 0.2
-      reasoning_effort: "medium" # Sets reasoning depth (Options: minimal, low, medium, high)
+      reasoning_effort: "minimal" # Sets reasoning depth (Options: minimal, low, medium, high)
   accepts_settings:
       - reasoning_effort # Exposes /reasoning-effort command in Aider
 
@@ -429,7 +441,7 @@
   reminder: sys
   caches_by_default: true
   extra_params:
-      temperature: 0.6
+      temperature: 1.0
       reasoning_effort: "medium" # Sets reasoning depth (Options: minimal, low, medium, high)
   accepts_settings:
       - reasoning_effort # Exposes /reasoning-effort command in Aider
@@ -468,8 +480,8 @@
   # editor_model_name: gemini/gemini-3.1-pro-preview
   # editor_edit_format: editor-diff
   extra_params:
-      temperature: 0.4
-      reasoning_effort: "medium" # Sets reasoning depth (Options: minimal, low, medium, high)
+      temperature: 1.0
+      reasoning_effort: "high" # Sets reasoning depth (Options: minimal, low, medium, high)
   accepts_settings:
       - reasoning_effort # Exposes /reasoning-effort command in Aider
 

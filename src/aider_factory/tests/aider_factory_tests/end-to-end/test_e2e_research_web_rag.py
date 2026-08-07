@@ -137,6 +137,79 @@ class TestE2EResearchWebRAG(unittest.TestCase):
         self.assertIn(rc, (0, 1))
         print("  ✅ Edge Case: Network failures and exceptions handled without crashing.")
 
+    @patch("research_agent.requests.get")
+    @patch("rag_web.requests.head")
+    @patch("rag_web.trafilatura.fetch_url")
+    @patch("rag_web.trafilatura.extract")
+    def test_e2e_sitemap_research_to_oracle_add_web_hand_off(
+        self, mock_extract, mock_fetch, mock_head, mock_get
+    ):
+        """Full Pipeline Hand-off Test:
+        1. research_agent extracts & filters sitemap URLs to file via --sitemap.
+        2. oracle --add-web reads file, converts URLs to Markdown concurrently, and ingests into LanceDB.
+        """
+        print("\n==================================================")
+        print("Starting E2E Sitemap Research -> Oracle Add-Web Hand-off Test...")
+        print("==================================================")
+
+        # 1. Mock sitemap XML response
+        sitemap_xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+            <url><loc>https://example.com/docs/getting-started</loc></url>
+            <url><loc>https://example.com/docs/zh-cn/getting-started</loc></url>
+            <url><loc>https://example.com/blog/announcement</loc></url>
+        </urlset>"""
+
+        sm_resp = MagicMock()
+        sm_resp.status_code = 200
+        sm_resp.content = sitemap_xml.encode("utf-8")
+        mock_get.return_value = sm_resp
+
+        out_urls_file = os.path.join(project_dir, "temp", "e2e_sitemap_urls.txt")
+        os.makedirs(os.path.dirname(out_urls_file), exist_ok=True)
+
+        research_agent.run_sitemap_harvester(
+            "https://example.com/sitemap.xml",
+            grep_pat="docs",
+            grep_ex_pat="zh-cn",
+            out_path=out_urls_file,
+        )
+
+        self.assertTrue(os.path.exists(out_urls_file))
+        with open(out_urls_file, "r", encoding="utf-8") as f:
+            lines = [l.strip() for l in f if l.strip()]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "https://example.com/docs/getting-started")
+        print(f"  ✅ Step 1: Sitemap harvested & filtered to {out_urls_file}")
+
+        # 2. Mock web page fetch & conversion
+        head_resp = MagicMock()
+        head_resp.headers = {"Content-Type": "text/html"}
+        mock_head.return_value = head_resp
+
+        mock_fetch.return_value = "<html><body><h1>Getting Started</h1><p>Documentation text.</p></body></html>"
+        mock_extract.return_value = "# Getting Started\n\nDocumentation text for OpenCode."
+
+        def mock_embed(texts, backend, model, api_base, batch_size=8):
+            return [[0.1] * 384 for _ in texts]
+
+        os.environ["ORACLE_COLLECTION"] = self.collection
+        os.environ["ORACLE_NO_RAG_INGEST"] = "0"
+        os.environ["ORACLE_WEB_WORKERS"] = "2"
+
+        with patch("rag_manager.embed_texts", side_effect=mock_embed):
+            rc = oracle_agent._add_web_maintenance([f"--file:{out_urls_file}"])
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.exists(self.job_dir))
+
+        md_files = [f for f in os.listdir(self.job_dir) if f.endswith(".md")]
+        self.assertTrue(len(md_files) >= 1)
+        print(f"  ✅ Step 2: Batch URL file ingested into LanceDB collection '{self.collection}'")
+
+        if os.path.exists(out_urls_file):
+            os.remove(out_urls_file)
+
 
 if __name__ == "__main__":
     unittest.main()

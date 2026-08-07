@@ -44,25 +44,36 @@ except Exception as e:
     print(f"⚠️ [run_workflow] Auto-initialization warning: {e}", file=sys.stderr)
 
 # Defaults to .env.yml config file
-if len(sys.argv) > 1:
-    yaml_path = sys.argv[1]
+if __name__ == "__main__" or (len(sys.argv) > 1 and not sys.argv[0].endswith("unittest") and sys.argv[1] != "discover"):
+    if len(sys.argv) > 1 and sys.argv[1] != "discover":
+        yaml_path = sys.argv[1]
+    else:
+        clean_path = os.path.join(os.getcwd(), ".aider_factory", ".env.yml")
+        root_path = os.path.join(os.getcwd(), ".env.yml")
+        yaml_path = clean_path if os.path.exists(clean_path) else root_path
 else:
     clean_path = os.path.join(os.getcwd(), ".aider_factory", ".env.yml")
     root_path = os.path.join(os.getcwd(), ".env.yml")
     yaml_path = clean_path if os.path.exists(clean_path) else root_path
 
 if not os.path.exists(yaml_path):
-    print(f"Error: Configuration file {yaml_path} not found. Exiting.")
-    sys.exit(1)
-
-try:
-    with open(yaml_path, "r") as f:
-        config = yaml.safe_load(f)
-except yaml.YAMLError as exc:
-    print(
-        f"\n❌ YAML Parsing Error: The configuration file is malformed.\nDetails: {exc}"
-    )
-    sys.exit(1)
+    if __name__ == "__main__":
+        print(f"Error: Configuration file {yaml_path} not found. Exiting.")
+        sys.exit(1)
+    else:
+        config = {}
+else:
+    try:
+        with open(yaml_path, "r") as f:
+            config = yaml.safe_load(f) or {}
+    except yaml.YAMLError as exc:
+        if __name__ == "__main__":
+            print(
+                f"\n❌ YAML Parsing Error: The configuration file is malformed.\nDetails: {exc}"
+            )
+            sys.exit(1)
+        else:
+            config = {}
 
 if not isinstance(config, dict):
     print(
@@ -320,13 +331,14 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
     )
     # Per-phase retrieval strategy, else the global default.
     phase_retrieval_mode = rag_phase_cfg.get("retrieval_mode", rag_default_retrieval)
+    phase_top_k = str(rag_phase_cfg.get("top_k", rag_top_k))
     rag_env = {
         "ORACLE_CONFIG_FILE": str(yaml_path),
         "ORACLE_PHASE_INDEX": str(phase_idx),
         "ORACLE_AGENT_MODEL": RAG_AGENT,
         "ORACLE_RAG_DB_DIR": phase_db_dir,
         "ORACLE_COLLECTION": phase_collection,
-        "ORACLE_TOP_K": rag_top_k,
+        "ORACLE_TOP_K": phase_top_k,
         "ORACLE_RETRIEVE_MODE": phase_retrieval_mode,
         "ORACLE_ARCHITECT_MODEL": ARCHITECT_AGENT,
         "ORACLE_EMBED_MODEL": rag_embed_model,
@@ -469,7 +481,7 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
             "ignore": rag_ignore,
             "ocr_api_base": ocr_api_base,
             "ocr_agent": models.get("ocr_agent") or rag_default_ocr_agent,
-            "ocr_prompt": phase.get("ocr_prompt") or rag_default_ocr_prompt,
+            "ocr_prompt": rag_phase_cfg.get("ocr_prompt") or phase.get("ocr_prompt") or rag_default_ocr_prompt,
             "overwrite": phase_overwrite,
             "cer_threshold": rag_cer_threshold,
             "ocr_max_retries": rag_ocr_max_retries,

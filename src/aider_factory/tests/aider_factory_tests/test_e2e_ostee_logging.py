@@ -19,7 +19,9 @@ if python_dir not in sys.path:
     sys.path.insert(0, python_dir)
 
 import aggregate_costs
-import run_workflow
+from unittest.mock import patch
+with patch("sys.exit"):
+    import run_workflow
 
 
 def test_ostee_captures_pty_and_python_output():

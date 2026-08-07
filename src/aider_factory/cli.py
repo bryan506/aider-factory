@@ -351,6 +351,8 @@ def helper_cli():
     query_parser.add_argument("--file", "-f", default=None, help="Target configuration YAML file.")
     query_parser.add_argument("--context", "-c", default="", help="Comma-separated extra context files.")
     query_parser.add_argument("--ask", action="store_true", help="Conversational mode (no file writing).")
+    query_parser.add_argument("--terminal", "-t", action="store_true", help="Terminal agent mode (strips YAML config context).")
+    query_parser.add_argument("--clear", action="store_true", help="Wipe the active helper session history.")
     
     # Parse args
     args, unknown = parser.parse_known_args()
@@ -359,23 +361,30 @@ def helper_cli():
     sys.path.insert(0, os.path.join(pkg_dir, "python"))
     os.environ["AI_FACTORY_PKG_DIR"] = pkg_dir
     
-    from bootstrap import run_bootstrap, run_query
+    from bootstrap import run_bootstrap, run_query, clear_helper_session
     
     if args.command == "bootstrap":
         run_bootstrap(".")
     else:
-        # Fallback to query command if no subcommand matches
-        instruction = args.instruction if hasattr(args, "instruction") else None
+        terminal_val = getattr(args, "terminal", False) or ("--terminal" in sys.argv or "-t" in sys.argv)
+        clear_val = getattr(args, "clear", False) or ("--clear" in sys.argv)
+
+        if clear_val:
+            clear_helper_session(terminal_mode=terminal_val)
+            sys.exit(0)
+            return
+
+        instruction = getattr(args, "instruction", None)
         if not instruction and unknown:
-            instruction = " ".join(unknown)
+            instruction = " ".join([u for u in unknown if u not in ("--terminal", "-t", "--ask", "--clear")])
         
-        file_val = args.file if hasattr(args, "file") else None
-        context_val = args.context if hasattr(args, "context") else ""
-        ask_val = args.ask if hasattr(args, "ask") else False
+        file_val = getattr(args, "file", None)
+        context_val = getattr(args, "context", "")
+        ask_val = getattr(args, "ask", False)
         
         if not instruction:
             parser.print_help()
             sys.exit(0)
             
-        run_query(instruction, file_val, context_val, ask_val)
+        run_query(instruction, file_val, context_val, ask_val, terminal_mode=terminal_val)
 

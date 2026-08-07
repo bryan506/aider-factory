@@ -81,7 +81,8 @@ class TestOracleAddWebCLI(unittest.TestCase):
             with open(urls_file, "w", encoding="utf-8") as f:
                 f.write("https://example.com/inherited_test.html\n")
 
-            # Simulate batch: false task environment variable inheritance
+            # Clean environment overrides left by prior tests
+            os.environ.pop("ORACLE_NO_RAG_INGEST", None)
             os.environ["ORACLE_COLLECTION"] = "response_template"
             os.environ.pop("ORACLE_EXPLICIT_COLLECTION", None)
 

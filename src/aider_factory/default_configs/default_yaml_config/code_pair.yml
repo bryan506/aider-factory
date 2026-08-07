@@ -33,6 +33,7 @@ phases:
           vectordb_overwrite: false
           ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
           query_prefix: "Instruct: Given a coding query, retrieve relevant passages\nQuery: "
+          embed_backend: "sentence-transformers"
           chunk_size_chars: 800
           chunk_overlap_chars: 100
           top_k: 30
@@ -117,4 +118,3 @@ phases:
 #   /run .aider_factory/bash/oracle --add-table path/to/dir/  # add folder to collection
 #   /run .aider_factory/bash/oracle --rm-file doc.md          # remove from collection
 #   /run .aider_factory/bash/oracle --rm-table old_collection # remove entire table
-

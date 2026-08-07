@@ -22,6 +22,7 @@ If you want a simple, lightweight, and repeatable way to automate Aider without 
 
 ### 2. Modular, Standalone CLI Clients
 You do not have to buy into a monolithic ecosystem. Each component of `aider-factory` is exposed as a global, standalone command-line client that you can lift and use anywhere:
+* **`aider-helper`**: Dual-purpose configuration architect and general AI terminal assistant.
 * **`aider-oracle`**: A blazing-fast local RAG client.
 * **`aider-validate`**: A deterministic fact-checker and quote-sticher for CI/CD.
 * **`aider-research`**: A private metasearch CLI.
@@ -70,12 +71,35 @@ A vendor-free metasearch CLI. It auto-provisions a local, rootless **SearXNG** c
 
 ---
 
-## 📦 Installation
+## ⏱️ Quick Start in 5 Commands
+
+```bash
+# 1. Install Podman or Docker (for rootless, zero-config SearXNG web research)
+sudo apt install -y podman
+
+# 2. Install aider-factory globally via uv
+uv tool install --force git+ssh://git@gitlab.com/bryanrod182/aider-factory.git
+
+# 3. Export your API key
+export GEMINI_API_KEY="your-api-key-here"
+
+# 4. Navigate to your project directory and initialize workspace
+cd /path/to/your-project
+aider-factory
+
+# 5. Bootstrap your pipeline config interactively (or edit .aider_factory/.env.yml directly)
+aider-helper bootstrap
+```
+
+---
+
+## 📦 Installation Options
 
 Ensure you have Python 3.12 and [uv](https://astral.sh/uv/) installed.
 
 ### Global Installation (Recommended)
 ```bash
+sudo apt install -y podman
 uv tool install --force git+ssh://git@gitlab.com/bryanrod182/aider-factory.git
 ```
 
@@ -86,39 +110,21 @@ cd aider-factory
 uv tool install --force --editable .
 ```
 
-To support private, vendor-free web research, install Podman (or Docker):
-```bash
-sudo apt install -y podman
-```
-
----
-
-## ⏱️ Quick Start in 60 Seconds
-
-### 1. Initialize Your Workspace
-Navigate to any codebase and initialize the zero-clutter workspace:
-```bash
-cd /path/to/your-project
-aider-factory
-```
-This bootstraps `.aiderignore` and a default configuration template at `.aider_factory/.env.yml`.
-
-### 2. Configure Your Keys
-Export your API keys (globally in your shell profile or locally in a `.env` file):
-```bash
-export GEMINI_API_KEY=\"AIzaSy...\"
-export OPENAI_API_KEY=\"sk-proj...\"
-```
-
-### 3. Run Your First Pipeline
-Open `.aider_factory/.env.yml`, configure your target files, and run:
-```bash
-aider-factory
-```
-
 ---
 
 ## 📖 Standalone CLI Examples
+
+### General AI Terminal Assistant (`aider-helper --terminal`)
+```bash
+# Ask general software engineering questions directly from your terminal
+aider-helper query --terminal "Explain compound indexing in SQLite"
+
+# Pass workspace context files to the terminal assistant
+aider-helper query -t --context src/main.py "Review this file for potential memory leaks"
+
+# Clear the interactive terminal assistant session history
+aider-helper -t --clear
+```
 
 ### Metasearch the Web Privately
 ```bash

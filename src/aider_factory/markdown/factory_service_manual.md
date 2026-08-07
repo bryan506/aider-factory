@@ -127,6 +127,9 @@ cd your-project
 
 # 2. Run aider-factory once to initialize the workspace
 aider-factory
+
+# 3. Or, use the interactive helper to bootstrap a custom configuration
+aider-helper bootstrap
 ```
 
 On the first run, the tool will automatically bootstrap a 100% zero-clutter agent workspace:
@@ -154,7 +157,16 @@ Inside the git-ignored `.aider_factory/` subdirectory:
 
 The AI Factory uses environment variables to authenticate with cloud model providers. You can set them in one of two places:
 
-##### Option A: Globally in your shell profile (Recommended)
+**1. `aider-helper` (Recommended for interactive config edits)**
+The `aider-helper` CLI automatically detects your active API key and uses it for model
+calls. It also provides a `--clear` command to wipe its session history.
+
+```bash
+aider-helper query "What is the current architect model?"
+aider-helper clear
+```
+
+##### Option A: Globally in your shell profile (Recommended for autonomous runs)
 
 Add these lines to the end of your `~/.bashrc` or `~/.zshrc` file so they are always active:
 
@@ -165,7 +177,7 @@ export OPENAI_API_KEY="sk-proj-..."
 
 Then run `source ~/.zshrc` to reload.
 
-##### Option B: Locally in a `.env` file
+##### Option B: Locally in a `.env` file (Least recommended)
 
 Create a local, git-ignored `.env` file at the root of your project:
 
@@ -177,6 +189,46 @@ OPENAI_API_KEY=sk-proj-...
 ---
 
 Reference the default `.aider_factory/.env.yml` inside your `.aider_factory/` folder to get started. The initialized version includes a working YAML configuration out of the box.
+
+---
+
+### AI Factory Helper (`aider-helper`)
+
+The `aider-helper` CLI is your interactive configuration assistant. It uses an LLM to
+understand your intent and apply precise, minimal-delta edits to your `.env.yml` files.
+It maintains a persistent session (KV cache) to remember prior conversations and
+context.
+
+```bash
+# Bootstrap a new workspace (interactive interview)
+aider-helper bootstrap
+
+# Query the active configuration
+aider-helper query "What is the current architect model?"
+
+# Modify the active configuration
+aider-helper query "Change the architect model to gemini/gemini-3.5-flash in the first
+phase."
+
+# Target a specific config file
+aider-helper query --file .aider_factory/.env_my_project.yml "Enable run_job_one in the
+'Code' phase."
+
+# Provide extra context files for the helper to reference
+aider-helper query --context src/main.py,docs/api.md "Update the target_files in the
+first phase to include src/main.py and docs/api.md."
+
+# Conversational mode (no file writing)
+aider-helper query --ask "What are the available RAG retrieval modes?"
+
+# General AI Terminal Assistant Mode (strips YAML config context)
+aider-helper query --terminal "How do I optimize a PostgreSQL query with CTEs?"
+aider-helper query -t --context src/main.py "Identify any race conditions in this code"
+
+# Clear helper session history (target specific session)
+aider-helper --clear            # Clears YAML configuration session history
+aider-helper --terminal --clear # Clears terminal assistant session history
+```
 
 ---
 
@@ -608,6 +660,35 @@ systemctl --user daemon-reload
 systemctl --user enable --now searxng.service
 ```
 
+#### Standalone Web Research CLI (`aider-research`)
+
+The `aider-research` CLI supports both semantic web search (via SearXNG) and deterministic sitemap harvesting:
+
+```bash
+# Query default engines
+aider-research search "quantum computing error correction" --top 10
+
+# Academic search mode (filters strictly to arXiv, Google Scholar, Crossref, CORE)
+aider-research search "liquidity adjusted volatility" --academic --time-range month
+
+# Read query from a file (multiline inputs are automatically collapsed to a single-line query)
+aider-research search --file ./.query_prompt.txt --academic
+
+# Sitemap Discovery & URL Filtering (deterministic, $0 LLM cost)
+aider-research search "https://opencode.ai/" --sitemap --grep "docs|api" --grep-exclude "zh-cn|de|ja" --site-depth 2 --out temp/opencode_urls.txt
+```
+
+#### Multi-Stage URL Conversion Pipeline (`rag_web.py`)
+
+When URLs are processed via `aider-research` or ingested via `oracle --add-web`, the pipeline executes a deterministic multi-stage classification and extraction pipeline (`rag_web.py`):
+
+1. **Content-Type HEAD Sniff:** Performs a fast HEAD request. If `application/pdf` or a `.pdf` extension is detected, it directly downloads the binary PDF.
+2. **`llms.txt` Discovery:** Checks `{domain}/llms.txt`. If present ($>50$ bytes), it extracts the structured AI-friendly Markdown documentation.
+3. **Trafilatura HTML Extraction:** Fetches HTML and converts main body text into clean Markdown with embedded table structures.
+4. **Headless Playwright Fallback:** If Trafilatura fails or yields $<100$ bytes (e.g., JavaScript Single-Page Applications), it launches a headless Chromium browser instance via Playwright to render the page and extract Markdown. (Playwright browser binaries are automatically provisioned into `~/.cache/ms-playwright` on first run if the `playwright` Python library is detected).
+
+Output files are saved using deterministic naming (`<domain>_<path_stem>.md` / `.pdf`) in the collection directory.
+
 ---
 
 ### Pipeline Execution Dependencies
@@ -843,21 +924,94 @@ name: "Multi-Endpoint Pipeline"
 working_directory: "/home/user/projects/my-app"
 
 endpoints:
-  architect_api_base: "http://192.168.100.2:8081/v1" # Remote llama-server (Tablet)
-  editor_ollama_api: "http://localhost:11434" # Local Ollama
-  editor_test_ollama_api: "http://localhost:11434" # Local Ollama (test instance)
-  rag_agent_api: "http://192.168.100.2:8081/v1" # Remote llama-server
-  ocr_api_base: "http://192.168.100.2:8081/v1" # Vision model for OCR (set = local, "" = cloud via litellm)
-  embed_api_base: "http://192.168.100.2:8080/v1" # Embedding model (set = local, "" = cloud via litellm)
+  architect_api_base: "http://192.168.100.2:8080/v1"
+  editor_ollama_api: "http://192.168.100.1:8080/v1"
+  editor_test_ollama_api: "http://192.168.100.1:8080/v1"
+  rag_agent_api: "http://192.168.100.1:8080/v1"
+  grounding_agent_api: "http://192.168.100.1:8090/v1"
+  ocr_api_base: "http://192.168.100.2:8081/v1"
+  embed_api_base: "http://192.168.100.1:8080/v1"
 
 phases:
   - name: "Phase 1: Implementation"
     enabled: true
+
     models:
-      architect_agent: "openai/qwen3.5-122b-a10b-90k:latest" # -> 192.168.100.2:8081/v1
-      editor_agent: "ollama/qwen3.6-27B-90k:latest" # -> localhost:11434
-      editor_agent_test: "lm_studio/qwen3.6-27B-90k-udq4kxl:latest" # -> localhost:11434
-      rag_agent: "openai/qwen3.6-27b-90k:latest" # -> 192.168.100.2:8081/v1
+        architect_agent: "openai/qwen3.5-122b-a10b-90k:latest"
+        editor_agent: "ollama/qwen3.6-27B-90k:latest"
+        editor_agent_test: "lm_studio/qwen3.6-27B-90k-udq4kxl:latest"
+        editor_agent_test_fallback: "openai/qwen3.5-122b-a10b-90k:latest"
+        rag_agent: "openai/qwen3.6-27b-90k:latest"
+        ocr_agent: "glm-ocr-f16:LATEST"
+        embed_model: "qwen3-embedding-8b-8k:LATEST"
+        grounding_agent: "openai/minicheck-flan-t5-large"
+
+    rag:
+        collection_name: "BaseFeatures_lib"
+        batch: true
+        retrieval_mode: top_k
+        run_ocr_rag: false
+        vectordb_overwrite: false
+        ocr_prompt: "Extract text, tables, math, code, and documentation into clean Markdown. Preserve all structural integrity."
+        query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: "
+        chunk_size_chars: 800
+        chunk_overlap_chars: 100
+        top_k: 30
+        cer_threshold: 0.05
+        ocr_max_retries: 2
+        ocr_parallel: 8
+        code_chunk_size: 2000
+        ocr_max_tokens: 4096
+        embed_backend: "sentence-transformers"
+        working_repo: ""
+        code_exts: null
+        text_doc_exts: null
+        ignore: null
+
+    oracle:
+        start_job: false # Run programmatic document generator first
+        template: "src/aider_factory/markdown/internal/analyze_bugs.md"
+        full_document: false # Send entire paper text instead of chunks
+        pre_edit_debate:
+            enabled: false # Hold debate before making any code edits
+            job_debate_template: ""
+
+    toggles:
+        pair_programming: true
+        run_job_one: true
+        run_job_two: true
+        iterate_test: true
+        auto_test: false
+        sticky_context: true
+
+    validation:
+        enabled: false
+        validation_tag: "evidence"
+        region_threshold: 0.60
+        region_margin: 2
+        region_paragraphs: 0
+        region_top_k: 5
+        validation_loops: 3
+        redo_oracle_job: false
+        verify_all_claims: false
+        entail_threshold: 0.5
+
+    escalation_debate:
+        loops: 4
+        rounds: 2
+        pass_history: true
+
+    files:
+        target_files: []
+        extra_editable_files: []
+        test_files: []
+        context_files_job: []
+        context_files_test: []
+
+    plans:
+        job_one_plan: "markdown/templates/general.md"
+        job_two_plan: "markdown/templates/testing.md"
+        iterate_plan: "markdown/templates/testing_unit_iterate.md"
 ```
 
 ### 5.2 Iteration Loops & Fallback Logic
@@ -1049,13 +1203,15 @@ Templates are organized into three tiers based on their relationship to the pipe
 | `general.md`                          | `markdown/templates/`           | `plans.job_one_plan`         | User           | Code          | Generic blank template for any task                                               |
 | `literary_review_template.md`         | `markdown/templates/`           | `oracle.template`            | User           | Review        | Oracle's generation instructions for literature reviews                           |
 | `job_debate.md`                       | `markdown/templates/`           | `oracle.job_debate_template` | User (create)  | Code debate   | Optional. Seeds the pre-edit debate before code is written                        |
-| `analyze_bugs.md`                     | `markdown/internal/`            | `oracle.template`            | Infrastructure | Code debate   | Architect's debugging instructions for the escalation debate                      |
+| `analyze_bugs.md`                     | `src/aider_factory/markdown/internal/` | `oracle.template`     | Infrastructure | Code debate   | Architect's debugging instructions for the escalation debate                      |
 | `deliberation_evidence_template.md`   | `markdown/internal/`            | `plans.deliberate_plan`      | Infrastructure | Review debate | Architect's role in evidence grounding debates                                    |
 | `apply_evidence_template.md`          | `markdown/internal/`            | `plans.apply_plan`           | Infrastructure | Review apply  | Apply editor's rules for inserting Oracle's verbatim corrections                  |
 | `contextual_revalidation_template.md` | `markdown/internal/`            | `plans.iterate_plan`         | Infrastructure | Review heal   | Architect's instructions for the heal loop                                        |
 | `strategy_instruct_template.md`       | `markdown/oracle_pre_plan/`     | `plans.ocr_phase_plan`       | Strategy       | Phase-0       | Architect instructions for querying oracle and building a strategy plan           |
 | `strategy_template.md`                | `markdown/oracle_pre_plan/`     | (output artifact)            | Strategy       | Phase-0       | Empty target populated by the architect; consumed downstream via `sticky_context` |
 | `alt_apply_oracle_output_template.md` | `markdown/oracle_pre_plan/`     | `plans.apply_plan` (alt)     | Strategy       | Review apply  | Alternative apply plan for post-validation oracle corrections                     |
+| `strategy_instruct_template.md`       | `markdown/oracle_pre_plan/`     | `plans.ocr_phase_plan`       | Strategy       | Phase-0       | Instructions for querying oracle and generating a grounded strategy plan         |
+| `strategy_template.md`                | `markdown/oracle_pre_plan/`     | `target_files`               | Strategy       | Phase-0       | Empty target populated by architect; passed downstream via `sticky_context`      |
 
 #### Writing Custom Templates
 
@@ -1080,11 +1236,11 @@ To enable pre-edit debates (Architect consults Oracle before writing code), conf
      start_job: false # Code mode (no generation)
      architect_oracle_chat: true # Enable pre-edit debate
    ```
-3. **Set debate parameters** in `oracle_toggles`:
+3. **Set debate parameters** in `escalation_debate`:
    ```yaml
-   oracle_toggles:
-     debate_loops: 4 # Max architect/oracle turns per debate (stops early on agreement)
-     debate_rounds: 2 # Escalation cycles after test-fix loop exhausts
+   escalation_debate:
+     loops: 4 # Max architect/oracle turns per debate (stops early on agreement)
+     rounds: 2 # Escalation cycles after test-fix loop exhausts
    ```
 4. **Assign a RAG-capable model** as `rag_agent` (the oracle model). Cloud models (`gemini/`) work well.
 5. **Ensure the embedding endpoint is reachable** — the oracle embeds the query to search LanceDB. Check that `rag.embed_api_base` points to a running llama-server with the embedding model loaded.
@@ -1175,7 +1331,10 @@ This forces ground-truth answers directly to `stdout`.
 
 The RAG/OCR pipeline ingests both literature (PDFs, images, loose markdown) and code repositories into LanceDB. It handles code and documents differently:
 
-- **AST-Aware Code Chunking**: Code files (`.py`, `.R`, `.js`, etc.) from the configured `working_repo` are parsed using `tree-sitter`. The pipeline chunks the abstract syntax tree by structural boundaries (functions, classes) to preserve semantic integrity. If a language grammar is missing or parsing fails, the pipeline _hard-skips_ the file rather than corrupting the database with fractured text. Oversized AST leaf nodes (e.g. a 146KB string literal) are split via `_text_split_fallback()` at line boundaries with configurable overlap, preserving the AST metadata (`symbol`, `line_start`, `line_end`) while guaranteeing no chunk exceeds the embedding model's context.
+- **AST-Aware Code Chunking**: Code files (`.py`, `.R`, `.js`, etc.) from the configured `working_repo` are parsed using `tree-sitter`. The pipeline chunks the abstract syntax tree by structural boundaries (functions, classes) to preserve semantic integrity. If a language grammar is missing or parsing fails, the pipeline _hard-skips_ the file rather than corrupting the database with fractured text. Oversized AST leaf nodes (e.g. a large array or string literal exceeding `code_chunk_size`, default 2000 chars) trigger `_text_split_fallback()`, which subdivides the node at line boundaries with overlap while preserving AST metadata (`symbol`, `line_start`, `line_end`).
+- **Bounded Ingestion Memory (`FLUSH_CHUNK_THRESHOLD`)**: To prevent VRAM/RAM exhaustion during large codebase ingestions, `rag_manager.py` flushes and embeds buffered chunks once the queue reaches `FLUSH_CHUNK_THRESHOLD = 2000` chunks. This caps peak memory usage and persists progress incrementally.
+- **Automatic IVF_PQ Indexing (`IVF_PQ_MIN_ROWS`)**: LanceDB tables holding fewer than 50,000 rows use exact flat KNN search. Once a table crosses `IVF_PQ_MIN_ROWS = 50000` rows, `rag_manager.py` automatically constructs a LanceDB `IVF_PQ` Approximate Nearest Neighbor (ANN) index for fast, scalable retrieval.
+- **CER-Gated OCR Retries & PDF Fallback**: Page OCR calculates Character Error Rate (CER) on normalized alphanumeric text (`[^a-z0-9]`). If CER exceeds `cer_threshold` (0.05), page OCR is retried up to `ocr_max_retries` (default 2). If CER remains $> 0.40$ on a digital PDF with a native text layer, the pipeline falls back to extracting clean text directly from the PDF embedded text layer.
 - **Fenced-Aware Document Chunking**: Documents and OCR sidecars are processed via a semantic chunker that preserves the opening and closing fences of oversized Markdown code blocks.
 - **Incremental Append & Updates**: The pipeline natively scans the target paths and skips vision/OCR passes for files that already exist in the tables.
 - **Active File Exclusion**: Any file that is a target, editable, or context file in the active phase is automatically excluded from the vector store. The `working_repo` is auto-derived from `os.path.basename(working_directory)` when not explicitly set in the YAML. This prevents stale code copies from polluting oracle retrieval. The explicit `rag.working_repo` override still works for edge cases.
@@ -1206,8 +1365,14 @@ Before running a Phase with `toggles.run_ocr_rag: true`, place your raw document
 
 The phase-level `batch` toggle controls how the documents in a collection map to LanceDB tables:
 
-- **`batch: true`** (default) — enables the **Multi-Table, Type-Routed** database architecture. Documents are chunked into type-specific tables (`<coll>_<repo>_code`, `<coll>_<repo>_docs`, `<coll>_docs`). Best for **corpus-wide** retrieval: the Oracle natively uses **Reciprocal Rank Fusion (RRF)** to fuse results from all tables in the collection directory simultaneously (automatically triggers the `*` fuse-all sentinel for pipeline debates). If a bare collection name is passed (e.g. via `oracle --collection MyProject`), the Oracle falls back to **prefix-matching** all tables starting with `MyProject_` and fuses them via RRF.
-  - You can filter the fusion by corpus using `--type code` or `--type docs`.
+- **`batch: true`** (default) — enables the **Multi-Table, Type-Routed** database architecture. Documents are chunked into type-specific tables (`<coll>_<repo>_code`, `<coll>_<repo>_docs`, `<coll>_docs`). Best for **corpus-wide** retrieval: the Oracle natively uses **Reciprocal Rank Fusion (RRF)** to fuse results from all tables in the collection directory simultaneously (automatically triggers the `*` fuse-all sentinel for pipeline debates).
+
+  **Reciprocal Rank Fusion (RRF) Mechanics:**
+  When querying across multiple tables, `oracle_agent.py` executes parallel similarity searches across all constituent tables and merges the ranked lists using Reciprocal Rank Fusion:
+  $$RRF\_Score(chunk) = \sum_{t \in Tables} \frac{1}{60 + rank_t(chunk)}$$
+  Deduplication is performed using the key `(source_file, text[:64])`. The top $k$ highest-scoring chunks across all tables are returned.
+
+  - You can filter fusion by corpus using `--type code` (targets `*_code` tables) or `--type docs` (targets `*_docs` tables).
 - **`batch: false`** — each document gets its **own isolated table** (named after the sanitized file stem). Best for **per-document** work (focused queries, per-paper literature reviews). Two important consequences:
   - There is **no combined table**, and `--type` filtering excludes these tables. An Oracle query without `--collection` finds nothing — you must target a document (`oracle --collection <table>` or `oracle --list` to discover names).
   - A wildcard under `files:` (e.g. `literary_review/*.md`) is **glob-expanded and alphabetically sorted**. The pipeline **auto-creates** a per-document output `.md` for each source doc before expanding `target_files`, so a fresh collection resolves cleanly.
@@ -1242,15 +1407,18 @@ oracle --db <dir> ...                               # point at a different lance
 oracle --mode top_k|no_retrieve|full_document ...   # per-call retrieval override
 oracle --type code|docs ...                         # narrow RRF fusion to code or doc tables only (batch:true)
 
-# Database Maintenance & Management Commands:
-oracle --list-files                                 # list unique files in the active collection
-oracle --rm-file <filename>                         # surgically delete file chunks from the collection database
-oracle --rm-table <table_name>                      # drop a specific table from the database
-oracle --rm-db                                      # wipe the collection database (preserves OCR cache)
+# Complete Database Maintenance CLI:
+oracle --list-files                                 # list unique files across all collection tables
 oracle --add-file <path1> <path2> ...               # copy file(s) into collection and incrementally ingest
-oracle --add-table <path1> <path2> ...              # copy folder(s) into collection and incrementally ingest
-oracle --add-web <url1> [url2...]                   # fetch web page or .pdf link and incrementally ingest
-oracle --add-web --file <urls.txt>                  # fetch line-separated URL file (supports ~/ and relative paths)
+oracle --add-table <folder1> <folder2> ...          # copy folder(s) into collection and incrementally ingest
+oracle --add-web <url1> [url2...]                   # download URL/PDF and incrementally ingest into LanceDB
+oracle --add-web --file <urls.txt>                  # ingest line-separated URL file (supports ~/ and relative paths)
+oracle --add-web --file:<urls.txt>                  # explicit inline syntax for URL list files
+oracle --add-web --file <urls.txt> --no-rag         # convert to Markdown ONLY; skip LanceDB vector indexing
+oracle --add-web --file <urls.txt> --workers 8      # parallel concurrent web fetching (8 worker threads)
+oracle --rm-file <filename>                         # surgically delete file chunks across all collection tables
+oracle --rm-table <table_name>                      # drop a specific LanceDB table
+oracle --rm-db                                      # wipe lancedb/ vector store (preserves Markdown & OCR cache)
 ```
 
 `--collection`/`--db`/`--mode`/`--list` and the maintenance commands are operator/power controls; the agent-facing skill (`.aider_factory/markdown/skills/oracle.md`) deliberately surfaces only `"question"`, `--file`, and `--collection` to keep the agent focused.
@@ -1263,9 +1431,9 @@ oracle --add-web --file <urls.txt>                  # fetch line-separated URL f
 
 Set the default per phase via `retrieval_mode:` (global default `rag.retrieval_mode`), or override per call with `--mode`. (The `oracle` path ignores this and uses its own `full_document` flag.)
 
-**Query Truncation:** When retrieving via `top_k`, the query text is truncated to 6000 characters before embedding (`_MAX_EMBED_CHARS`). This prevents oversized prompts (e.g. a debate prompt with full code files) from exceeding the embedding model's context window and producing a diluted embedding vector. Short interactive queries pass through unchanged.
+**Query Truncation (`_MAX_EMBED_CHARS`):** When retrieving via `top_k`, the query text is truncated to 6,000 characters before embedding (`_MAX_EMBED_CHARS = 6000`). This prevents long debate prompts or attached code context from overflowing embedding model context windows (e.g. `sentence-transformers` or `BAAI/bge-m3`) and causing VRAM OOMs.
 
-**Prompt File (E2BIG Prevention):** In debate mode, the full oracle prompt (system instruction + code files + architect proposal) is written to a temporary file and passed via `--file` instead of as a CLI argument. This prevents Linux `E2BIG` errors (`Argument list too long`) when the prompt exceeds `ARG_MAX` (~2 MB).
+**Temporary Prompt Files (`E2BIG` OS Safeguard):** During debate turns, full prompts containing source code, failing logs, and proposals can exceed several megabytes. Passing these directly as command-line arguments to subprocesses triggers a Linux kernel `E2BIG` error (`Argument list too long`). Orchestrate automatically writes debate prompts to temporary files under `.aider_factory/.oracle_prompt_<tmp>.txt` and executes Oracle calls via `--file <tmp_file>`, safely bypassing OS buffer limits.
 
 #### LanceDB Database Maintenance & Management
 
@@ -1381,7 +1549,7 @@ Surgically delete the entire LanceDB database directory for the active collectio
 
 When a phase declares an `oracle:` block **and** `pair_programming` is false, it configures both autonomous review generation and pre-edit dialogues.
 
-**Zero-RAG Bypass:** If a phase configuration specifies `vector_store.collection_name: []` (empty list), the pipeline bypasses LanceDB vector ingestion and retrieval entirely. In this mode, both the Programmatic Oracle and Pre-Edit debates will rely strictly on the raw text contents of the files defined in `target_files` and `context_files_job` injected directly into the prompt.
+**Zero-RAG Bypass:** If a phase configuration specifies `rag.collection_name: ""` (empty string or `[]`), the pipeline bypasses LanceDB vector ingestion and retrieval entirely. In this mode, both the Programmatic Oracle and Pre-Edit debates will rely strictly on the raw text contents of the files defined in `target_files` and `context_files_job` injected directly into the prompt.
 
 If `start_job: true` (Review Mode), the phase runs **no Aider session**. Instead, the Oracle reads the `template`, pulls that document's knowledge (the whole document if `full_document: true`, or raw file contents if Zero-RAG), synthesizes an answer, and writes it straight to the target file. This powers automated literature reviews:
 
@@ -1431,21 +1599,62 @@ Each CLI tool has a focused "skill" doc under `.aider_factory/markdown/skills/` 
 
 Assign the Oracle model via `rag_agent` in `.env.yml`, and disable reasoning for fast, clean CLI returns:
 
-```yaml
-# In .env.yml (per phase, or as defaults)
-rag_agent: "openai/qwen3.6-27b-90k:latest"
+---
 
+### AI Factory Helper & Terminal Agent (`aider-helper`)
+
+The `aider-helper` CLI serves a dual role in your workspace:
+1. **Configuration Architect (Default):** Understands pipeline configuration schema, maintains `.env.yml` state, and applies minimal-delta edits to pipeline settings.
+2. **General AI Terminal Assistant (`--terminal` / `-t`):** Strips configuration persona constraints and YAML documentation warm-up context, transforming `aider-helper` into a clean, general-purpose AI software engineering assistant right in your terminal.
+
+Both modes maintain independent persistent sessions (`.helper_session.json` vs `.helper_terminal_session.json`), preserving warm KV caches without context cross-contamination.
+
+```bash
+# --- Configuration Architect Mode ---
+# Bootstrap a new workspace (interactive interview)
+aider-helper bootstrap
+
+# Query the active configuration
+aider-helper query "What is the current architect model?"
+
+# Modify the active configuration
+aider-helper query "Change the architect model to gemini/gemini-3.5-flash in the first phase."
+
+# Target a specific config file
+aider-helper query --file .aider_factory/.env_my_project.yml "Enable run_job_one in the 'Code' phase."
+
+# Provide extra context files for configuration editing
+aider-helper query --context src/main.py,docs/api.md "Update target_files to include src/main.py."
+
+# Conversational mode (no file writing)
+aider-helper query --ask "What are the available RAG retrieval modes?"
+
+# Clear configuration session history
+aider-helper --clear
+
+# --- General AI Terminal Assistant Mode (--terminal / -t) ---
+# Ask general software engineering questions directly from your shell
+aider-helper query --terminal "Explain compound indexing in SQLite"
+
+# Query terminal assistant with workspace context files
+aider-helper query -t --context src/main.py "Review this file for memory leaks and concurrency risks"
+
+# Clear terminal assistant session history
+aider-helper --terminal --clear
+aider-helper -t --clear
+```
 
 ### The Oracle Session
-
-The Knowledge Oracle is not stateless; it maintains session state for KV cache prefix-matching, conversation continuity, and follow-up questions.
 
 #### 1. Session Types & Files
 The Oracle maintains two separate session files to isolate conversational contexts:
 - `.oracle_session.json` — Used for regular, interactive `/run oracle "question"` queries.
-- `.oracle_debate_session.json` — Used for multi-turn debates (both CLI debates and autonomous pipeline deliberations).
+- `.oracle_debate_session.json` — Used for multi-turn debates (both CLI debates and
+autonomous pipeline deliberations).
+- `.helper_session.json` — Used for `aider-helper` CLI sessions.
 
-These are kept separate because the apply-phase cleanup wipes the main pipeline sessions but must not destroy debate context.
+These are kept separate because the apply-phase cleanup wipes the main pipeline
+sessions but must not destroy debate context.
 
 #### 2. CLI Debate Session Lifecycle
 - **First Invocation**: The Oracle loads the full context, target files, and RAG chunks, then runs Oracle Turn 0 to generate a grounded assessment.
@@ -1525,11 +1734,15 @@ as an audit trail:
 | `[fixed]`       | the quote was failing and has since been corrected (by the deterministic auto-fix or by an agent) so that it is now a verbatim substring. | the validator (deterministic)                |
 | `[unsupported]` | a quote that an **agreed** debate still could not ground — provably no matching span exists. Text is preserved; flagged for a human.      | the validator (deterministic, finalize step) |
 
+**Sentinel Exemption Rule:**
+Quotes matching the explicit "no evidence" marker `"not specified in paper"` (case-insensitive, trailing periods stripped) represent intentional terminal states indicating the field has no source support. The validator (`validator.py`) skips sentinel quotes during audits; they are never flagged, counted as errors, or relabeled.
+
 **The golden rule — only the validator writes grounding tags.** Agents (the generator, the heal
 architect, the apply editor) only ever write `[evidence]` and edit quote _text_. The deterministic
 validator is the sole authority that promotes `[evidence] → [validated]/[fixed]` or flags
-`[unsupported]`. A model can never award itself a passing grade — that is what makes the audit trail
-trustworthy.
+`[unsupported]`. If an ungrounded soft-quote (containing LaTeX `$` math or `(OCR-uncertain)`) holds
+an unproven `[fixed]` or `[validated]` tag, the validator demotes it back to the resting `[evidence]` tag.
+A model can never award itself a passing grade — that is what makes the audit trail trustworthy.
 
 **Automated steps only ever _promote_ a tag toward "verified," or flag it for a human.** No
 automated step ever deletes a quote or writes the sentinel `[evidence] "Not specified in paper."`
@@ -1552,10 +1765,7 @@ finds it."
 
 For each tripped quote, every loop attempt:
 
-1. **Region check (deterministic, semantic):** take the **review** passage around the quote (its
-   bullet/paragraph + `region_margin` lines), embed it, and compare it to the paper's LanceDB table
-   (cosine). The similarity (vs `region_threshold`, default 0.60) and the closest **source chunks**
-   are written to the report. A low score flags a region whose surrounding claim may be fabricated.
+1. **Region check (deterministic, semantic):** take the **review** passage around the quote (`_claim_block`). The algorithm identifies the quote's paragraph, expands outward by `region_paragraphs` full paragraphs in each direction (using Markdown headings `#{1,6}` as hard boundaries), and adds $\pm$ `region_margin` extra lines beyond the outer paragraphs. The block is embedded and compared against the paper's LanceDB table (cosine distance).
 2. **Ask the Oracle** (top_k retrieval) about each failure, handing it the source chunks: return
    the corrected verbatim quote, the corrected claim if the prose misstates the source, or
    `UNSUPPORTED`.
@@ -1590,9 +1800,9 @@ check. Sending this to a language model is wasteful: the repair is purely mechan
 1. Split the quote on an ellipsis (`...`, the Unicode `…`, or spaced `. . .`).
 2. Locate each fragment as an **exact substring** of the source, in order and non-overlapping.
 3. If the fragments resolve to **one contiguous span** — the total text skipped _between_ them is
-   ≤ `MAX_STITCH_GAP` (200 characters) — replace the quote with that exact source span and relabel
-   `[evidence] → [fixed]`.
-4. **Re-verify** the result is an exact substring before writing.
+   $\le$ `_MAX_STITCH_GAP` (200 characters) — construct the candidate stitched quote.
+4. **Claim Gate Check:** Re-check the surrounding review claim block using the verifier (`_verify`). If the claim block fails the entailment/cosine threshold (`score < threshold`), the stitch is **DECLINED** and held for agent debate, preventing verbatim quote repairs around hallucinated prose.
+5. If the claim gate passes and the stitched quote contains no line breaks or double quotes, replace the quote text and relabel `[evidence] → [fixed]`.
 
 Anything that does not resolve cleanly is **left untouched for the debate**: a missing fragment, a
 _distant_ split (two clauses pulled from far-apart parts of the paper — e.g. two separate
@@ -1626,7 +1836,7 @@ state — no model decides when the debate is over:
 | State       | Meaning                                                                   | Outcome                             |
 | ----------- | ------------------------------------------------------------------------- | ----------------------------------- |
 | `agreed`    | the Oracle's last verdict is AGREE                                        | **actionable** → the fix is applied |
-| `deadlock`  | the Oracle still OBJECTs **and** the Architect repeated the same proposal | held for a human                    |
+| `deadlock`  | the Oracle still OBJECTs **and** the Architect repeated the same proposal hash (`proposal_hash`) across $\ge 2$ consecutive turns | held for a human |
 | `exhausted` | ran out of rounds without agreement                                       | held for a human                    |
 | `clean`     | the gate was already green (auto-fix resolved everything)                 | nothing to do                       |
 
@@ -1710,19 +1920,21 @@ strict gate (`apply_evidence.sh`) re-validates after each attempt. Two safeguard
 - **The agent never tags.** The editor leaves anchors as `[evidence]`; the validator then assigns
   `[validated]`/`[fixed]` using a pre-edit **quote baseline** — a grounded quote whose text is
   unchanged becomes `[validated]`; one that was edited becomes `[fixed]`.
-- **Soft-fail.** The apply loop's strict gate may not re-run after the _final_ edit, so loop
+- **Soft-fail (`Task.soft_fail`).** The apply loop's strict gate may not re-run after the _final_ edit, so loop
   exhaustion is treated as a _soft success_ that defers the verdict to the finalize step below — it is
   not reported as a hard failure (this removed a class of misleading "TASK FAILED" logs).
+- **Final-check (`Task.final_check`).** In code mode, the iteration loop verifies edit $N-1$ at the start of attempt $N$. After the loop exhausts, `Task.final_check` re-runs `test_cmd` once to evaluate the final edit pass, returning true pass/fail status and eliminating false-positive failure reports.
+- **Final-check (`Task.final_check`).** In code mode, the iteration loop verifies edit $N-1$ at the start of attempt $N$. After the loop exhausts, `final_check: True` re-runs `test_cmd` once to evaluate the final edit pass, returning true pass/fail status and eliminating false-positive failure reports.
 
-A deterministic **finalize** step is the terminal authority. Two idempotent passes:
+A deterministic **finalize** step (`_finalize`) is the terminal authority. It executes two idempotent passes:
 
-1. **Promote (always, any debate state):** any still-`[evidence]` quote that is now a verbatim
-   substring is relabeled `[validated]`/`[fixed]`. A grounded quote is grounded regardless of how the
-   debate ended (this catches a final edit that no gate re-checked).
-2. **Demote (only when `agreed`):** a quote that is _still_ ungroundable becomes `[unsupported]`
-   (text preserved), flagged for a human. After a `deadlock`/`exhausted` debate, ungrounded residuals
-   deliberately stay `[evidence]` — a distinct, more-recoverable signal ("unresolved" ≠ "provably no
-   match").
+1. **Pass 1 — Promote (Always, any debate state):**
+   Scans all anchors. If a quote is an exact normalized substring of the OCR source:
+   - If tagged `[evidence]` and its hash is in `quote_baseline`, relabel $\rightarrow$ `[validated]`.
+   - If tagged `[evidence]` and its hash is NOT in `quote_baseline` (edited during debate), relabel $\rightarrow$ `[fixed]`.
+   - Already promoted `[validated]` or `[fixed]` anchors remain unchanged.
+2. **Pass 2 — Demote (ONLY when debate state is `agreed`):**
+   If the debate reached agreement (`state == "agreed"`) but an anchor remains ungrounded, relabel $\rightarrow$ `[unsupported]`, preserving the exact quote text for human review. If the debate ended in `deadlock` or `exhausted`, ungrounded quotes deliberately remain `[evidence]` to signal an unresolved debate rather than a proven non-match.
 
 #### The complete deterministic-first ladder (REVIEW mode)
 
@@ -1802,19 +2014,20 @@ existing review, no Oracle call) and `run_ocr_rag: false` (reuse the cached Lanc
 | Per-doc verdict       | `.aider_factory/logs/debates/<stem>.verdict.md`                 | the apply node's self-gate (acts only on an `agreed`, gate-backed verdict)                                                                                                                                               |
 | Per-doc transcript    | `.aider_factory/logs/debates/<stem>.debate.md`                  | human-readable full back-and-forth (observability only)                                                                                                                                                                  |
 
-`oracle_toggles` for the review heal loop AND the escalation chain: `post_validate` (heal on),
-`validation_tag` (default `evidence`), `region_threshold` (0.60), `region_margin` (2), `region_top_k`
-(5, source chunks per failure), `validation_loops` (3, the review apply/heal retry ceiling),
-`redo_oracle_job`, **`debate_loops`** (0 = debate off; N = debate TURNS per debate),
-**`debate_rounds`** (1 = a single debate->apply cycle; N = multi-round reflexion), and
-**`pass_round_history`** (false = fresh context each round; true = persist across rounds). (Code
-mode uses `loop_aider_test` as its loop ceiling and ignores `region_*` / `validation_tag`.)
+`validation:` and `escalation_debate:` blocks for the review heal loop AND the escalation chain:
+`validation.enabled` (heal on), `validation.validation_tag` (default `evidence`), `validation.region_threshold` (0.60),
+`validation.region_margin` (2), `validation.region_paragraphs` (0), `validation.region_top_k` (5, source chunks per failure),
+`validation.validation_loops` (3, the review apply/heal retry ceiling), `validation.redo_oracle_job`,
+`escalation_debate.loops` (0 = debate off; N = debate TURNS per debate), `escalation_debate.rounds`
+(1 = single debate->apply cycle; N = multi-round reflexion), and `escalation_debate.pass_history`
+(false = fresh context each round; true = persist across rounds). (Code mode uses `loop_aider_test`
+as its loop ceiling and ignores `validation.region_*` / `validation.validation_tag`.)
 
 ### 7.10 Quirks worth knowing
 
-- **`validation_loops` needs `iterate_test: true` and `auto_test: false`.** The loop reuses the
+- **`validation.validation_loops` needs `toggles.iterate_test: true` and `toggles.auto_test: false`.** The loop reuses the
   built-in iterate machinery; `auto_test: true` would add Aider's _internal_ self-test loop on top.
-  `validation_loops` is a per-phase override of `loop_aider_test`.
+  `validation.validation_loops` is a per-phase override of `loop_aider_test`.
 - **The report is the gate.** A non-empty report tells the loop "there is work to do." The validator
   deletes a stale report when a document becomes clean, so a healed document won't trigger a phantom
   fix next run. In review mode with `debate_loops` set, the auto-fix node _writes_ this report
@@ -1854,18 +2067,18 @@ implementation checklist when wiring a new project:
 | **Mode selector**                   | review vs code pipeline (same skeleton)                                                                                                      | `oracle.start_job` (true=review, false=code) or `run_job_one/two` (→code)                        | review when `oracle` present   | `run_workflow.py` mode discriminator                          |
 | **Review: generate**                | Oracle writes the review from the paper                                                                                                      | `oracle:` block + `start_job: true`                                                              | —                              | `oracle_agent --auto`                                         |
 | **Quote grounding (review)**        | provable "this quote is verbatim in the source"                                                                                              | always on for a review validation phase                                                          | —                              | `validator._grounded` / `_run`                                |
-| **Region annotation (review)**      | "this passage looks hallucinated" flag                                                                                                       | `oracle_toggles.region_threshold`, `region_margin`, `region_top_k`                               | `0.60`, `2`, `5`               | `validator._region`                                           |
-| **Entailment claim check (review)** | upgrade the claim signal from cosine → entailment (MiniCheck/instruct); routes suspicious claims to the agent, never grants/denies grounding | `models.grounding_agent` + `endpoints.grounding_agent_api` + `oracle_toggles.entail_threshold`   | unset → cosine fallback; `0.5` | `validator._verify`/`_entail` + `minicheck_server.py` (§7.12) |
-| **Verify-all claims (review)**      | (c) score EVERY claim, annotate grounded-but-drifted prose                                                                                   | `oracle_toggles.verify_all_claims`                                                               | `false` (=(b) candidates only) | `validator._run` claim-drift section                          |
-| **Self-heal loop (review)**         | agent fixes failing quotes + claims                                                                                                          | `oracle_toggles.post_validate: true` + `toggles.iterate_test: true`, `auto_test: false`          | off                            | `validations_context_check.sh` + heal template                |
-| **Deterministic auto-fix (review)** | free, no-model ellipsis-stitch repair                                                                                                        | runs whenever `oracle_toggles.debate_loops` is set (>=0)                                         | —                              | `validator._autofix` (`--autofix`); gap = 200 chars           |
+| **Region annotation (review)**      | "this passage looks hallucinated" flag                                                                                                       | `validation.region_threshold`, `region_margin`, `region_top_k`                                   | `0.60`, `2`, `5`               | `validator._region`                                           |
+| **Entailment claim check (review)** | upgrade the claim signal from cosine → entailment (MiniCheck/instruct); routes suspicious claims to the agent, never grants/denies grounding | `models.grounding_agent` + `endpoints.grounding_agent_api` + `validation.entail_threshold`       | unset → cosine fallback; `0.5` | `validator._verify`/`_entail` + `minicheck_server.py` (§7.12) |
+| **Verify-all claims (review)**      | (c) score EVERY claim, annotate grounded-but-drifted prose                                                                                   | `validation.verify_all_claims`                                                                   | `false` (=(b) candidates only) | `validator._run` claim-drift section                          |
+| **Self-heal loop (review)**         | agent fixes failing quotes + claims                                                                                                          | `validation.enabled: true` + `toggles.iterate_test: true`, `auto_test: false`                    | off                            | `validations_context_check.sh` + heal template                |
+| **Deterministic auto-fix (review)** | free, no-model ellipsis-stitch repair                                                                                                        | runs whenever `escalation_debate.loops` is set (>=0)                                             | —                              | `validator._autofix` (`--autofix`); gap = 200 chars           |
 | **Code: implement / tests**         | write code / write+fix unit tests                                                                                                            | `toggles.run_job_one` / `run_job_two` / `iterate_test`                                           | —                              | `run_workflow.py` code branch                                 |
-| **Pre-Edit Debate**                 | drafts an agreed plan before writing code                                                                                                    | `oracle.architect_oracle_chat: true`                                                             | `false`                        | `run_workflow.py` (job 1 / 2 injection) + `deliberate.py`     |
+| **Pre-Edit Debate**                 | drafts an agreed plan before writing code                                                                                                    | `oracle.pre_edit_debate.enabled: true`                                                           | `false`                        | `run_workflow.py` (job 1 / 2 injection) + `deliberate.py`     |
 | **Code loop ceiling**               | test-fix attempts per file                                                                                                                   | `loop_aider_test` (global)                                                                       | `1`                            | `orchestrate.run_task` outer loop                             |
-| **Review heal/apply ceiling**       | heal/apply attempts per doc                                                                                                                  | `oracle_toggles.validation_loops`                                                                | `3`                            | `orchestrate.run_task` outer loop                             |
-| **Two-party debate (both modes)**   | escalate only the hard residual to agents                                                                                                    | `oracle_toggles.debate_loops` (turns)                                                            | `0` (off)                      | `orchestrate._run_deliberation` + `deliberate.py`             |
-| **Escalation cycles**               | debate->apply->re-verify repeats (multi-round reflexion)                                                                                     | `oracle_toggles.debate_rounds`                                                                   | `1`                            | `run_workflow.py` dynamic round loops                         |
-| **Cross-round context persistence** | persist architect + oracle debate context across rounds                                                                                      | `oracle_toggles.pass_round_history`                                                              | `false`                        | `orchestrate._run_deliberation` conditional session clearing  |
+| **Review heal/apply ceiling**       | heal/apply attempts per doc                                                                                                                  | `validation.validation_loops`                                                                    | `3`                            | `orchestrate.run_task` outer loop                             |
+| **Two-party debate (both modes)**   | escalate only the hard residual to agents                                                                                                    | `escalation_debate.loops` (turns)                                                                | `0` (off)                      | `orchestrate._run_deliberation` + `deliberate.py`             |
+| **Escalation cycles**               | debate->apply->re-verify repeats (multi-round reflexion)                                                                                     | `escalation_debate.rounds`                                                                       | `1`                            | `run_workflow.py` dynamic round loops                         |
+| **Cross-round context persistence** | persist architect + oracle debate context across rounds                                                                                      | `escalation_debate.pass_history`                                                                 | `false`                        | `orchestrate._run_deliberation` conditional session clearing  |
 | **Code debate context**             | Oracle+Architect get the test log + source/test/context files + corpus chunks                                                                | automatic in code mode                                                                           | —                              | `_oracle_turn` (code) + `_run_deliberation`                   |
 | **Apply verdict**                   | agent inserts the agreed fix (review: verbatim, never tags; code: edits code)                                                                | automatic when the debate is `agreed`                                                            | —                              | apply node + gate                                             |
 | **Soft-fail**                       | loop exhaustion defers to the downstream authority, not "FAILED"                                                                             | automatic (review apply; code verify)                                                            | —                              | `Task.soft_fail`                                              |
@@ -1880,12 +2093,20 @@ implementation checklist when wiring a new project:
 | **Debate templates**                | override the Architect/apply prompts                                                                                                         | `plans.deliberate_plan` / `apply_plan` (review), `analyze_bugs_plan` or `oracle.template` (code) | code defaults                  | `run_workflow.py` plans parsing                               |
 
 > **Minimal config — REVIEW:** an `oracle:` block (`start_job: true`, review `template`,
-> `full_document: true`), `oracle_toggles.post_validate: true`, `debate_loops: N` (N>0 to allow
+> `full_document: true`), `validation.enabled: true`, `escalation_debate.loops: N` (N>0 to allow
 > escalation; 0 = deterministic-only), and the shared `region_*` / `validation_loops` knobs.
 > **Minimal config — CODE:** `toggles.run_job_one/run_job_two/iterate_test: true`, an `oracle:`
-> block with `start_job: false` + a debug `template` (e.g. `analyze_bugs.md`), `debate_loops: N`,
+> block with `start_job: false` + a debug `template` (e.g. `analyze_bugs.md`), `escalation_debate.loops: N`,
 > and the code test runner set at the TOP level (`test_command_prefix` + `test_runner`). See the
 > annotated examples in the YAML reference.
+
+### 7.11 Process Logging & Cost Capture (`OSTee`)
+
+The pipeline captures log output from Python, Aider, Rscript, and subprocesses using an OS-level file descriptor tee (`OSTee` in `run_workflow.py`).
+
+- **OS-Level Duplication:** `OSTee` duplicates file descriptors 1 (stdout) and 2 (stderr) via `os.dup2` into an OS pipe.
+- **Unified Streaming Log:** A background thread pumps output from the pipe to terminal stdout while writing to `.aider_factory/logs/<config>_run_<timestamp>.log`.
+- **Cost Extraction:** `aggregate_costs.py` regex-scans the unified log file for `Tokens: Nk sent, Nk received. Cost: $X message, $Y session` patterns, handling metric suffixes (`k`, `M`) and summing total run costs accurately across all sub-agents.
 
 ### 7.12 Entailment-grounded claim verification (the MiniCheck grounding verifier)
 
@@ -2021,6 +2242,11 @@ The pipeline derives these from each phase's YAML and injects them into the `/ru
 child environment (`orchestrate.py`). They are listed here for reference/debugging only:
 
 ```bash
+PIPELINE_COLOR_HELPER       # Terminal color for aider-helper output (default: sky
+blue)
+```
+
+```bash
 ORACLE_ARCHITECT_MODEL       # Derived from models.architect_agent; routes CLI debate's Architect turn
 ORACLE_ARCHITECT_API_BASE    # Endpoint for the Architect in a CLI debate
 # Routing / model (from models.rag_agent + endpoints.rag_agent_api)
@@ -2028,7 +2254,7 @@ ORACLE_AGENT_MODEL          # e.g. "openai/qwen3.6-27b-90k:latest"
 ORACLE_AGENT_API_BASE       # endpoint for the oracle model (omitted for gemini/)
 ORACLE_AGENT_API_KEY        # "sk-dummy" for local servers
 
-# Retrieval target (from vector_store.collection_name + rag.top_k + retrieval_mode)
+# Retrieval target (from rag.collection_name + rag.top_k + rag.retrieval_mode)
 ORACLE_RAG_DB_DIR           # .../lanceDB/<collection>/lancedb
 ORACLE_COLLECTION           # LanceDB table to query (batch:false -> per-document stem)
 ORACLE_TOP_K                # number of chunks for top_k retrieval
@@ -2040,10 +2266,10 @@ ORACLE_JOB_TEMPLATE         # instruction/template file the oracle fills
 ORACLE_JOB_OUT              # output file the synthesized answer is written to
 ORACLE_JOB_FULLDOC          # "1" = whole-document context, "0" = top_k search
 ORACLE_JOB_READ_FILES       # record-separator (\x1e) delimited file paths for
-                            #   zero-RAG fallback (contents appended to context
-                            #   even when the vector store has no chunks)
+                            #   zero-RAG fallback (contents injected on Turn 1 only
+                            #   to prevent token inflation)
 
-# Validation system (set only for oracle_toggles validation phases)
+# Validation system (set only for validation phases)
 ORACLE_REVIEW_FILE          # the document being validated (the review)
 ORACLE_SOURCE_FILE          # the OCR <stem>.md ground-truth source
 ORACLE_VALIDATION_FILE      # the failures/context report to write/read (the gate)
@@ -2065,7 +2291,7 @@ ORACLE_SESSION_FILE         # overrides the default .oracle_session.json path;
                             #   debates use .oracle_debate_session.json so the apply
                             #   phase cleanup (which wipes the main session) does not
                             #   destroy cross-round debate context
-ORACLE_DEBATE_ROUNDS        # number of escalation rounds (from oracle_toggles.debate_rounds)
+ORACLE_DEBATE_ROUNDS        # number of escalation rounds (from escalation_debate.rounds)
                             #   parsed by _extract_overrides for CLI --rounds flag
 
 # REMOVED (older configs may still list them; they are ignored — no longer set or read):

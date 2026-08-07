@@ -33,6 +33,7 @@ phases:
           vectordb_overwrite: false
           ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
           query_prefix: "Instruct: Given an academic or financial query, retrieve relevant passages\nQuery: "
+          embed_backend: "sentence-transformers"
           chunk_size_chars: 800
           chunk_overlap_chars: 100
           top_k: 30

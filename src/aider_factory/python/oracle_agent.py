@@ -659,7 +659,15 @@ def _extract_overrides(argv):
             maintenance_action = "add-table"
             maintenance_target = targets
             continue
+        if a in ("--workers", "--num-cores", "-w"):
+            if i + 1 < len(args):
+                os.environ["ORACLE_WEB_WORKERS"] = args[i + 1]
+                i += 2
+                continue
+            print("[oracle] --workers requires an integer count", file=sys.stderr)
+            return out, do_list, did_clear, None, None
         if a in ("--add-web", "--web-url"):
+            maintenance_action = "add-web"
             targets = []
             i += 1
             while i < len(args):
@@ -672,7 +680,14 @@ def _extract_overrides(argv):
                     else:
                         print("[oracle] --file requires a file path", file=sys.stderr)
                         return out, do_list, did_clear, None, None
-                elif arg.startswith("-"):
+                elif arg == "--no-rag":
+                    os.environ["ORACLE_RETRIEVE_MODE"] = "no_retrieve"
+                    os.environ["ORACLE_NO_RAG_INGEST"] = "1"
+                    i += 1
+                elif arg in ("--workers", "--num-cores", "-w") and i + 1 < len(args):
+                    os.environ["ORACLE_WEB_WORKERS"] = args[i + 1]
+                    i += 2
+                elif arg.startswith("-") and not arg.startswith("--file:"):
                     break
                 else:
                     targets.append(arg)
@@ -683,7 +698,6 @@ def _extract_overrides(argv):
                     file=sys.stderr,
                 )
                 return out, do_list, did_clear, None, None
-            maintenance_action = "add-web"
             maintenance_target = targets
             continue
         out.append(a)
@@ -1196,15 +1210,25 @@ def _add_web_maintenance(urls):
         else:
             expanded_urls.append(t)
 
-    fetched_count = 0
-    for url in expanded_urls:
-        saved_path, _ = rag_web.fetch_and_convert_url(url, job_dir)
-        if saved_path:
-            fetched_count += 1
+    try:
+        workers = int(os.environ.get("ORACLE_WEB_WORKERS", "1"))
+    except ValueError:
+        workers = 1
 
-    if fetched_count == 0:
+    success_count, skipped_count = rag_web.fetch_urls_batch(expanded_urls, job_dir, workers=workers)
+
+    print(f"\n[rag-web] Batch Web Download Summary:", file=sys.stderr)
+    print(f"          - Successfully Ingested: {success_count} file(s)", file=sys.stderr)
+    print(f"          - Skipped / Failed:        {skipped_count} file(s)", file=sys.stderr)
+
+    if success_count == 0:
         print("[oracle] No web files were successfully fetched.", file=sys.stderr)
         return 1
+
+    # Check for --no-rag flag override (Markdown conversion only, skip LanceDB indexing)
+    if os.environ.get("ORACLE_NO_RAG_INGEST") == "1":
+        print(f"[oracle] --no-rag active: Saved Markdown files to '{job_dir}'. Bypassing LanceDB vector indexing.", file=sys.stderr)
+        return 0
 
     batch_setting = True
     chunk_size = 800

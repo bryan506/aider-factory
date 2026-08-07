@@ -996,7 +996,7 @@ def _from_config(yaml_path):
         ocr_api_base=endpoints.get("ocr_api_base"),
         ocr_agent=phase_models.get("ocr_agent", ""),
         ocr_prompt=DEFAULT_OCR_PROMPT,
-        overwrite=False,
+        overwrite=phase_rag.get("vectordb_overwrite", False),
         cer_threshold=0.05,
         ocr_max_retries=2,
         ocr_parallel=1,

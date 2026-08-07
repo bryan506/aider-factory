@@ -31,7 +31,7 @@ finally:
             os.environ.pop(k, None)
 print("✅ API Key Detection PASS")
 
-# 2. Test Context Hashing & Cache Protection Invariant
+# 2. Test Helper Session Persistence & Clear Invariant
 tmp_session = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
 tmp_session.close()
 
@@ -39,40 +39,40 @@ tmp_yaml = tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False)
 tmp_yaml.write("name: test")
 tmp_yaml.close()
 
-mock_response = MagicMock()
-mock_response.choices = [MagicMock()]
-mock_response.choices[0].message.content = "Answer text"
+mock_chunk = MagicMock()
+mock_chunk.choices = [MagicMock()]
+mock_chunk.choices[0].delta.content = "Answer text"
+mock_response = [mock_chunk]
 
 try:
     with patch("bootstrap.get_helper_session_file", return_value=tmp_session.name), \
          patch("litellm.completion", return_value=mock_response), \
          patch("os.environ", {"GEMINI_API_KEY": "test-key"}):
          
-         # Turn 1 (Context A)
+         # Turn 1
          bootstrap.run_query("instruction", tmp_yaml.name, "context_a.py", ask_mode=True)
          with open(tmp_session.name, "r") as f:
              sess_data_1 = json.load(f)
-         hash_1 = sess_data_1["context_hash"]
+         assert len(sess_data_1) == 5, "Should initialize system + warm-up + turn 1 prompt/response"
 
-         # Turn 2 (Context A again - should preserve session history)
+         # Turn 2 (Should append to stable message history list directly)
          bootstrap.run_query("instruction 2", tmp_yaml.name, "context_a.py", ask_mode=True)
          with open(tmp_session.name, "r") as f:
              sess_data_2 = json.load(f)
-         assert len(sess_data_2["messages"]) > len(sess_data_1["messages"]), "Session should accumulate messages"
-         assert sess_data_2["context_hash"] == hash_1, "Hash must match"
+         assert len(sess_data_2) == 7, "Session must accumulate messages directly without hashing reset"
 
-         # Turn 3 (Context B - should reset session due to hash mismatch)
-         bootstrap.run_query("instruction 3", tmp_yaml.name, "context_b.py", ask_mode=True)
-         with open(tmp_session.name, "r") as f:
-             sess_data_3 = json.load(f)
-         assert sess_data_3["context_hash"] != hash_1, "Hash must change"
-         assert len(sess_data_3["messages"]) == 5, "Session should reset to warm-up baseline"
+         # Test session clearing
+         bootstrap.clear_helper_session()
+         assert not os.path.exists(tmp_session.name), "Clear must remove the session file from disk"
 
-    print("✅ Context Hashing Cache Protection PASS")
+    print("✅ Helper Session Persistence & Clear PASS")
 finally:
     for f in [tmp_session.name, tmp_yaml.name]:
         if os.path.exists(f):
-            os.remove(f)
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
 # 3. Test Dynamic Query Prefix Resolution
 print("Starting Query Prefix Auto-Detection Tests...")
@@ -110,5 +110,40 @@ assert detect_ext("test_runner: \"python -m pytest {file}\"") == "py", "Should m
 assert detect_ext("test_runner: \"cargo test --test {stem}\"") == "rs", "Should map cargo to rs"
 assert detect_ext("test_runner: \"echo custom\"") == "py", "Should fallback to py"
 print("✅ DRY Framework Mapping PASS")
+
+# 5. Test Terminal Mode Session Persistence & Clear Invariant
+print("Starting Terminal Mode Logic Unit Tests...")
+tmp_term_session = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+tmp_term_session.close()
+
+try:
+    with patch("bootstrap.get_helper_terminal_session_file", return_value=tmp_term_session.name), \
+         patch("litellm.completion", return_value=mock_response), \
+         patch("os.environ", {"GEMINI_API_KEY": "test-key"}):
+
+        # Turn 1 in terminal mode
+        bootstrap.run_query("explain git", None, "file1.txt", ask_mode=True, terminal_mode=True)
+        with open(tmp_term_session.name, "r") as f:
+            term_data_1 = json.load(f)
+        assert len(term_data_1) == 4, "Terminal session should contain system + assistant greeting + user prompt + assistant response (4 messages)"
+        assert term_data_1[0]["content"] == bootstrap.TERMINAL_PERSONA_PROMPT, "Terminal mode must use TERMINAL_PERSONA_PROMPT"
+
+        # Turn 2 in terminal mode
+        bootstrap.run_query("follow up question", None, "", ask_mode=True, terminal_mode=True)
+        with open(tmp_term_session.name, "r") as f:
+            term_data_2 = json.load(f)
+        assert len(term_data_2) == 6, "Terminal session must accumulate messages across turns (6 messages)"
+
+        # Test terminal session clearing
+        bootstrap.clear_helper_session(terminal_mode=True)
+        assert not os.path.exists(tmp_term_session.name), "Clear terminal session must remove the terminal session file"
+
+    print("✅ Terminal Mode Session Persistence & Clear PASS")
+finally:
+    if os.path.exists(tmp_term_session.name):
+        try:
+            os.remove(tmp_term_session.name)
+        except OSError:
+            pass
 
 print("\n🎉 All helper logic unit tests passed!")

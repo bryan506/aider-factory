@@ -50,21 +50,21 @@ finally:
 
 # 2b. Test Bootstrap Interactive Flow with RAG prompts and Menu Fallback
 print("  Starting Bootstrap Interactive Flow E2E Test...")
-# Mock a complete user bootstrap session choosing R, RAG, custom embedding model, and fallback query prefix option 1
+# Mock a complete user bootstrap session choosing R, model selection first, then RAG, custom embedding model, and fallback query prefix option 1
 mock_inputs = [
     "src/main.py",                         # Target files
     "src/read_only.py",                    # Context files
     "2",                                   # Framework: R (testthat)
     "1",                                   # Operating Mode: Autonomous
+    "gemini/gemini-2.5-flash",             # Architect model
+    "gemini/gemini-2.5-flash",             # Editor model
     "y",                                   # Attach RAG: Yes
     "custom_docs",                         # RAG collection directory
     "gemini/gemini-2.5-flash",             # RAG agent
     "gemini/gemini-2.5-flash",             # OCR agent
     "custom-unknown-embedder",             # Embedding Model (triggers fallback menu)
     "sentence-transformers",               # Embedding Backend
-    "1",                                   # Select preset option 1 (BGE prefix)
-    "gemini/gemini-2.5-flash",             # Architect model
-    "gemini/gemini-2.5-flash"              # Editor model
+    "1"                                    # Select preset option 1 (BGE prefix)
 ]
 
 with patch("builtins.input", side_effect=mock_inputs), \
@@ -145,11 +145,86 @@ try:
         assert "E2E Modified" in f.read(), "Edit mode must write back modified content"
     print("  ✅ Edit Mode (Write-Back) PASS")
 
-finally:
-    if os.path.exists(tmp_yaml.name):
-        os.remove(tmp_yaml.name)
+    # C. E2E Session Persistence Check (Multi-turn query)
     session_file = os.path.join(".aider_factory", ".helper_session.json")
     if os.path.exists(session_file):
         os.remove(session_file)
+
+    # First turn
+    with patch.object(sys, "argv", ["aider-helper", "query", "Explain loops", "-f", tmp_yaml.name, "--ask"]), \
+         patch("litellm.completion", return_value=mock_stream):
+        cli.helper_cli()
+    
+    assert os.path.exists(session_file), "Session file must be created on first query"
+    with open(session_file, "r") as f:
+        sess_data = json.load(f)
+    assert len(sess_data) == 5, "Should contain system + warm-up + turn 1 prompt/response"
+
+    # Second turn
+    with patch.object(sys, "argv", ["aider-helper", "query", "And condition?", "-f", tmp_yaml.name, "--ask"]), \
+         patch("litellm.completion", return_value=mock_stream):
+        cli.helper_cli()
+        
+    with open(session_file, "r") as f:
+        sess_data_2 = json.load(f)
+    assert len(sess_data_2) == 7, "Session must accumulate messages directly across subsequent CLI calls"
+    print("  ✅ E2E Session Persistence PASS")
+
+    # D. E2E Standalone --clear Command
+    with patch.object(sys, "argv", ["aider-helper", "query", "--clear"]), \
+         patch("sys.exit") as mock_exit:
+        try:
+            cli.helper_cli()
+        except SystemExit:
+            pass
+        assert mock_exit.called, "Should exit cleanly after clearing session"
+    assert not os.path.exists(session_file), "Clear command must delete the session file"
+    print("  ✅ E2E Standalone --clear PASS")
+
+    # E. E2E Terminal Mode (--terminal / -t) Session & Context Check
+    term_session_file = os.path.join(".aider_factory", ".helper_terminal_session.json")
+    if os.path.exists(term_session_file):
+        os.remove(term_session_file)
+
+    # First terminal query with -t and --context
+    with patch.object(sys, "argv", ["aider-helper", "query", "Analyze code", "-t", "--context", tmp_yaml.name]), \
+         patch("litellm.completion", return_value=mock_stream):
+        cli.helper_cli()
+
+    assert os.path.exists(term_session_file), "Terminal session file must be created on terminal query"
+    with open(term_session_file, "r") as f:
+        term_sess_data = json.load(f)
+    assert len(term_sess_data) == 4, "Terminal session should contain system + greeting + turn 1 prompt/response (4 messages)"
+
+    # Second terminal query
+    with patch.object(sys, "argv", ["aider-helper", "query", "Follow up on terminal session", "--terminal"]), \
+         patch("litellm.completion", return_value=mock_stream):
+        cli.helper_cli()
+
+    with open(term_session_file, "r") as f:
+        term_sess_data_2 = json.load(f)
+    assert len(term_sess_data_2) == 6, "Terminal session must accumulate messages across CLI calls (6 messages)"
+    print("  ✅ E2E Terminal Mode (--terminal / -t) Persistence PASS")
+
+    # F. E2E Standalone Terminal --clear Command
+    with patch.object(sys, "argv", ["aider-helper", "query", "--terminal", "--clear"]), \
+         patch("sys.exit") as mock_exit:
+        try:
+            cli.helper_cli()
+        except SystemExit:
+            pass
+        assert mock_exit.called, "Should exit cleanly after clearing terminal session"
+    assert not os.path.exists(term_session_file), "Clear terminal command must delete the terminal session file"
+    print("  ✅ E2E Standalone Terminal --clear PASS")
+
+finally:
+    if os.path.exists(tmp_yaml.name):
+        os.remove(tmp_yaml.name)
+    for sf in [
+        os.path.join(".aider_factory", ".helper_session.json"),
+        os.path.join(".aider_factory", ".helper_terminal_session.json"),
+    ]:
+        if os.path.exists(sf):
+            os.remove(sf)
 
 print("\n🎉 E2E Golden Smoke Test (aider-helper) Completed Successfully!")

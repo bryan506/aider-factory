@@ -26,14 +26,34 @@ PERSONA_PROMPT = (
     "return ONLY the complete, updated YAML content inside a markdown code block."
 )
 
+TERMINAL_PERSONA_PROMPT = (
+    "You are a general-purpose AI software engineering assistant working in an interactive terminal session.\n"
+    "Answer questions clearly, accurately, and concisely based on the user's prompt and provided context files.\n"
+    "Provide well-structured code, explanations, and unix commands when requested."
+)
+
 def get_repo_name():
     return os.path.basename(os.getcwd()).strip().replace(" ", "_")
 
 def get_helper_session_file():
     return os.path.join(".aider_factory", ".helper_session.json")
 
+def get_helper_terminal_session_file():
+    return os.path.join(".aider_factory", ".helper_terminal_session.json")
+
+def clear_helper_session(terminal_mode=False):
+    """Wipes the helper LLM session history."""
+    sf = get_helper_terminal_session_file() if terminal_mode else get_helper_session_file()
+    if os.path.exists(sf):
+        try:
+            os.remove(sf)
+            label = "Terminal session" if terminal_mode else "Session"
+            print(f"[aider-helper] 🧹 {label} cleared.", file=sys.stderr)
+        except OSError:
+            pass
+
 def detect_api_key():
-    keys = ["GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY"]
+    keys = ["GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY", "OPENCODE_API_KEY"]
     for k in keys:
         if os.environ.get(k):
             return k, os.environ.get(k)
@@ -103,14 +123,41 @@ def run_bootstrap(target_dir):
     choice = input("Select operating mode [default: 1]: ").strip() or "1"
     profile["operating_mode"] = "autonomous" if choice == "1" else "pair"
 
-    # 5. Knowledge Oracle (RAG)
-    print("\n[5] Knowledge Oracle (RAG):")
+    # 5. Model Discovery & Selection
+    provider_map = {
+        "GEMINI_API_KEY": "gemini",
+        "ANTHROPIC_API_KEY": "anthropic",
+        "OPENAI_API_KEY": "openai",
+        "OPENROUTER_API_KEY": "openrouter",
+        "GROQ_API_KEY": "groq"
+    }
+    provider = provider_map.get(key_name, "gemini")
+    
+    print(f"\n[+] Retrieving available models for provider '{provider}' via Aider...")
+    try:
+        subprocess.run(["aider", "--list-models", provider], check=False)
+    except Exception:
+        print("  (Aider model list unavailable. Using standard presets.)")
+
+    print("\n[5] Model Selection:")
+    arch_default = "gemini/gemini-3.5-flash" if provider == "gemini" else "openai/gpt-4o"
+    edit_default = "gemini/gemini-2.5-flash" if provider == "gemini" else "openai/gpt-4o-mini"
+    
+    arch_model = input(f"Enter Architect model [default: {arch_default}]: ").strip() or arch_default
+    edit_model = input(f"Enter Editor model [default: {edit_default}]: ").strip() or edit_default
+
+    profile["architect_agent"] = arch_model
+    profile["editor_agent"] = edit_model
+    profile["working_directory"] = os.getcwd()
+
+    # 6. Knowledge Oracle (RAG)
+    print("\n[6] Knowledge Oracle (RAG):")
     choice = input("Do you want to attach a RAG database to query documentation? (y/n) [default: n]: ").strip().lower() or "n"
     profile["use_rag"] = choice == "y"
     if profile["use_rag"]:
         profile["rag_collection"] = input("Enter your document collection directory name [default: docs]: ").strip() or "docs"
-        profile["rag_agent"] = input("Enter RAG Agent (Oracle) model [default: gemini/gemini-2.5-flash]: ").strip() or "gemini/gemini-2.5-flash"
-        profile["ocr_agent"] = input("Enter OCR Agent model [default: gemini/gemini-2.5-flash]: ").strip() or "gemini/gemini-2.5-flash"
+        profile["rag_agent"] = input(f"Enter RAG Agent (Oracle) model [default: {arch_model}]: ").strip() or arch_model
+        profile["ocr_agent"] = input(f"Enter OCR Agent model [default: {arch_model}]: ").strip() or arch_model
         profile["embed_model"] = input("Enter Embedding Model [default: BAAI/bge-m3]: ").strip() or "BAAI/bge-m3"
         profile["embed_backend"] = input("Enter Embedding Backend (sentence-transformers/openai) [default: sentence-transformers]: ").strip() or "sentence-transformers"
         
@@ -143,33 +190,6 @@ def run_bootstrap(target_dir):
         profile["embed_backend"] = ""
         profile["query_prefix"] = ""
 
-    # 6. Model Discovery
-    provider_map = {
-        "GEMINI_API_KEY": "gemini",
-        "ANTHROPIC_API_KEY": "anthropic",
-        "OPENAI_API_KEY": "openai",
-        "OPENROUTER_API_KEY": "openrouter",
-        "GROQ_API_KEY": "groq"
-    }
-    provider = provider_map.get(key_name, "gemini")
-    
-    print(f"\n[+] Retrieving available models for provider '{provider}' via Aider...")
-    try:
-        subprocess.run(["aider", "--list-models", provider], check=False)
-    except Exception:
-        print("  (Aider model list unavailable. Using standard presets.)")
-
-    print("\n[6] Model Selection:")
-    arch_default = "gemini/gemini-2.5-flash" if provider == "gemini" else "openai/gpt-4o"
-    edit_default = "gemini/gemini-2.5-flash" if provider == "gemini" else "openai/gpt-4o-mini"
-    
-    arch_model = input(f"Enter Architect model [default: {arch_default}]: ").strip() or arch_default
-    edit_model = input(f"Enter Editor model [default: {edit_default}]: ").strip() or edit_default
-
-    profile["architect_agent"] = arch_model
-    profile["editor_agent"] = edit_model
-    profile["working_directory"] = os.getcwd()
-
     # Synthesize config
     repo_name = get_repo_name()
     # __file__ is in src/aider_factory/python/, so parent is src/aider_factory/
@@ -197,6 +217,9 @@ def run_bootstrap(target_dir):
             f"USER PROFILE:\n{json.dumps(profile, indent=2)}\n\n"
             f"MASTER TEMPLATE:\n{master_content}\n\n"
             f"YAML DOCUMENTATION REFERENCE:\n{yaml_docs[:15000]}\n\n"
+            f"CRITICAL INSTRUCTION: The generated YAML must contain EXACTLY ONE phase under the 'phases:' block, "
+            f"configured strictly according to the USER PROFILE. Do not include or append any other placeholder, "
+            f"example, or extra phases from the documentation or templates.\n\n"
             f"Return ONLY the complete, updated YAML content inside a markdown code block."
         )
 
@@ -222,15 +245,19 @@ def run_bootstrap(target_dir):
         yaml_content = yaml_content.replace('name: "My Project"', f'name: "{sensible_name}"')
         yaml_content = yaml_content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
 
+        # Standardize the analyze_bugs template path to use the portable src/aider_factory relative path
+        yaml_content = yaml_content.replace('template: ".aider_factory/markdown/internal/analyze_bugs.md"', 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"')
+        yaml_content = yaml_content.replace('template: "markdown/internal/analyze_bugs.md"', 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"')
+
         # Inject user RAG choices into synthesized LLM output if RAG is enabled
         if profile["use_rag"]:
             yaml_content = yaml_content.replace('collection_name: ""', f'collection_name: "{profile["rag_collection"]}"')
             yaml_content = yaml_content.replace('run_ocr_rag: false', 'run_ocr_rag: true')
             yaml_content = yaml_content.replace('grounding_agent: "openai/minicheck-flan-t5-large"', 'grounding_agent: ""') # Disabled by default
             if profile["rag_agent"]:
-                yaml_content = yaml_content.replace('rag_agent: "gemini/gemini-3.5-flash"', f'rag_agent: "{profile["rag_agent"]}"')
+                yaml_content = yaml_content.replace('rag_agent: "gemini/gemini-2.5-flash"', f'rag_agent: "{profile["rag_agent"]}"')
             if profile["ocr_agent"]:
-                yaml_content = yaml_content.replace('ocr_agent: "glm-ocr-f16:latest"', f'ocr_agent: "{profile["ocr_agent"]}"')
+                yaml_content = yaml_content.replace('ocr_agent: "glm-ocr-f16:LATEST"', f'ocr_agent: "{profile["ocr_agent"]}"')
             if profile["embed_model"]:
                 yaml_content = yaml_content.replace('embed_model: "qwen3-embedding-8b-8k:LATEST"', f'embed_model: "{profile["embed_model"]}"')
             if profile["embed_backend"]:
@@ -251,15 +278,19 @@ def run_bootstrap(target_dir):
             content = f.read()
         content = content.replace('name: "My Project"', f'name: "{sensible_name}"')
         content = content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
+
+        # Standardize the analyze_bugs template path to use the portable src/aider_factory relative path
+        content = content.replace('template: ".aider_factory/markdown/internal/analyze_bugs.md"', 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"')
+        content = content.replace('template: "markdown/internal/analyze_bugs.md"', 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"')
         
         if profile["use_rag"]:
             content = content.replace('collection_name: ""', f'collection_name: "{profile["rag_collection"]}"')
             content = content.replace('run_ocr_rag: false', 'run_ocr_rag: true')
             content = content.replace('grounding_agent: "openai/minicheck-flan-t5-large"', 'grounding_agent: ""') # Disabled by default
             if profile["rag_agent"]:
-                content = content.replace('rag_agent: "gemini/gemini-3.5-flash"', f'rag_agent: "{profile["rag_agent"]}"')
+                content = content.replace('rag_agent: "gemini/gemini-2.5-flash"', f'rag_agent: "{profile["rag_agent"]}"')
             if profile["ocr_agent"]:
-                content = content.replace('ocr_agent: "glm-ocr-f16:latest"', f'ocr_agent: "{profile["ocr_agent"]}"')
+                content = content.replace('ocr_agent: "glm-ocr-f16:LATEST"', f'ocr_agent: "{profile["ocr_agent"]}"')
             if profile["embed_model"]:
                 content = content.replace('embed_model: "qwen3-embedding-8b-8k:LATEST"', f'embed_model: "{profile["embed_model"]}"')
             if profile["embed_backend"]:
@@ -277,67 +308,82 @@ def run_bootstrap(target_dir):
         sys.path.insert(0, _parent_dir)
     from cli import init_user_project
     init_user_project(target_dir)
-    print("\n🎉 Workspace initialized successfully!")
-    print(f"To run your pipeline, execute:\n  .aider_factory/bash/factory .aider_factory/.env_{repo_name}.yml")
+    
+    # Automatically provision the LanceDB directory if RAG is enabled
+    if profile["use_rag"] and profile["rag_collection"]:
+        rag_dir = os.path.join(target_dir, ".aider_factory", "markdown", "lanceDB", profile["rag_collection"])
+        os.makedirs(rag_dir, exist_ok=True)
 
-def run_query(instruction, file_path, context_paths, ask_mode):
-    """Query or modify active configuration using direct litellm session persistence and session hashing."""
+    print("\n🎉 Workspace initialized successfully!")
+    if profile["use_rag"]:
+        print(f"👉 Note: Copy your source documents (PDFs, MD, images, etc.) to:\n  .aider_factory/markdown/lanceDB/{profile['rag_collection']}/")
+    print(f"To run your pipeline, execute:\n  .aider_factory/bash/factory .aider_factory/.env_{repo_name}.yml")
+    
+    print("\n💡 Tip: You can customize or change the aider-helper model at any time:")
+    print("  # For local endpoints (e.g., llama.cpp/LM Studio):")
+    print("  export AIDER_HELPER_MODEL=\"qwen3.6-27B-90k-udq4kxl:LATEST\"")
+    print("  export AIDER_HELPER_API_BASE=\"http://192.168.100.1:8080/v1\"")
+    print("  # For other cloud providers (e.g., Anthropic):")
+    print("  export AIDER_HELPER_MODEL=\"anthropic/claude-3-5-sonnet-20241022\"")
+    print("  export ANTHROPIC_API_KEY=\"your-key\"")
+    print("  # To revert back to default cloud settings:")
+    print("  unset AIDER_HELPER_MODEL AIDER_HELPER_API_BASE")
+
+def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=False):
+    """Query configuration or run general terminal assistant using direct litellm session persistence."""
     key_name, _ = detect_api_key()
     if not key_name:
         print_key_help_and_exit()
         return
 
     repo_name = get_repo_name()
-    if not file_path:
-        file_path = os.path.join(".aider_factory", f".env_{repo_name}.yml")
-        if not os.path.exists(file_path):
-            pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            master_env_path = os.path.join(pkg_dir, "default_configs", "env.yml")
-            os.makedirs(".aider_factory", exist_ok=True)
-            sensible_name = f"{repo_name.replace('_', ' ').replace('-', ' ').title()} Pipeline"
-            cwd = os.getcwd()
-            with open(master_env_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            content = content.replace('name: "My Project"', f'name: "{sensible_name}"')
-            content = content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            print(f"ℹ️ Created configuration file from template: {file_path}")
+    if terminal_mode:
+        ask_mode = True  # Terminal mode is always conversational
+        session_file = get_helper_terminal_session_file()
+    else:
+        session_file = get_helper_session_file()
+        if not file_path:
+            file_path = os.path.join(".aider_factory", f".env_{repo_name}.yml")
+            if not os.path.exists(file_path):
+                pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                master_env_path = os.path.join(pkg_dir, "default_configs", "env.yml")
+                os.makedirs(".aider_factory", exist_ok=True)
+                sensible_name = f"{repo_name.replace('_', ' ').replace('-', ' ').title()} Pipeline"
+                cwd = os.getcwd()
+                with open(master_env_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                content = content.replace('name: "My Project"', f'name: "{sensible_name}"')
+                content = content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                print(f"ℹ️ Created configuration file from template: {file_path}")
 
-    # Load active configurations for context
-    # __file__ is in src/aider_factory/python/, so parent is src/aider_factory/
-    pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    yaml_docs_path = os.path.join(pkg_dir, "markdown", "yaml_docs_sample.md")
-    
-    with open(yaml_docs_path, "r", encoding="utf-8") as f:
-        yaml_docs = f.read()
-    with open(file_path, "r", encoding="utf-8") as f:
-        active_config = f.read()
-
-    # Load session history
-    session_file = get_helper_session_file()
-    
-    # Calculate unique context hash to protect the KV cache
-    hash_payload = f"{file_path}\n{context_paths}"
-    current_hash = hashlib.sha256(hash_payload.encode("utf-8")).hexdigest()
-    
     messages = []
-    session_data = {}
     if os.path.exists(session_file):
         try:
             with open(session_file, "r", encoding="utf-8") as f:
-                session_data = json.load(f)
-            # If the context hash matches, reuse the session to preserve the KV cache
-            if isinstance(session_data, dict) and session_data.get("context_hash") == current_hash:
-                messages = session_data.get("messages", [])
+                data = json.load(f)
+                if isinstance(data, list):
+                    messages = data
+                elif isinstance(data, dict) and "messages" in data:
+                    messages = data["messages"]
         except Exception:
             pass
 
     if not messages:
-        messages.append({"role": "system", "content": PERSONA_PROMPT})
-        # Warm up cache with docs and template
-        messages.append({"role": "user", "content": f"YAML DOCUMENTATION:\n{yaml_docs[:15000]}\n\nACTIVE CONFIGURATION:\n{active_config}"})
-        messages.append({"role": "assistant", "content": "Acknowledged. I have loaded the pipeline documentation and your active configuration. How can I help you modify or understand your pipeline today?"})
+        if terminal_mode:
+            messages.append({"role": "system", "content": TERMINAL_PERSONA_PROMPT})
+            messages.append({"role": "assistant", "content": "Terminal agent initialized. Ready to assist with your workspace tasks."})
+        else:
+            pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            yaml_docs_path = os.path.join(pkg_dir, "markdown", "yaml_docs_sample.md")
+            with open(yaml_docs_path, "r", encoding="utf-8") as f:
+                yaml_docs = f.read()
+            with open(file_path, "r", encoding="utf-8") as f:
+                active_config = f.read()
+            messages.append({"role": "system", "content": PERSONA_PROMPT})
+            messages.append({"role": "user", "content": f"YAML DOCUMENTATION:\n{yaml_docs[:15000]}\n\nACTIVE CONFIGURATION:\n{active_config}"})
+            messages.append({"role": "assistant", "content": "Acknowledged. I have loaded the pipeline documentation and your active configuration. How can I help you modify or understand your pipeline today?"})
 
     # Append user context files if specified
     user_context = ""
@@ -358,7 +404,15 @@ def run_query(instruction, file_path, context_paths, ask_mode):
 
     # Call litellm with streaming
     import litellm
-    model = "gemini/gemini-2.5-flash" if "GEMINI" in key_name else "openai/gpt-4o"
+    model_map = {
+        "GEMINI_API_KEY": "gemini/gemini-2.5-flash",
+        "ANTHROPIC_API_KEY": "anthropic/claude-3-5-sonnet-20241022",
+        "OPENROUTER_API_KEY": "openrouter/auto",
+        "GROQ_API_KEY": "groq/llama-3.3-70b-versatile",
+        "OPENCODE_API_KEY": "openai/opencode",
+        "OPENAI_API_KEY": "openai/gpt-4o"
+    }
+    model = model_map.get(key_name, "openai/gpt-4o")
     
     print(f"{_HELPER_COLOR}[aider-helper] Asking {model}...{_RESET}\n")
     try:
@@ -378,13 +432,10 @@ def run_query(instruction, file_path, context_paths, ask_mode):
         reply_text = "".join(full_reply)
         messages.append({"role": "assistant", "content": reply_text})
         
-        # Save session with context_hash
+        # Save session history directly
         os.makedirs(os.path.dirname(session_file), exist_ok=True)
         with open(session_file, "w", encoding="utf-8") as f:
-            json.dump({
-                "context_hash": current_hash,
-                "messages": messages
-            }, f, ensure_ascii=False, indent=2)
+            json.dump(messages, f, ensure_ascii=False, indent=2)
 
         # Hardcoded deterministic check: write back ONLY if ask_mode is False
         if not ask_mode:

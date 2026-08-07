@@ -311,6 +311,66 @@ def _append_transcript(question, answer, context):
         f.write(f"**A:** {answer}\n")
 
 
+def _validate_oracle_response(answer_text):
+    """Instantly runs --claims-only validation on the Oracle's generated response."""
+    if os.environ.get("ORACLE_CLAIMS_ONLY") != "1":
+        return
+
+    import tempfile
+    import validator
+
+    fd, tmp_file = tempfile.mkstemp(suffix=".md", text=True)
+    os.close(fd)  # Close the file descriptor immediately to prevent leaks
+    
+    with open(tmp_file, "w", encoding="utf-8") as f:
+        f.write(answer_text)
+
+    report_path = os.path.join(os.getcwd(), ".aider_factory", "temp", "oracle_claims_report.md")
+    os.makedirs(os.path.dirname(report_path), exist_ok=True)
+
+    class ValArgs:
+        pass
+    a = ValArgs()
+    a.file = tmp_file
+    a.report = report_path
+    a.claims_only = True
+    a.no_print = os.environ.get("ORACLE_NO_PRINT") == "1"
+    a.db = os.environ.get("ORACLE_RAG_DB_DIR")
+    a.collection = os.environ.get("ORACLE_COLLECTION")
+    try:
+        a.top_k = int(os.environ.get("ORACLE_TOP_K", "5"))
+    except (ValueError, TypeError):
+        a.top_k = 5
+    try:
+        a.region_threshold = float(os.environ.get("ORACLE_REGION_THRESHOLD", "0.60"))
+    except (ValueError, TypeError):
+        a.region_threshold = 0.60
+    try:
+        a.entail_threshold = float(os.environ.get("GROUNDING_ENTAIL_THRESHOLD", "0.5"))
+    except (ValueError, TypeError):
+        a.entail_threshold = 0.5
+    a.grounding_model = os.environ.get("GROUNDING_AGENT_MODEL")
+    a.grounding_api_base = os.environ.get("GROUNDING_AGENT_API_BASE")
+    a.grounding_api_key = os.environ.get("GROUNDING_AGENT_API_KEY")
+
+    if not a.no_print:
+        print(f"\n[oracle-validate] Verifying claims in response...", file=sys.stderr)
+        
+    rc = validator._run_claims_only(a)
+
+    if rc == 0:
+        if not a.no_print:
+            print(f"[oracle-validate] ✅ All claims grounded.", file=sys.stderr)
+    else:
+        if not a.no_print:
+            print(f"[oracle-validate] ⚠️  Unsupported claims detected!", file=sys.stderr)
+
+    try:
+        os.remove(tmp_file)
+    except OSError:
+        pass
+
+
 def _full_document(db_dir, collection):
     """Return the ENTIRE text of a single collection's table (no similarity search).
 
@@ -545,6 +605,15 @@ def _extract_overrides(argv):
             continue
         if a == "--no-rag":
             no_rag_forced = True
+            os.environ["ORACLE_NO_RAG_INGEST"] = "1"
+            i += 1
+            continue
+        if a == "--claims-only":
+            os.environ["ORACLE_CLAIMS_ONLY"] = "1"
+            i += 1
+            continue
+        if a == "--no-print":
+            os.environ["ORACLE_NO_PRINT"] = "1"
             i += 1
             continue
         if a == "--debate":
@@ -1066,6 +1135,8 @@ def _add_maintenance(action, paths):
     cer_thresh = 0.05
     max_retries = 2
     parallel = 1
+    ocr_max_tokens = 4096
+    code_chunk_size = 2000
     
     phases = cfg.get("phases", [])
     if phases:
@@ -1078,6 +1149,8 @@ def _add_maintenance(action, paths):
         cer_thresh = float(phase_rag.get("cer_threshold", 0.05))
         max_retries = int(phase_rag.get("ocr_max_retries", 2))
         parallel = int(phase_rag.get("ocr_parallel", 1))
+        ocr_max_tokens = int(phase_rag.get("ocr_max_tokens", 4096))
+        code_chunk_size = int(phase_rag.get("code_chunk_size", 2000))
 
     # Resolve embedding settings with proper fallbacks to rag blocks
     global_rag = cfg.get("rag", {}) or {}
@@ -1102,10 +1175,14 @@ def _add_maintenance(action, paths):
         or endpoints.get("embed_api_base")
     )
 
-    print(
-        f"[oracle] Running incremental ingestion (batch={batch_setting}, model={embed_model}, backend={embed_backend})...",
-        file=sys.stderr,
-    )
+    ocr_only_mode = os.environ.get("ORACLE_NO_RAG_INGEST") == "1"
+    if ocr_only_mode:
+        print(f"[oracle] --no-rag active: Files will be OCR'd to Markdown but NOT indexed into LanceDB.", file=sys.stderr)
+    else:
+        print(
+            f"[oracle] Running incremental ingestion (batch={batch_setting}, model={embed_model}, backend={embed_backend})...",
+            file=sys.stderr,
+        )
 
     # 7. Call rag_manager.ingest
     try:
@@ -1124,7 +1201,10 @@ def _add_maintenance(action, paths):
             cer_threshold=cer_thresh,
             ocr_max_retries=max_retries,
             ocr_parallel=parallel,
+            ocr_max_tokens=ocr_max_tokens,
+            code_chunk_size=code_chunk_size,
             batch=batch_setting,
+            ocr_only=ocr_only_mode,
         )
         if success:
             print("[oracle] Ingestion completed successfully.", file=sys.stderr)
@@ -1236,6 +1316,8 @@ def _add_web_maintenance(urls):
     cer_thresh = 0.05
     max_retries = 2
     parallel = 1
+    ocr_max_tokens = 4096
+    code_chunk_size = 2000
 
     phases = cfg.get("phases", [])
     if phases:
@@ -1247,6 +1329,8 @@ def _add_web_maintenance(urls):
         cer_thresh = float(phase_rag.get("cer_threshold", 0.05))
         max_retries = int(phase_rag.get("ocr_max_retries", 2))
         parallel = int(phase_rag.get("ocr_parallel", 1))
+        ocr_max_tokens = int(phase_rag.get("ocr_max_tokens", 4096))
+        code_chunk_size = int(phase_rag.get("code_chunk_size", 2000))
 
     # Resolve embedding settings with proper fallbacks to rag blocks
     global_rag = cfg.get("rag", {}) or {}
@@ -1292,6 +1376,8 @@ def _add_web_maintenance(urls):
             cer_threshold=cer_thresh,
             ocr_max_retries=max_retries,
             ocr_parallel=parallel,
+            ocr_max_tokens=ocr_max_tokens,
+            code_chunk_size=code_chunk_size,
             batch=batch_setting,
         )
         if success:
@@ -1583,6 +1669,8 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
         if oracle_cost_line_0:
             print(oracle_cost_line_0, file=sys.stderr)
         print(f"└──{_RESET}", file=sys.stderr)
+        
+        _validate_oracle_response(initial_oracle)
 
         for turn in range(max_turns):
             turn_label = f"r{round_idx} turn {turn + 1}/{max_turns}"
@@ -1703,6 +1791,8 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
             if oracle_cost_line:
                 print(oracle_cost_line, file=sys.stderr)
             print(f"└──{_RESET}", file=sys.stderr)
+            
+            _validate_oracle_response(last_oracle)
 
             deliberate.record_turn(ledger, turn, "oracle", last_oracle, verdict=verdict)
 
@@ -1885,6 +1975,8 @@ def main():
             _append_transcript(display, answer, context)
         else:
             _append_transcript(display, answer, context)
+            
+        _validate_oracle_response(answer)
 
     # Status -> stderr; answer -> stdout (folds cleanly into the aider chat).
     nchunks = context.count("[source:") if context else 0

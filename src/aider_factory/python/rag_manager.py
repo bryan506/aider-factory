@@ -583,6 +583,7 @@ def ingest(
     ocr_max_retries=2,
     ocr_parallel=1,
     batch=True,
+    ocr_only=False,
     **kwargs,
 ):
     import lancedb
@@ -607,15 +608,17 @@ def ingest(
     except Exception:
         existing_names = []
 
-    try:
-        _dim = len(
-            embed_texts(
-                ["dimension probe"], embed_backend, embed_model, embed_api_base
-            )[0]
-        )
-    except Exception as e:
-        log.error(f"[RAG] Failed to probe embedding model '{embed_model}': {e}")
-        return False
+    _dim = 1536  # Safe dummy value for ocr_only mode
+    if not ocr_only:
+        try:
+            _dim = len(
+                embed_texts(
+                    ["dimension probe"], embed_backend, embed_model, embed_api_base
+                )[0]
+            )
+        except Exception as e:
+            log.error(f"[RAG] Failed to probe embedding model '{embed_model}': {e}")
+            return False
 
     class RAGChunk(LanceModel):
         text: str
@@ -650,6 +653,7 @@ def ingest(
         ocr_parallel=max(1, int(ocr_parallel)),
         ocr_max_tokens=ocr_max_tokens,
         _dim=_dim,
+        ocr_only=ocr_only,
     )
 
     def _ocr_to_markdown(
@@ -869,6 +873,10 @@ def ingest(
                 _lang_for_ext(os.path.splitext(abs_path)[1]) if kind == "code" else ""
             )
             rows = _rows_for(abs_path, kind, sf, lang, cfg)
+            
+            if cfg.get("ocr_only"):
+                continue
+                
             pending.extend(rows)
 
             if len(pending) >= FLUSH_CHUNK_THRESHOLD:

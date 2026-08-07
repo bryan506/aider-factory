@@ -689,21 +689,113 @@ def _finalize(a):
     return 0
 
 
+def _run_claims_only(a):
+    """Validates raw text paragraphs without requiring [evidence] tags."""
+    with open(a.file, encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+
+    paragraphs = []
+    current_para = []
+    in_code_block = False
+
+    # Filter out code blocks, headers, and blank lines to extract clean paragraphs
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_code_block = not in_code_block
+            if current_para:
+                paragraphs.append("\n".join(current_para).strip())
+                current_para = []
+            continue
+
+        if in_code_block:
+            continue
+
+        if stripped.startswith("#"):
+            if current_para:
+                paragraphs.append("\n".join(current_para).strip())
+                current_para = []
+            continue
+
+        if not stripped:
+            if current_para:
+                paragraphs.append("\n".join(current_para).strip())
+                current_para = []
+            continue
+
+        current_para.append(line)
+
+    if current_para:
+        paragraphs.append("\n".join(current_para).strip())
+
+    tripped = []
+    for i, block in enumerate(paragraphs):
+        if not block:
+            continue
+        method, score, chunks, thr = _verify(block, a)
+        if score is not None and score < thr:
+            tripped.append({
+                "idx": i + 1,
+                "block": block,
+                "method": method,
+                "score": score,
+                "chunks": chunks
+            })
+
+    if not tripped:
+        if os.path.isfile(a.report):
+            os.remove(a.report)
+        msg = f"[validate] all claims grounded in {os.path.basename(a.file)}"
+        if not a.no_print:
+            print(msg)
+        print(msg, file=sys.stderr)
+        return 0
+
+    os.makedirs(os.path.dirname(os.path.abspath(a.report)), exist_ok=True)
+    
+    report_lines = [
+        f"# Claim Verification — {os.path.basename(a.file)}\n",
+        f"{len(tripped)} unsupported claims found.\n"
+    ]
+
+    for t in tripped:
+        report_lines.append(f"## Paragraph {t['idx']}")
+        report_lines.append(f"- claim support: {t['score']:.2f} (LOW, {t['method']})")
+        report_lines.append("- review passage:\n```\n" + t['block'] + "\n```")
+        if t['chunks']:
+            report_lines.append("- source chunks (closest first):")
+            for src, txt in t['chunks']:
+                report_lines.append(f"```\n[source: {src}]\n{txt}\n```")
+        report_lines.append("")
+
+    report_text = "\n".join(report_lines)
+    with open(a.report, "w", encoding="utf-8") as f:
+        f.write(report_text)
+
+    if not a.no_print:
+        print(report_text)
+
+    print(f"[validate] {len(tripped)} unresolved claims -> {a.report}", file=sys.stderr)
+    return 1
+
+
 def main():
     ap = argparse.ArgumentParser(description="Evidence grounding audit.")
     ap.add_argument("--file", required=True, help="generated document (review)")
-    ap.add_argument("--source", required=True, help="OCR <stem>.md source of truth")
-    ap.add_argument("--report", required=True, help="heal report to write")
+    ap.add_argument("--source", required=False, help="OCR <stem>.md source of truth")
+    ap.add_argument("--report", required=False, help="heal report to write")
+    ap.add_argument("--claims-only", action="store_true", help="Verify raw text paragraphs without requiring [evidence] tags")
+    ap.add_argument("--no-print", action="store_true", help="Suppress printing the report to stdout in claims-only mode")
     ap.add_argument("--ledger", default=None)
-    ap.add_argument("--tag", default="evidence")
+    ap.add_argument("--tag", default=os.environ.get("ORACLE_VALIDATION_TAG", "evidence"))
     ap.add_argument(
-        "--region-threshold", dest="region_threshold", type=float, default=0.60
+        "--region-threshold", dest="region_threshold", type=float, default=float(os.environ.get("ORACLE_REGION_THRESHOLD", "0.60"))
     )
-    ap.add_argument("--region-margin", dest="region_margin", type=int, default=2)
+    ap.add_argument("--region-margin", dest="region_margin", type=int, default=int(os.environ.get("ORACLE_REGION_MARGIN", "2")))
     ap.add_argument(
-        "--region-paragraphs", dest="region_paragraphs", type=int, default=0
+        "--region-paragraphs", dest="region_paragraphs", type=int, default=int(os.environ.get("ORACLE_REGION_PARAGRAPHS", "0"))
     )
-    ap.add_argument("--top-k", dest="top_k", type=int, default=5)
+    ap.add_argument("--top-k", dest="top_k", type=int, default=int(os.environ.get("ORACLE_TOP_K", "5")))
     ap.add_argument("--db", default=os.environ.get("ORACLE_RAG_DB_DIR"))
     ap.add_argument("--collection", default=os.environ.get("ORACLE_COLLECTION"))
     # Deletion guard + B2 tags + finalize: debate ledger holding quote_baseline + state.
@@ -753,12 +845,24 @@ def main():
     )
     a = ap.parse_args()
 
-    if not os.path.isfile(a.file) or not os.path.isfile(a.source):
-        print(
-            f"[validate] missing file/source: {a.file} / {a.source} (skipping)",
-            file=sys.stderr,
-        )
+    if not os.path.isfile(a.file):
+        print(f"[validate] missing file: {a.file} (skipping)", file=sys.stderr)
         return 0
+
+    if a.claims_only:
+        if not a.report:
+            stem = os.path.splitext(os.path.basename(a.file))[0]
+            a.report = os.path.join(".aider_factory", "temp", f"{stem}_claims_report.md")
+        return _run_claims_only(a)
+
+    if not a.source or not a.report:
+        print("[validate] --source and --report are required unless using --claims-only", file=sys.stderr)
+        return 1
+
+    if not os.path.isfile(a.source):
+        print(f"[validate] missing source: {a.source} (skipping)", file=sys.stderr)
+        return 0
+
     if a.finalize_unsupported:
         return _finalize(a)
     if a.autofix:

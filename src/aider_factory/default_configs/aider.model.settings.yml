@@ -405,10 +405,12 @@
   reminder: sys
   caches_by_default: true
   extra_params:
+      thinking_tokens: 0
       temperature: 0.1
-      reasoning_effort: "medium" # Sets reasoning depth (Options: minimal, low, medium, high)
+      reasoning_effort: "minimal" # Sets reasoning depth (Options: minimal, low, medium, high)
   accepts_settings:
       - reasoning_effort # Exposes /reasoning-effort command in Aider
+      - thinking_tokens # Exposes /thinking-tokens command in Aider
 
 - name: gemini/gemini-3.5-flash-lite
   edit_format: editor-diff
@@ -441,7 +443,7 @@
   reminder: sys
   caches_by_default: true
   extra_params:
-      temperature: 1.0
+      temperature: 0.6
       reasoning_effort: "medium" # Sets reasoning depth (Options: minimal, low, medium, high)
   accepts_settings:
       - reasoning_effort # Exposes /reasoning-effort command in Aider
@@ -480,7 +482,7 @@
   # editor_model_name: gemini/gemini-3.1-pro-preview
   # editor_edit_format: editor-diff
   extra_params:
-      temperature: 1.0
+      temperature: 0.4
       reasoning_effort: "high" # Sets reasoning depth (Options: minimal, low, medium, high)
   accepts_settings:
       - reasoning_effort # Exposes /reasoning-effort command in Aider

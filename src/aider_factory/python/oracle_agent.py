@@ -72,109 +72,21 @@ def _save_session(messages):
         json.dump(messages, f, ensure_ascii=False, indent=2)
 
 
-def _load_session_cost():
-    cf = _session_cost_file()
-    if os.path.exists(cf):
-        try:
-            with open(cf, "r", encoding="utf-8") as f:
-                data = json.load(f) or {}
-            return float(data.get("session_cost", 0.0) or 0.0)
-        except Exception:
-            pass
-    return 0.0
-
-
-def _save_session_cost(total_cost):
-    cf = _session_cost_file()
-    os.makedirs(os.path.dirname(cf), exist_ok=True)
-    with open(cf, "w", encoding="utf-8") as f:
-        json.dump({"session_cost": float(total_cost)}, f, ensure_ascii=False, indent=2)
-
-
-def _clear_session():
-    """Wipes the LLM KV cache and the human-readable transcript."""
-    for f in [_session_file(), _session_cost_file(), TRANSCRIPT_FILE]:
-        if os.path.exists(f):
-            try:
-                os.remove(f)
-            except OSError:
-                pass
-    print("[oracle] 🧹 Session cleared.", file=sys.stderr)
-
-
-def _fmt_token_count(n):
-    try:
-        n = int(n or 0)
-    except Exception:
-        n = 0
-    if n >= 1_000_000:
-        v = n / 1_000_000.0
-        return f"{v:.0f}M" if v >= 10 else f"{v:.1f}M".replace(".0M", "M")
-    if n >= 10_000:
-        return f"{n / 1000.0:.0f}k"
-    if n >= 1000:
-        return f"{n / 1000.0:.1f}k".replace(".0k", "k")
-    return str(n)
-
-
-def _fmt_cost_usd(cost):
-    try:
-        cost = float(cost or 0.0)
-    except Exception:
-        cost = 0.0
-    if cost <= 0:
-        return "0.00"
-    return f"{cost:.4f}" if cost < 0.01 else f"{cost:.2f}"
-
-
-def _response_usage(resp):
-    usage = getattr(resp, "usage", None)
-    if isinstance(resp, dict):
-        usage = resp.get("usage")
-    if usage is None:
-        return {}
-    if hasattr(usage, "model_dump"):
-        usage = usage.model_dump()
-    elif hasattr(usage, "dict"):
-        usage = usage.dict()
-    return usage or {}
-
-
-def _response_content(resp):
-    try:
-        return resp["choices"][0]["message"]["content"]
-    except Exception:
-        return resp.choices[0].message.content
-
-
-def _litellm_cost_line(resp, *, persist_session=False):
-    """Format Aider-style token/cost output for one LiteLLM completion response."""
-    global _ORACLE_PROCESS_SESSION_COST
-
-    usage = _response_usage(resp)
-    sent = usage.get("prompt_tokens", 0) or 0
-    received = usage.get("completion_tokens", 0) or 0
-
-    msg_cost = 0.0
-    try:
-        import litellm
-
-        msg_cost = float(litellm.completion_cost(completion_response=resp) or 0.0)
-    except Exception:
-        msg_cost = 0.0
-
-    if persist_session:
-        session_cost = _load_session_cost() + msg_cost
-        _save_session_cost(session_cost)
-    else:
-        _ORACLE_PROCESS_SESSION_COST += msg_cost
-        session_cost = _ORACLE_PROCESS_SESSION_COST
-
-    return (
-        f"Tokens: {_fmt_token_count(sent)} sent, "
-        f"{_fmt_token_count(received)} received. "
-        f"Cost: ${_fmt_cost_usd(msg_cost)} message, "
-        f"${_fmt_cost_usd(session_cost)} session."
+try:
+    from aider_factory.python.cost_tracker import (
+        load_session_cost as _load_session_cost,
+        save_session_cost as _save_session_cost,
+        clear_session as _clear_session,
+        response_content as _response_content,
+        litellm_cost_line as _litellm_cost_line,
+    )
+except ImportError:
+    from cost_tracker import (
+        load_session_cost as _load_session_cost,
+        save_session_cost as _save_session_cost,
+        clear_session as _clear_session,
+        response_content as _response_content,
+        litellm_cost_line as _litellm_cost_line,
     )
 
 
@@ -774,6 +686,18 @@ def _extract_overrides(argv):
 
     if no_rag_forced:
         os.environ["ORACLE_RETRIEVE_MODE"] = "no_retrieve"
+
+    # Auto-derive DB from collection if not explicitly provided
+    coll = os.environ.get("ORACLE_COLLECTION")
+    if coll and not os.environ.get("ORACLE_RAG_DB_DIR"):
+        # If the collection contains a slash, treat it as a global path
+        if "/" in coll or "\\" in coll:
+            abs_coll = os.path.abspath(os.path.normpath(coll))
+            os.environ["ORACLE_COLLECTION"] = os.path.basename(abs_coll)
+            os.environ["ORACLE_RAG_DB_DIR"] = os.path.join(abs_coll, "lancedb")
+        else:
+            # Otherwise, treat it as a local project collection
+            os.environ["ORACLE_RAG_DB_DIR"] = os.path.join(os.getcwd(), ".aider_factory", "markdown", "lanceDB", coll, "lancedb")
 
     return out, do_list, did_clear, maintenance_action, maintenance_target
 
@@ -1432,6 +1356,8 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
     if not os.path.exists(yaml_path):
         yaml_path = os.path.join(project_dir, ".aider_factory", ".env_auto_ocr.yml")
     if not os.path.exists(yaml_path):
+        yaml_path = os.path.join(project_dir, ".aider_factory", ".env.yml")
+    if not os.path.exists(yaml_path):
         yaml_path = os.path.join(project_dir, ".env.yml")
 
     _reads = []
@@ -1818,6 +1744,77 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
     return 0
 
 
+def _ensure_oracle_config():
+    """Populate missing ORACLE_* environment variables from the active YAML config."""
+    if os.environ.get("ORACLE_AGENT_MODEL") and os.environ.get("ORACLE_EMBED_BACKEND"):
+        return
+
+    project_dir = os.getcwd()
+    yaml_path = os.environ.get("ORACLE_CONFIG_FILE")
+    if not yaml_path or not os.path.exists(yaml_path):
+        yaml_path = os.path.join(project_dir, ".aider_factory", ".env_ocr_rag.yml")
+    if not os.path.exists(yaml_path):
+        yaml_path = os.path.join(project_dir, ".aider_factory", ".env_auto_ocr.yml")
+    if not os.path.exists(yaml_path):
+        yaml_path = os.path.join(project_dir, ".aider_factory", ".env.yml")
+    if not os.path.exists(yaml_path):
+        yaml_path = os.path.join(project_dir, ".env.yml")
+
+    if not os.path.exists(yaml_path):
+        return
+
+    try:
+        import yaml
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+
+        endpoints = config.get("endpoints", {}) or {}
+        global_rag = config.get("rag", {}) or {}
+        phases = config.get("phases", []) or []
+
+        target_coll = os.environ.get("ORACLE_COLLECTION")
+        active_idx = os.environ.get("ORACLE_PHASE_INDEX")
+        active_phase = None
+
+        for idx, p in enumerate(phases):
+            if not p.get("enabled", True):
+                continue
+            if active_idx is not None and str(idx) == active_idx:
+                active_phase = p
+                break
+            elif active_idx is None and target_coll:
+                p_coll = (p.get("rag") or {}).get("collection_name") or (p.get("vector_store") or {}).get("collection_name")
+                if p_coll == target_coll:
+                    active_phase = p
+                    break
+
+        if not active_phase and phases:
+            active_phase = next((p for p in phases if p.get("enabled", True)), phases[0])
+
+        phase_models = (active_phase.get("models") or {}) if active_phase else {}
+        phase_rag = (active_phase.get("rag") or {}) if active_phase else {}
+
+        rag_agent = phase_models.get("rag_agent") or config.get("models", {}).get("rag_agent", "gemini/gemini-3.5-flash")
+        arch_agent = phase_models.get("architect_agent") or config.get("models", {}).get("architect_agent", rag_agent)
+
+        embed_model = phase_rag.get("embed_model") or global_rag.get("embed_model", "qwen3-embedding-8b-8k:LATEST")
+        embed_backend = phase_rag.get("embed_backend") or global_rag.get("embed_backend", "openai")
+        embed_api_base = phase_rag.get("embed_api_base") or global_rag.get("embed_api_base") or endpoints.get("embed_api_base")
+
+        os.environ["ORACLE_AGENT_MODEL"] = rag_agent
+        os.environ["ORACLE_ARCHITECT_MODEL"] = arch_agent
+        os.environ["ORACLE_EMBED_MODEL"] = embed_model
+        os.environ["ORACLE_EMBED_BACKEND"] = embed_backend
+        if embed_api_base:
+            os.environ["ORACLE_EMBED_API_BASE"] = embed_api_base
+        if "gemini/" not in rag_agent and endpoints.get("rag_agent_api"):
+            os.environ.setdefault("ORACLE_AGENT_API_BASE", endpoints.get("rag_agent_api"))
+        if "gemini/" not in arch_agent and endpoints.get("architect_api_base"):
+            os.environ.setdefault("ORACLE_ARCHITECT_API_BASE", endpoints.get("architect_api_base"))
+    except Exception:
+        pass
+
+
 def main():
     # Programmatic, no-Aider mode (template -> file). Triggered by --job, --auto, or ORACLE_JOB.
     if (
@@ -1829,6 +1826,7 @@ def main():
 
     # Target overrides (apply before retrieval): --collection / --db / --list.
     args, do_list, did_clear, maint_act, maint_tgt = _extract_overrides(sys.argv[1:])
+    _ensure_oracle_config()
     if maint_act:
         if maint_act == "list-files":
             return _list_files()

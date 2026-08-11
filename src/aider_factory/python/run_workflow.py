@@ -125,9 +125,24 @@ ocr_api_base = endpoints.get("ocr_api_base")
 rag_context_root = os.path.join(
     str(project_directory), ".aider_factory", "markdown", "lanceDB"
 )
-rag_embed_model = phase_models.get("embed_model") or "BAAI/bge-m3"
-rag_embed_backend = "openai" if "embedding" in rag_embed_model.lower() else "sentence-transformers"
-rag_embed_api_base = endpoints.get("embed_api_base")
+phase_rag = first_enabled_phase.get("rag", {}) or {}
+global_rag = config.get("rag", {}) or {}
+rag_embed_model = (
+    phase_models.get("embed_model")
+    or phase_rag.get("embed_model")
+    or global_rag.get("embed_model")
+    or "BAAI/bge-m3"
+)
+rag_embed_backend = (
+    phase_rag.get("embed_backend")
+    or global_rag.get("embed_backend")
+    or ("openai" if "embedding" in rag_embed_model.lower() or "qwen" in rag_embed_model.lower() else "sentence-transformers")
+)
+rag_embed_api_base = (
+    endpoints.get("embed_api_base")
+    or phase_rag.get("embed_api_base")
+    or global_rag.get("embed_api_base")
+)
 rag_query_prefix = "Query: "
 rag_chunk_size = 800
 rag_chunk_overlap = 100

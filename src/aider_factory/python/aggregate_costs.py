@@ -9,21 +9,21 @@ import re
 import sys
 
 COST_PATTERN = re.compile(
-    r"Tokens:\s*(?P<sent>[0-9.]+[kM]?)\s*sent,\s*(?P<recv>[0-9.]+[kM]?)\s*received\.\s*"
-    r"Cost:\s*\$\s*(?P<msg>[0-9.]+)\s*message,\s*\$\s*(?P<sess>[0-9.]+)\s*session",
+    r"Tokens:\s*(?P<sent>[0-9.,]+[kM]?)\s*sent,\s*(?P<recv>[0-9.,]+[kM]?)\s*received(?:[.\s]*"
+    r"Cost:\s*\$\s*(?P<msg>[0-9.,]+)\s*message,\s*\$\s*(?P<sess>[0-9.,]+)(?:\s*session)?)?",
     re.IGNORECASE,
 )
 
 
 def parse_tokens(token_str):
     """Normalize token counts with metric suffixes to integers."""
-    token_str = token_str.lower().strip()
+    token_str = token_str.lower().strip().replace(',', '')
     if token_str.endswith("k"):
         return int(float(token_str[:-1]) * 1000)
     elif token_str.endswith("m"):
         return int(float(token_str[:-1]) * 1000000)
     try:
-        return int(token_str)
+        return int(float(token_str))
     except ValueError:
         return 0
 
@@ -50,7 +50,9 @@ def aggregate_log(log_path: str):
         d = m.groupdict()
         sent = parse_tokens(d["sent"])
         recv = parse_tokens(d["recv"])
-        msg_cost = float(d["msg"])
+        
+        msg_str = d.get("msg")
+        msg_cost = float(msg_str.replace(',', '')) if msg_str else 0.0
 
         total_sent += sent
         total_recv += recv

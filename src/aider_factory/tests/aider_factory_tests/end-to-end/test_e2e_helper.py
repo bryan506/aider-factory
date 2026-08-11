@@ -29,6 +29,24 @@ with patch.object(sys, "argv", ["aider-helper", "--help"]), \
     assert mock_exit.called, "aider-helper --help should exit cleanly"
 print("  ✅ CLI Help Invariant PASS")
 
+# 1b. Test Unquoted Instruction Parsing
+with patch("bootstrap.run_query") as mock_run_query, \
+     patch.object(sys, "argv", ["aider-helper", "query", "change", "model", "to", "gpt-4o"]):
+    cli.helper_cli()
+    mock_run_query.assert_called_once()
+    assert mock_run_query.call_args[0][0] == "change model to gpt-4o", "Unquoted instructions must be fully joined"
+print("  ✅ Unquoted Instruction Parsing PASS")
+
+# 1c. Test Missing File Graceful Exit
+with patch.object(sys, "argv", ["aider-helper", "query", "test", "-f", "does_not_exist.yml"]), \
+     patch("sys.exit") as mock_exit:
+    try:
+        cli.helper_cli()
+    except SystemExit:
+        pass
+    mock_exit.assert_called_with(1)
+print("  ✅ Missing File Graceful Exit PASS")
+
 # 2. Test Key Gate Validation
 old_env = {k: os.environ.get(k) for k in ["GEMINI_API_KEY", "OPENAI_API_KEY"]}
 for k in old_env:
@@ -69,27 +87,7 @@ mock_inputs = [
 
 with patch("builtins.input", side_effect=mock_inputs), \
      patch("bootstrap.detect_api_key", return_value=("GEMINI_API_KEY", "mock-key")), \
-     patch("litellm.completion") as mock_completion, \
      patch("subprocess.run") as mock_sub:
-    
-    # Mock LLM synthesis returning a valid standardized template
-    mock_choice = MagicMock()
-    mock_choice.message.content = """```yaml
-name: "My Project"
-working_directory: "/path/to/project"
-test_runner: "Rscript .aider_factory/tests/run_tests.R {file}"
-phases:
-  - name: "Reconcile"
-    rag:
-      collection_name: ""
-      run_ocr_rag: false
-      ocr_agent: "glm-ocr-f16:latest"
-      embed_model: "qwen3-embedding-8b-8k:LATEST"
-      embed_backend: "sentence-transformers"
-      query_prefix: "Query: "
-      grounding_agent: "openai/minicheck-flan-t5-large"
-```"""
-    mock_completion.return_value.choices = [mock_choice]
     
     # Run the bootstrapper on a temporary folder to verify file creation
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -216,6 +214,37 @@ try:
         assert mock_exit.called, "Should exit cleanly after clearing terminal session"
     assert not os.path.exists(term_session_file), "Clear terminal command must delete the terminal session file"
     print("  ✅ E2E Standalone Terminal --clear PASS")
+
+    # G. E2E Local Endpoint kwargs Injection
+    os.environ["AIDER_HELPER_API_BASE"] = "http://localhost:8080/v1"
+    with patch.object(sys, "argv", ["aider-helper", "query", "test", "--ask"]), \
+         patch("litellm.completion", return_value=mock_stream) as mock_litellm:
+        cli.helper_cli()
+        kwargs = mock_litellm.call_args[1]
+        assert kwargs.get("api_base") == "http://localhost:8080/v1", "Must pass api_base"
+        assert kwargs.get("api_key") == "dummy", "Must pass dummy api_key for local endpoints to prevent litellm crash"
+    os.environ.pop("AIDER_HELPER_API_BASE")
+    print("  ✅ Local Endpoint kwargs Injection PASS")
+
+    # H. E2E Master Mode (--master / -m) Context Check
+    if os.path.exists(session_file):
+        os.remove(session_file)
+
+    with patch.object(sys, "argv", ["aider-helper", "query", "Explain architecture", "--master", "--ask"]), \
+         patch("litellm.completion", return_value=mock_stream):
+        cli.helper_cli()
+
+    assert os.path.exists(session_file), "Session file must be created on master query"
+    with open(session_file, "r") as f:
+        master_sess_data = json.load(f)
+    
+    user_msg = master_sess_data[1]["content"]
+    assert "FACTORY SERVICE MANUAL:" in user_msg, "Master mode must inject the service manual"
+    
+    ast_msg = master_sess_data[2]["content"]
+    assert "full Factory Service Manual" in ast_msg, "Master mode must update the acknowledgment message"
+    
+    print("  ✅ E2E Master Mode (--master / -m) Context Check PASS")
 
 finally:
     if os.path.exists(tmp_yaml.name):

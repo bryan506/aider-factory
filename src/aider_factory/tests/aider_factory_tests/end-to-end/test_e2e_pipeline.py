@@ -78,7 +78,7 @@ os.makedirs(dest_val_dir, exist_ok=True)
 shutil.copy2(os.path.join(script_dir, "validations_context_check.sh"), os.path.join(dest_val_dir, "validations_context_check.sh"))
 
 # Bootstrap Code Collection & Copy Source Code
-code_repo_dir = os.path.join(code_job_dir, "BaseFeatures", "R")
+code_repo_dir = os.path.join(code_job_dir, "working_repo", "R")
 print(f"[E2E] Bootstrapping code collection directory: {code_repo_dir}")
 os.makedirs(code_repo_dir, exist_ok=True)
 source_code = os.path.join(script_dir, "fut_aac.R")

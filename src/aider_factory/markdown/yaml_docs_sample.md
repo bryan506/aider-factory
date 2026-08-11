@@ -190,7 +190,7 @@ colors:
     architect_debate: "#38bdf8" # teal — architect turns in ask-mode debates
     oracle_debate: "#d3869b" # gruvbox pink — oracle turns in debates
 
-test_command_prefix: "docker exec -i --user bryanr -w /home/bryanr/wf/BaseFeatures -e RETICULATE_PYTHON=/home/bryanr/.venv-rocker/bin/python3 rocker-rstudio"
+test_command_prefix: "docker exec -i --user myuser -w /path/to/project -e RETICULATE_PYTHON=/home/myuser/.venv-rocker/bin/python3 rocker-rstudio"
 test_runner: "Rscript .aider_factory/tests/run_tests.R {file}"
 test_naming_and_path: "tests/testthat/test-{stem}.R"
 loop_aider_test: 3
@@ -401,6 +401,6 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
 # oracle --rm-db
 #
 # Standalone Web Research & Sitemap Discovery CLI:
-# aider-research search "<query>" [--academic] [--top N]
+# aider-research search "<query>" [--academic] [--top N] [--links-only] [--out <file>]
 # aider-research search "<url>" --sitemap [--grep "<pat>"] [--grep-exclude "<pat>"] [--out <file>]
 ```

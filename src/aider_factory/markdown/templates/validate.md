@@ -19,18 +19,18 @@
 - Architectural Pattern: Identify the helper functions, efficiency code paths, and structural patterns in `fut_aac_l()` that are reusable and apply them to `lq_leverage_l()`.
 
 - Action: Analyze `fut_aac_l()` and `lq_leverage_l()` to identify which parts are reusable and which are specific to each function. Apply the reusable parts only to `lq_leverage_l()` and refactor the specific parts of `lq_leverage_l()` accordingly.
-    1. Ensure we properly use necessary variables at the top of `lq_leverage_l()`. Remove the unused ones and keep only the ones needed for the function's logic.
-    2. Respect the workflow of `algo_start_time` and `algo_end_time`, make use of `current_minute_floor` where necessary. Adapt the time-related workflow to the specific needs of `lq_leverage_l()`.
-    3. Use the naming conventions for columns so we only set the column names at the top of the script as shown in `fut_aac_l()`. This will make subsetting by columns and dynamic renaming easier in the future.
-    4. Use a minimal delta approach and do not rename variables unnecessarily. If anything we want to establish reusable patterns or helper functions that could be applied to `lq_leverage_l()` and other functions, so reusing names where possible is encouraged.
-    5. There are artifacts still in `lq_leverage_l()` from `fut_aac_l()` that should be refactored out and do not make sense in the context of `lq_leverage_l()`. Use your domain knowledge of basis trading between a futures leg and a spot leg to identify what is relevant and what must be removed.
+  1. Ensure we properly use necessary variables at the top of `lq_leverage_l()`. Remove the unused ones and keep only the ones needed for the function's logic.
+  2. Respect the workflow of `algo_start_time` and `algo_end_time`, make use of `current_minute_floor` where necessary. Adapt the time-related workflow to the specific needs of `lq_leverage_l()`.
+  3. Use the naming conventions for columns so we only set the column names at the top of the script as shown in `fut_aac_l()`. This will make subsetting by columns and dynamic renaming easier in the future.
+  4. Use a minimal delta approach and do not rename variables unnecessarily. If anything we want to establish reusable patterns or helper functions that could be applied to `lq_leverage_l()` and other functions, so reusing names where possible is encouraged.
+  5. There are artifacts still in `lq_leverage_l()` from `fut_aac_l()` that should be refactored out and do not make sense in the context of `lq_leverage_l()`. Use your domain knowledge of basis trading between a futures leg and a spot leg to identify what is relevant and what must be removed.
 
 - Unique Workflow Notes: The following are architectural choices that will need to be addressed. Likely they will have to be removed, but if you determine otherwise, justify the decision in your implementation plan.
-    1. Replay logic may not be necessary. Remove replay logic from `lq_leverage_l()`. We may rely on the fact that since `LEVERAGE_LQ` is dependent on `POSITION`, that we will always write metrics for `LEVERAGE_LQ` based on the latest `POSITION` metrics needed to calculate the `LEVERAGE_LQ` features in `lq_leverage()`. The `lq_leverage_l()` function will gracefully exit (as is already implemented) if `POSITION` metrics are not available.
-    2. Remove any unused variables or artifacts from `lq_leverage_l()`.
-    3. `process_feature_event` needs to include the proper assignments for `leverage_lq` and columns and other relevant variables.
-    4. Everything below the comment `# Pack KV values for all features` is going to need to be reworked. We might only need the KV packing logic once so ensure we are not being redundant.
-    5. Everything below the comment `# Add metadata columns` in `lq_leverage_l()` should stay as is since those are global metadata column assignments.
+  1. Replay logic may not be necessary. Remove replay logic from `lq_leverage_l()`. We may rely on the fact that since `LEVERAGE_LQ` is dependent on `POSITION`, that we will always write metrics for `LEVERAGE_LQ` based on the latest `POSITION` metrics needed to calculate the `LEVERAGE_LQ` features in `lq_leverage()`. The `lq_leverage_l()` function will gracefully exit (as is already implemented) if `POSITION` metrics are not available.
+  2. Remove any unused variables or artifacts from `lq_leverage_l()`.
+  3. `process_feature_event` needs to include the proper assignments for `leverage_lq` and columns and other relevant variables.
+  4. Everything below the comment `# Pack KV values for all features` is going to need to be reworked. We might only need the KV packing logic once so ensure we are not being redundant.
+  5. Everything below the comment `# Add metadata columns` in `lq_leverage_l()` should stay as is since those are global metadata column assignments.
 
 - Constraint 1: Do not change the existing `lq_leverage_l()` business logic or implementation semantics beyond what is strictly required to complete the `lq_leverage_l()` workflow. WE WILL ONLY BE FOCUSING ON CHANGES TO `lq_leverage_l()` and `lq_leverage()`.
 
@@ -39,8 +39,8 @@
 - Constraint 3: All KV unpacking and packing must happen exactly once per workflow stage, with shared reused objects instead of duplicate queries or duplicate transforms.\*\* Reuse unpack needed KV values before business logic, and pack all feature outputs once at the end using existing helpers such as `process_feature_event()`, `kv_dec()`, or `kv_values()`.
 
 - Constraint 4: Never substitute `0` for missing price-like or derived economic state fields.
-    - Missing price-like or derived economic state should remain `NA_real_` or be carried forward from valid prior state when appropriate
-    - Only truly additive event-local quantity fields may use `0` as a safe default, and only when zero is semantically correct
+  - Missing price-like or derived economic state should remain `NA_real_` or be carried forward from valid prior state when appropriate
+  - Only truly additive event-local quantity fields may use `0` as a safe default, and only when zero is semantically correct
 
 ---
 
@@ -59,103 +59,3 @@
 - **Constraint 2 (Code Preservation)**: Never delete, omit, or truncate any functions, variables, or logic that you were not explicitly instructed to change. You must implement the new code features **without** destroying or rewriting the complex, existing scaffolding of the target file. Leave all unrelated logic strictly untouched. Write each SEARCH/REPLACE block targeting the smallest possible unique context. Prefer multiple small blocks over one large block.
 
 ---
-
-## 3. Implementation Phases (The "How")
-
-- **Phase 1: Algorithmic Preservation (MANDATORY)**: Before planning any structural refactoring, the Architect must explicitly identify the core mathematical and algorithmic logic currently present in the target file (FX conversions, specific aggregations, or unique conditional logic, etc.). Your plan must prioritize preserving the _intent_ of this logic. While you may correct obvious arithmetic faults or adjust equations to accommodate the new state management structure, do not invent entirely new mathematical approaches or overwrite underlying quantitative best practices.
-
-- **Phase 2: Audit Report (MANDATORY)**: Before writing any tasks, the architect planning agent must output a section named `## Audit Report`. In this section, systematically evaluate the target file against EVERY bullet point listed in the `PREVIOUS COMPLETED SYSTEM GOALS AND CONSTRAINTS` section. State clearly whether the file passes or fails each specific goal/constraint, and explain your reasoning. Pay special attention to logic related to database queries, loops, and mathematical aggregations.
-
-- **Phase 3: Integration (Aider Handoff)**: Based on the `## Audit Report`, the Architect will either state "Code is structurally sound. No edits required." or output the required Atomic Tasks to fix the failed checks. The Editor will then read these tasks and execute the code edits.
-
----
-
-## 4. Atomic Task List Requirements
-
-> Architect: For each task, provide the "Tight Description" the Editor agent needs for successful execution. For example, If a refactor requires changing 5 different locations in a target file, you MUST create 5 separate Task IDs. Do not combine large function rewrites into a single task.
-
-### [Task ID: 001] - [Task Title]
-
-- **Target File**: `path/to/file.R`
-
-- **Scope Variables** _(from Scope Analysis — comma-separated list of every variable this task touches)_
-
-- **Essential Elements**: (Brief comma-separated list of the helper functions or logic structures from the context that must be used or created.)
-
-- **Completeness Check**: Confirm your Syntax Example explicitly
-  handles ALL variables listed above. A NULL placeholder for any
-  scoped variable is a task failure, not an acceptable stub.
-
-- **Tight Description**: Provide precise logic changes, naming conventions, and expected inputs/outputs. Avoid vague boilerplate.
-
-- **Syntax Example**: Provide a snippet of the EXACT code structure needed. A syntax example that uses a placeholder (NULL, # TODO, # if needed) for any variable listed in that task's Scope Variables field is non-compliant. You MUST write the explicit code or parameters to handle the variables in scope. Include the estimated line number of where the code refactoring should start.
-
-### [Task ID: 002] - [Task Title]
-
-- **Target File**: `...`
-- **Scope Variables**: `...`
-- **Essential Elements**: `...`
-- **Completeness Check**: `...`
-- **Tight Description**: `...`
-- **Syntax Example**: `...`
-
----
-
-> Architect: Provide a concise, bulleted checklist summarizing the atomic tasks you just generated to ensure all goals and constraints were met.
-
-## 5. Implementation Summary (list format)
-
-- [ ] `...`
-- [ ] `...`
-- [ ] `...`
-- [ ] `...`
-- [ ] `...`
-
----
-
-## REQUIRED OUTPUT FORMAT
-
-You MUST structure your entire response exactly like the template below. Do not add conversational filler.
-
-```markdown
-## Coverage Analysis
-
-### Core Algorithmic Logic Identified:
-
-1. ...
-
-### Predicted Failure Modes:
-
-| Mode | Description | Required Mock Scenario |
-| ---- | ----------- | ---------------------- |
-| ...  | ...         | ...                    |
-
----
-
-## Plan
-
-### [Task ID: 001] - [Title]
-
-- **Target File**: ...
-- **Essential Elements**: ...
-- **Tight Description**: ...
-
----
-
-## Atomic Tasks
-
-### [Task ID: 001] - [Title]
-
-` ` `r
-
-# Code implementation here
-
-` ` `
-...
-
----
-
-## Summary Checklist
-
-- [ ] Task 001...
-```

@@ -7,8 +7,8 @@
 - **Action**: Analyze the referenced `R/` files and identify the core function definition variants that allow the functions to run properly, analyze the data, and writes to its destination using the library `TimeBaseR`. **You must write tests that cover ALL function variants found in the source file; if both a live (`_l`) and backfill (`_b`) function exist, you are strictly required to generate tests for both.** Design tests that verify code and logic compliance with implemented code. Tests should verify that changes work with the overall execution and continuity of the primary functions. Create mock data where necessary to test each function with realistic data scenarios. Note that when tests are already present in the target script, you may need to update them to reflect changes to the source script -- test code could have been written before refactoring and may not be compatible with the updated code. Do not force tests updates if they are not necessary. You must design comprehensive tests that achieve high branch coverage. You must adopt an aggressively skeptical posture. Your objective is maximum test density. You must generate an exhaustive test suite that asserts every individual mathematical operation, every `NA`/`NULL` fallback, every `if/else` branch, and every error-handling condition in both the `_l` and `_b` function variants. **Generating a minimal or basic test suite is considered a failure**.
 
 - **Mandatory Pre-computation**: Before generating any atomic tasks, you MUST produce a `## Test Decision Matrix`. This matrix serves as the single source of truth for test coverage. It must map every logical branch, edge case, and error condition identified in the source code to a specific test assertion. No task may be generated without a corresponding row in this matrix.
-    - **Mocking Interface Contracts**: Unit tests must completely isolate mathematical and algorithmic logic from physical database I/O. Use `mockery::stub` to intercept `TimeBaseR` functions and force them to return dummy data structures (e.g., schemas matching expected inputs).
-    - **Stub Precision**: When stubbing allowed external dependencies, the string name of the mocked function in `mockery::stub` MUST match exactly how it is invoked in the source code namespace (e.g., if the source calls `execute_query()` directly, you must stub `"execute_query"`, not `"TimeBaseR::execute_query"`).
+  - **Mocking Interface Contracts**: Unit tests must completely isolate mathematical and algorithmic logic from physical database I/O. Use `mockery::stub` to intercept `TimeBaseR` functions and force them to return dummy data structures (e.g., schemas matching expected inputs).
+  - **Stub Precision**: When stubbing allowed external dependencies, the string name of the mocked function in `mockery::stub` MUST match exactly how it is invoked in the source code namespace (e.g., if the source calls `execute_query()` directly, you must stub `"execute_query"`, not `"TimeBaseR::execute_query"`).
 
 - **Architect Tools**: Do NOT attempt to invoke file-editing tools or directly edit any files. As the architect, you must output your technical testing plans, instructions, atomic tasks, and summaries strictly as standard markdown text in your conversational response.
 
@@ -23,9 +23,9 @@
 - **Constraint 4**: You are strictly forbidden from using `testthat::skip()` because a function requires 'complex mocking' or 'extensive environment setup'. It is your job to write those complex mocks.
 
 - **Additional Focus Points**: Where necessary, apply defensive coding best practices, while staying aware of built in error handling in functions, keeping code suggestions minimal, and not over engineering suggestions.
-    - **Idempotency**: Ensure tests are designed to be run repeatedly without side effects. Mocks must be scoped within test blocks and must not leak state between tests. **When reusing mock `data.table` objects across multiple assertions or tests, use `data.table::copy()` to prevent in-place reference mutations (e.g., `:=`) from leaking state.**
-    - **Codebase Consistency**: Ensure tests are written in a fashion coheret with expected structures and libraries. Use the same conventions and libraries as the target file where it applies. Use data.table methods over base R methods where appropriate, specially when creating new data tables and assigning columns and values (e.g. `data.table::set()`, or `dt[, :=]`). Avoid using backticks (``) in test code. When dealing with names. Assign an empty data.table first prior to any operations that require column names (e.g., `dt <- data.table()`before`data[, :=]`).
-    - **Always** Instruct the editor to split large code modifications into multiple, smaller, search replace blocks. As the architect, you are responsible for ensuring your instructed modifications are split into manageable, search replace blocks.
+  - **Idempotency**: Ensure tests are designed to be run repeatedly without side effects. Mocks must be scoped within test blocks and must not leak state between tests. **When reusing mock `data.table` objects across multiple assertions or tests, use `data.table::copy()` to prevent in-place reference mutations (e.g., `:=`) from leaking state.**
+  - **Codebase Consistency**: Ensure tests are written in a fashion coheret with expected structures and libraries. Use the same conventions and libraries as the target file where it applies. Use data.table methods over base R methods where appropriate, specially when creating new data tables and assigning columns and values (e.g. `data.table::set()`, or `dt[, :=]`). Avoid using backticks (``) in test code. When dealing with names. Assign an empty data.table first prior to any operations that require column names (e.g., `dt <- data.table()`before`data[, :=]`).
+  - **Always** Instruct the editor to split large code modifications into multiple, smaller, search replace blocks. As the architect, you are responsible for ensuring your instructed modifications are split into manageable, search replace blocks.
 
 ---
 
@@ -44,55 +44,8 @@
 - **Source Code Safety**: You may edit the source file and the test file to ensure the tests pass and the logic is mathematically sound. Make targeted, minimal edits to the source code. Do not attempt to rewrite massive blocks of code to fix a single-line bug.
 
 - **Additional Focus Points**: Where necessary, apply defensive coding best practices, while staying aware of built in error handling in functions, keeping code suggestions minimal, and not over engineering edits.
-    - Use data.table methods over base R methods where appropriate, specially when creating new data tables and assigning columns and values (e.g. `data.table::set()`, or `dt[, :=]`). Avoid using backticks (``) in code when dealing with names. Assign an empty data.table first prior to any operations that require column names (e.g., `dt <- data.table()`before`data[, :=]`).
-    - **Always** split large code modifications into multiple, smaller, search replace blocks.
-
----
-
-## 3. Test Implementation Phases (The "How")
-
-- **Phase 1: Decision Matrix Generation (MANDATORY)**: Before writing any tasks, the Architect planning agent MUST output a `## Test Decision Matrix` as a comprehensive markdown table. You must deeply investigate the target source file and map out every possible scenario that requires testing. Do not limit your analysis to basic examples; you must exhaustively identify control flow variations, `NA`/`NULL` inputs, extreme numeric bounds, missing prior states, and malformed database schemas. The table must have columns: `Function Name`, `Category` (Math/State/Edge Case/Error), `Scenario Description`, `Target Code Logic`, and `Required Unit Test Assertion`.
-    - **Matrix Completeness Check**: If the matrix does not cover every `if/else` branch, every function argument validation check, and every potential `NA` propagation path in the source code, you must expand it before proceeding.
-
-- **Phase 2: Execution Planning (Aider Handoff)**: The Architect agent will translate every single row of the Decision Matrix into an Atomic Task (detailed below) directly into the chat. Your generated Atomic Tasks MUST cover every single row in your Decision Matrix to ensure maximum test density.
-    - **Task-to-Matrix Mapping**: Each atomic task must explicitly reference the row(s) from the Decision Matrix it satisfies.
-
-- **Phase 3: Implementation**: The Editor will read these tasks and execute the test scripts, focusing on precise assertions and robust error-catching (`expect_error`, `expect_warning`, `expect_identical`).
-
----
-
-## 4. Atomic Task List Requirements
-
-> Architect: For each task, provide the "Tight Description" the Editor and testing model needs to implement the test script.
-
-### [Task ID: 001] - [Task Title]
-
-- **Target File**: `tests/testthat/test-target_file.R`
-
-- **Essential Elements**: (Brief comma-separated list of the functions or behaviors to be tested)
-
-- **Tight Description**: Provide precise testing logic, expected inputs, and the specific `expect_equal` or `expect_true` assertions required.
-
-- **Syntax Example**: (if applicable) Provide a code snippet of the exact `testthat` structure or syntax needed.
-
-### [Task ID: 002] - [Task Title]
-
-- **Target File**: `...`
-- **Essential Elements**: `...`
-- **Tight Description**: `...`
-- **Syntax Example**: `...`
-
----
-
-> Architect: Provide a concise, bulleted checklist summarizing the atomic tasks you just generated to ensure all goals and constraints were met.
-
-## 5. Testing Summary (list format)
-
-- [ ] `...`
-- [ ] `...`
-- [ ] `...`
-- [ ] `...`
-- [ ] `...`
+  - Use data.table methods over base R methods where appropriate, specially when creating new data tables and assigning columns and values (e.g. `data.table::set()`, or `dt[, :=]`). Avoid using backticks (``) in code when dealing with names. Assign an empty data.table first prior to any operations that require column names (e.g., `dt <- data.table()`before`data[, :=]`).
+  - **Always** split large code modifications into multiple, smaller, search replace blocks.
 
 ---
 
@@ -105,7 +58,7 @@ Below is auxiliary context to assist in accurately mocking external dependencies
 Do not test database connectivity in unit tests. Always intercept `TimeBaseR` functions to isolate the mathematical and algorithmic logic. When mocking `TimeBaseR`, adhere to these interface rules:
 
 1. **Streams**: `TimeBaseR::get_stream()` returns a SWIG proxy object. When mocking this, you must return a structured list with a `db_id` attribute; otherwise, internal query executions will fail validation.
-    - _Example Structure_: `mock_stream <- structure(list(), class = c("TickStream", "TickDb"), db_id = "mock_db")`
+   - _Example Structure_: `mock_stream <- structure(list(), class = c("TickStream", "TickDb"), db_id = "mock_db")`
 2. **Queries**: `TimeBaseR::execute_query()` must be mocked to return a standard `data.table()` matching the expected schema for the function under test (e.g., timestamps, prices, or KV structures).
 3. **Loaders**: Functions like `create_loader` and `use_loader` handle writing. Mock them to return `NULL` or an empty list. The goal is to verify the data structure passed to the loader is correct, not to perform physical write operations.
 

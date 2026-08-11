@@ -179,8 +179,19 @@ def fetch_and_convert_url(url, job_dir):
     try:
         from playwright.sync_api import sync_playwright
 
+        def _launch_browser(p_instance):
+            try:
+                return p_instance.chromium.launch(headless=True)
+            except Exception as _e:
+                if "Executable doesn't exist" in str(_e) or "playwright install" in str(_e):
+                    import subprocess
+                    print("[rag-web] Playwright Chromium binary missing. Auto-installing in the background...", file=sys.stderr)
+                    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+                    return p_instance.chromium.launch(headless=True)
+                raise _e
+
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = _launch_browser(p)
             page = browser.new_page()
             page.goto(url, timeout=15000)
             html_content = page.content()

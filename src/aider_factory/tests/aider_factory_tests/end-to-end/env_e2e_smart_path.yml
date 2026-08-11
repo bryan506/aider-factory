@@ -1,0 +1,8 @@
+name: "E2E Smart Path Auto-Discovery"
+working_directory: "."
+
+phases:
+  - name: "Auto-Discovery Phase"
+    enabled: true
+    rag:
+      collection_name: "e2e_smart_coll"

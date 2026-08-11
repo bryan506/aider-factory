@@ -28,11 +28,11 @@ def test_auto_derive_basename():
     def derive(working_dir, explicit_repo=None):
         return explicit_repo or os.path.basename(str(working_dir).rstrip("/"))
 
-    assert derive("/home/bryanr/wf/BaseFeatures") == "BaseFeatures"
-    assert derive("/home/bryanr/wf/BaseFeatures/") == "BaseFeatures"
+    assert derive("/path/to/working_repo") == "working_repo"
+    assert derive("/path/to/working_repo/") == "working_repo"
     assert derive("/some/path/MyProject") == "MyProject"
     # Explicit override takes precedence
-    assert derive("/home/bryanr/wf/BaseFeatures", "CustomName") == "CustomName"
+    assert derive("/path/to/working_repo", "CustomName") == "CustomName"
     print("  OK: basename derivation correct for all cases")
 
 
@@ -42,7 +42,7 @@ def test_code_exclude_bare_paths():
     """Target files as bare paths (R/lq_leverage.R) are added to exclude set."""
     print("test_code_exclude_bare_paths...")
 
-    rag_working_repo = "BaseFeatures"
+    rag_working_repo = "working_repo"
     target_files = ["R/lq_leverage.R", "R/helpers.R"]
     context_files = ["R/queries.R", "R/validations.R"]
     _active = target_files + context_files
@@ -66,11 +66,11 @@ def test_code_exclude_bare_paths():
 # ---- Test 3: code_exclude handles prefixed paths ----
 
 def test_code_exclude_prefixed_paths():
-    """Paths with repo prefix (BaseFeatures/R/foo.R) are stripped correctly."""
+    """Paths with repo prefix (working_repo/R/foo.R) are stripped correctly."""
     print("test_code_exclude_prefixed_paths...")
 
-    rag_working_repo = "BaseFeatures"
-    _active = ["BaseFeatures/R/lq_leverage.R", "R/helpers.R"]
+    rag_working_repo = "working_repo"
+    _active = ["working_repo/R/lq_leverage.R", "R/helpers.R"]
 
     code_exclude = set()
     for f in _active:
@@ -83,7 +83,7 @@ def test_code_exclude_prefixed_paths():
     # Prefixed path stripped, bare path kept
     assert "R/lq_leverage.R" in code_exclude
     assert "R/helpers.R" in code_exclude
-    assert "BaseFeatures/R/lq_leverage.R" not in code_exclude
+    assert "working_repo/R/lq_leverage.R" not in code_exclude
     print("  OK: prefix stripping works correctly")
 
 
@@ -94,7 +94,7 @@ def test_walk_repo_exclusion():
     print("test_walk_repo_exclusion...")
 
     tmp = "temp/test_walk_excl"
-    repo = os.path.join(tmp, "BaseFeatures")
+    repo = os.path.join(tmp, "working_repo")
     os.makedirs(os.path.join(repo, "R"), exist_ok=True)
 
     # Create some files
@@ -133,12 +133,12 @@ def test_non_matching_repo_no_exclude():
         with open(os.path.join(repo, "R", name), "w") as f:
             f.write(f"# {name}\nbar <- 2\n")
 
-    # These excludes apply to BaseFeatures, not TimeBaseR
+    # These excludes apply to working_repo, not TimeBaseR
     exclude = {"R/lq_leverage.R", "R/helpers.R"}
 
     # Simulate the gate in rag_manager.ingest line 646:
     # excl = code_exclude if os.path.basename(repo) == working_repo else frozenset()
-    working_repo = "BaseFeatures"
+    working_repo = "working_repo"
     excl = exclude if os.path.basename(repo.rstrip("/")) == working_repo else frozenset()
 
     code_exts = {".r", ".R", ".py"}
@@ -162,12 +162,12 @@ def test_end_to_end_derivation():
     print("test_end_to_end_derivation...")
 
     # Simulate run_workflow.py config
-    project_directory = "/home/bryanr/wf/BaseFeatures"
+    project_directory = "/path/to/working_repo"
     rag_cfg = {}  # No explicit working_repo
 
     # The new auto-derive logic
     rag_working_repo = rag_cfg.get("working_repo") or os.path.basename(str(project_directory).rstrip("/"))
-    assert rag_working_repo == "BaseFeatures"
+    assert rag_working_repo == "working_repo"
 
     # Simulate target/context file list
     target_files = ["R/lq_leverage.R"]
@@ -196,9 +196,9 @@ def test_end_to_end_derivation():
     assert "tests/testthat/test-unit-lq_leverage.R" in code_exclude
 
     # Simulate the gate in rag_manager.ingest:
-    # For BaseFeatures repo -> apply excludes
-    excl_bf = code_exclude if "BaseFeatures" == rag_working_repo else frozenset()
-    assert excl_bf == code_exclude, "BaseFeatures repo should get the exclude set"
+    # For working_repo repo -> apply excludes
+    excl_bf = code_exclude if "working_repo" == rag_working_repo else frozenset()
+    assert excl_bf == code_exclude, "working_repo repo should get the exclude set"
 
     # For TimeBaseR repo -> no excludes
     excl_tb = code_exclude if "TimeBaseR" == rag_working_repo else frozenset()

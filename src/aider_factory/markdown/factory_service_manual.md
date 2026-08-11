@@ -221,6 +221,9 @@ first phase to include src/main.py and docs/api.md."
 # Conversational mode (no file writing)
 aider-helper query --ask "What are the available RAG retrieval modes?"
 
+# Master mode: load the full Factory Service Manual for deep architectural queries
+aider-helper query --master --ask "How do I configure a pre-edit debate?"
+
 # General AI Terminal Assistant Mode (strips YAML config context)
 aider-helper query --terminal "How do I optimize a PostgreSQL query with CTEs?"
 aider-helper query -t --context src/main.py "Identify any race conditions in this code"
@@ -231,71 +234,6 @@ aider-helper --terminal --clear # Clears terminal assistant session history
 ```
 
 ---
-
-## 2. GPU Acceleration Layer
-
-### Primary: AMD ROCm Setup
-
-For AMD GPUs (especially Unified Memory setups like MI300 or consumer APUs/GPUs), install the ROCm SDK.
-
-```bash
-sudo apt install -y rocm-hip-sdk
-```
-
-### Auxiliary: NVIDIA CUDA Setup
-
-If deploying on an NVIDIA host, install the proprietary drivers and CUDA toolkit:
-
-```bash
-sudo apt install -y nvidia-driver-550 nvidia-cuda-toolkit
-```
-
-### Model Acquisition and Organization
-
-GGUF model files can be downloaded from HuggingFace and stored in a central directory. All models are registered in `models.ini` using aliases, which you then reference in your pipeline YAML.
-
-#### Downloading Models from HuggingFace
-
-```bash
-mkdir -p ~/Programs/gguf
-cd ~/Programs/gguf
-
-# Download split model files from HuggingFace (example pattern)
-wget https://huggingface.co/USER/MODEL/resolve/main/model-00001-of-00002.gguf
-wget https://huggingface.co/USER/MODEL/resolve/main/model-00002-of-00002.gguf
-```
-
-#### Merging Split GGUF Files
-
-If the model was downloaded as multiple parts, use `llama-merge-gguf` to combine them:
-
-```bash
-# Clone and build llama-merge-gguf
-git clone https://github.com/ggerganov/llama.cpp
-cd llama.cpp/gguf-py
-pip install -e .
-
-# Merge split files into one GGUF
-llama-merge-gguf \
-    model-00001-of-00002.gguf \
-    model-00002-of-00002.gguf \
-    qwen3.6-27b-merged.gguf
-
-# Remove split files, keep only the merged file
-rm model-00001-of-00002.gguf model-00002-of-00002.gguf
-```
-
-#### Organizing Models
-
-All merged GGUF files live in `~/Programs/gguf/` alongside `models.ini`:
-
-```
-~/Programs/gguf/
-  models.ini
-  qwen3.6-27b-merged.gguf
-  glm-ocr-f16.gguf
-  glm-ocr-mmproj.gguf
-```
 
 Register each model in `models.ini` (see Section 3.4) using a human-readable alias. The alias is what you use in your pipeline YAML. llama.cpp picks up the registry automatically when the server starts.
 
@@ -358,274 +296,12 @@ llama-server's router is **case-sensitive** on model names and aliases. The mode
 
 ---
 
-### 3.3 Compiling `llama.cpp`
-
-#### Dependencies
-
-```bash
-sudo apt update
-sudo apt install -y build-essential cmake git
-```
-
-#### Clone the Repository
-
-```bash
-git clone https://github.com/ggerganov/llama.cpp
-cd llama.cpp
-```
-
-#### AMD (HIP/ROCm) — Primary Build
-
-```bash
-HIPCXX="$(hipconfig -l)/clang" cmake -B build \
-    -DGGML_HIP=ON \
-    -DGGML_HIP_ROCWMMA_FATTN=ON \
-    -DCMAKE_BUILD_TYPE=Release
-
-cmake --build build --config Release -j $(nproc)
-```
-
-#### NVIDIA (CUDA) — Auxiliary Build
-
-```bash
-cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j $(nproc)
-```
-
-The compiled `llama-server` binary will be at:
-
-```bash
-./build/bin/llama-server
-```
-
----
-
-### 3.4 The `models.ini` Configuration File
-
-llama.cpp supports a local model registry via `models.ini`. This file defines available models and their GGUF file paths, allowing `llama-server` to switch models on the fly via an API call.
-
-Create `~/.config/llama-server/models.ini`:
-
-```ini
-# ~/.config/llama-server/models.ini
-# Format: [model-name] -> /path/to/model.gguf
-# The name after the slash in your pipeline YAML (e.g., "glm-ocr-f16:latest") maps to these entries.
-
-[qwen3.5-122b-a10b-90k:latest]
-path = /opt/models/qwen3.5-122b-a10b-90k-Q4_K_M.gguf
-ctx_size = 32768
-n_gpu_layers = 999
-
-[qwen3.6-27b-90k:latest]
-path = /opt/models/qwen3.6-27b-90k-udq4kxl.gguf
-ctx_size = 32768
-n_gpu_layers = 999
-
-[glm-ocr-f16:LATEST]
-model = /opt/models/GLM-OCR-f16.gguf
-mmproj = /opt/models/mmproj-GLM-OCR-Q8_0.gguf
-ctx-size = 65536          # divided by parallel slots (65536/8 = 8192 per slot)
-parallel = 8              # 8 concurrent OCR requests; sweet spot for AMD APUs
-n-gpu-layers = 999
-temp = 0.1
-flash-attn = off          # vision models: do NOT enable flash attention
-cache-type-k = f16        # vision models: use f16 KV cache (not quantized)
-cache-type-v = f16
-mmap = false
-
-[qwen3-embedding-8b-8k:LATEST]
-model = /opt/models/Qwen3-Embedding-8B.i1-Q6_K.gguf
-embeddings = on            # expose /v1/embeddings (CRITICAL for embedding models)
-pooling = last             # Qwen3-Embedding pools the final [EOS] token (CRITICAL)
-ctx-size = 16384           # safety margin for long queries (model trains to 40960)
-batch-size = 16384
-ubatch-size = 16384
-n-gpu-layers = 999
-parallel = 1               # embedding requests are serial; 1 slot is sufficient
-flash-attn = on
-cache-type-k = f16
-cache-type-v = f16
-mmap = false
-```
-
-When `llama-server` is running, you can switch models via API:
-
-```bash
-curl http://localhost:8081/load -d '{"model": "qwen3.6-27b-90k:latest"}'
-```
-
----
-
-### 3.5 Systemd Services for llama-server Instances
-
-#### Systemd Service 1: Primary Router (Port 8081)
-
-This instance serves the Architect and RAG Oracle models. It runs with MTP enabled for speed and parallel execution for hot-swapping.
-
-Create `/etc/systemd/system/llama-pair-router.service`:
-
-```ini
-[Unit]
-Description=Llama.cpp Primary Router — Architect + Oracle + Fallback Models
-After=network.target
-
-[Service]
-Type=simple
-User=YOUR_USERNAME
-WorkingDirectory=/home/YOUR_USERNAME
-ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --host 0.0.0.0 \
-    --port 8081 \
-    --models-dir /home/YOUR_USERNAME/.config/llama-server \
-    --models-max 3 \
-    --parallel 3 \
-    --ctx-size 32768 \
-    --spec-type draft-mtp \
-    --spec-draft-n-max 3 \
-    --flash-attn
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable llama-pair-router.service
-sudo systemctl start llama-pair-router.service
-# Verify status:
-sudo systemctl status llama-pair-router.service
-```
-
-#### Systemd Service 2: Vision/OCR + Embedding Endpoint (Port 8080)
-
-This instance serves the GLM-OCR vision model and the embedding model. The router loads models on demand (`--models-max 1` means one model at a time; the router evicts the idle model when a different model is requested). **Critical:** Do NOT enable MTP or Flash Attention as global flags on this instance — vision model encoders break with both. Per-model overrides in `models.ini` (e.g. `flash-attn = on` for the embedding model) are safe.
-
-Create `/etc/systemd/system/llama-vision.service`:
-
-```ini
-[Unit]
-Description=Llama.cpp Vision/OCR + Embedding Endpoint
-After=network.target
-
-[Service]
-Type=simple
-User=YOUR_USERNAME
-WorkingDirectory=/home/YOUR_USERNAME
-ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --host 0.0.0.0 \
-    --port 8080 \
-    --models-preset /path/to/models.ini \
-    --models-max 1 \
-    --parallel 1 \
-    --no-mmap \
-    --slot-prompt-similarity 0.0
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Note: `--parallel 1` is the global default; the per-model `parallel = 8` in `models.ini` for `glm-ocr-f16:LATEST` overrides it when that model is loaded.
-
-#### Parallel OCR Tuning (Vision Model Slot Count)
-
-The optimal number of parallel OCR slots depends on your GPU's memory bandwidth. On an AMD Strix Halo APU (128 GB unified memory, ~250 GB/s bandwidth, 40 CUs at 2800 MHz), benchmarks show:
-
-| `parallel` | Per-slot decode speed | Aggregate throughput | Wall-clock (47-page PDF) | Verdict                          |
-| ---------- | --------------------- | -------------------- | ------------------------ | -------------------------------- |
-| 1          | ~80 t/s               | ~80 t/s              | ~20 min (sequential)     | Baseline                         |
-| 8          | ~80 t/s               | ~640 t/s             | ~5 min                   | Sweet spot                       |
-| 16         | ~14 t/s               | ~224 t/s             | ~12 min                  | Regression (bandwidth saturated) |
-
-**Recommendation:** Start at `parallel = 8` for vision models. Memory cost is minimal (~5 GB total for GLM-OCR at 8 slots with 8192 context per slot). Monitor GPU clocks — if they drop below ~2200 MHz sustained, reduce slots.
-
-Enable and start:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable llama-vision.service
-sudo systemctl start llama-vision.service
-# Verify status:
-sudo systemctl status llama-vision.service
-```
-
----
-
-### 3.6 Remote llama-server Instances (Tablet/Remote Host)
-
-If your primary inference machine is a separate device (e.g., a tablet with an AMD GPU), you can run an additional `llama-server` instance on that remote host and configure the pipeline to target it via the `architect_api_base` endpoint.
-
-On the remote host, create a similar systemd service pointing to the same `models.ini`:
-
-```ini
-[Service]
-ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --host 0.0.0.0 \
-    --port 8081 \
-    --models-dir /home/YOUR_USERNAME/.config/llama-server \
-    --models-max 3 \
-    --parallel 3 \
-    --ctx-size 32768
-```
-
 Ensure the remote service is reachable from your main machine by configuring your network and updating the pipeline's `architect_api_base`:
 
 ```yaml
 endpoints:
   architect_api_base: "http://192.168.100.2:8081/v1" # Remote host IP
 ```
-
----
-
-### 3.7 Ollama Configuration (Port 11434)
-
-Ollama is primarily used for fast, background coding tasks (the Editor model). It runs on its default port (11434) and is referenced by the `editor_ollama_api` endpoint.
-
-#### Installation
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-```
-
-#### Allow Remote Access
-
-If your pipeline runs from a different machine, edit the systemd override:
-
-```bash
-sudo systemctl edit ollama.service
-```
-
-Add:
-
-```ini
-[Service]
-Environment="OLLAMA_HOST=0.0.0.0"
-```
-
-Then:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart ollama
-```
-
-#### Pulling Models
-
-```bash
-ollama pull qwen3.6-27B-90k:latest
-ollama pull qwen2.5-coder:1.5b
-```
-
-The Ollama API is automatically OpenAI-compatible, so the `ollama/` prefix in your pipeline YAML will route correctly.
 
 ---
 
@@ -655,6 +331,7 @@ WantedBy=default.target
 ```
 
 Enable and start the user service without sudo:
+
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now searxng.service
@@ -674,6 +351,9 @@ aider-research search "liquidity adjusted volatility" --academic --time-range mo
 # Read query from a file (multiline inputs are automatically collapsed to a single-line query)
 aider-research search --file ./.query_prompt.txt --academic
 
+# Return ONLY a list of URLs (useful for piping to oracle --add-web)
+aider-research search "open source LLM orchestration" --links-only --out temp/urls.txt
+
 # Sitemap Discovery & URL Filtering (deterministic, $0 LLM cost)
 aider-research search "https://opencode.ai/" --sitemap --grep "docs|api" --grep-exclude "zh-cn|de|ja" --site-depth 2 --out temp/opencode_urls.txt
 ```
@@ -685,7 +365,8 @@ When URLs are processed via `aider-research` or ingested via `oracle --add-web`,
 1. **Content-Type HEAD Sniff:** Performs a fast HEAD request. If `application/pdf` or a `.pdf` extension is detected, it directly downloads the binary PDF.
 2. **`llms.txt` Discovery:** Checks `{domain}/llms.txt`. If present ($>50$ bytes), it extracts the structured AI-friendly Markdown documentation.
 3. **Trafilatura HTML Extraction:** Fetches HTML and converts main body text into clean Markdown with embedded table structures.
-4. **Headless Playwright Fallback:** If Trafilatura fails or yields $<100$ bytes (e.g., JavaScript Single-Page Applications), it launches a headless Chromium browser instance via Playwright to render the page and extract Markdown. (Playwright browser binaries are automatically provisioned into `~/.cache/ms-playwright` on first run if the `playwright` Python library is detected).
+4. **Headless Playwright Fallback:** If Trafilatura fails or yields $<100$ bytes (e.g., JavaScript Single-Page Applications), it launches a headless Chromium browser instance via Playwright to render the page and extract Markdown.
+   - _JIT Provisioning Note:_ If the Chromium executable is missing, `rag_web.py` will attempt to automatically install it in the background (`playwright install chromium`). This involves downloading a ~150MB binary to `~/.cache/ms-playwright`. If this automated fallback fails (often due to corporate network blocks, firewalls, or air-gapped environments), the extraction will safely error without crashing the pipeline. You can manually pre-provision the browser by running `uv run playwright install chromium`.
 
 Output files are saved using deterministic naming (`<domain>_<path_stem>.md` / `.pdf`) in the collection directory.
 
@@ -937,81 +618,81 @@ phases:
     enabled: true
 
     models:
-        architect_agent: "openai/qwen3.5-122b-a10b-90k:latest"
-        editor_agent: "ollama/qwen3.6-27B-90k:latest"
-        editor_agent_test: "lm_studio/qwen3.6-27B-90k-udq4kxl:latest"
-        editor_agent_test_fallback: "openai/qwen3.5-122b-a10b-90k:latest"
-        rag_agent: "openai/qwen3.6-27b-90k:latest"
-        ocr_agent: "glm-ocr-f16:LATEST"
-        embed_model: "qwen3-embedding-8b-8k:LATEST"
-        grounding_agent: "openai/minicheck-flan-t5-large"
+      architect_agent: "openai/qwen3.5-122b-a10b-90k:latest"
+      editor_agent: "ollama/qwen3.6-27B-90k:latest"
+      editor_agent_test: "lm_studio/qwen3.6-27B-90k-udq4kxl:latest"
+      editor_agent_test_fallback: "openai/qwen3.5-122b-a10b-90k:latest"
+      rag_agent: "openai/qwen3.6-27b-90k:latest"
+      ocr_agent: "glm-ocr-f16:LATEST"
+      embed_model: "qwen3-embedding-8b-8k:LATEST"
+      grounding_agent: "openai/minicheck-flan-t5-large"
 
     rag:
-        collection_name: "BaseFeatures_lib"
-        batch: true
-        retrieval_mode: top_k
-        run_ocr_rag: false
-        vectordb_overwrite: false
-        ocr_prompt: "Extract text, tables, math, code, and documentation into clean Markdown. Preserve all structural integrity."
-        query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: "
-        chunk_size_chars: 800
-        chunk_overlap_chars: 100
-        top_k: 30
-        cer_threshold: 0.05
-        ocr_max_retries: 2
-        ocr_parallel: 8
-        code_chunk_size: 2000
-        ocr_max_tokens: 4096
-        embed_backend: "sentence-transformers"
-        working_repo: ""
-        code_exts: null
-        text_doc_exts: null
-        ignore: null
+      collection_name: "working_repo_lib"
+      batch: true
+      retrieval_mode: top_k
+      run_ocr_rag: false
+      vectordb_overwrite: false
+      ocr_prompt: "Extract text, tables, math, code, and documentation into clean Markdown. Preserve all structural integrity."
+      query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: "
+      chunk_size_chars: 800
+      chunk_overlap_chars: 100
+      top_k: 30
+      cer_threshold: 0.05
+      ocr_max_retries: 2
+      ocr_parallel: 8
+      code_chunk_size: 2000
+      ocr_max_tokens: 4096
+      embed_backend: "sentence-transformers"
+      working_repo: ""
+      code_exts: null
+      text_doc_exts: null
+      ignore: null
 
     oracle:
-        start_job: false # Run programmatic document generator first
-        template: "src/aider_factory/markdown/internal/analyze_bugs.md"
-        full_document: false # Send entire paper text instead of chunks
-        pre_edit_debate:
-            enabled: false # Hold debate before making any code edits
-            job_debate_template: ""
+      start_job: false # Run programmatic document generator first
+      template: "src/aider_factory/markdown/internal/analyze_bugs.md"
+      full_document: false # Send entire paper text instead of chunks
+      pre_edit_debate:
+        enabled: false # Hold debate before making any code edits
+        job_debate_template: ""
 
     toggles:
-        pair_programming: true
-        run_job_one: true
-        run_job_two: true
-        iterate_test: true
-        auto_test: false
-        sticky_context: true
+      pair_programming: true
+      run_job_one: true
+      run_job_two: true
+      iterate_test: true
+      auto_test: false
+      sticky_context: true
 
     validation:
-        enabled: false
-        validation_tag: "evidence"
-        region_threshold: 0.60
-        region_margin: 2
-        region_paragraphs: 0
-        region_top_k: 5
-        validation_loops: 3
-        redo_oracle_job: false
-        verify_all_claims: false
-        entail_threshold: 0.5
+      enabled: false
+      validation_tag: "evidence"
+      region_threshold: 0.60
+      region_margin: 2
+      region_paragraphs: 0
+      region_top_k: 5
+      validation_loops: 3
+      redo_oracle_job: false
+      verify_all_claims: false
+      entail_threshold: 0.5
 
     escalation_debate:
-        loops: 4
-        rounds: 2
-        pass_history: true
+      loops: 4
+      rounds: 2
+      pass_history: true
 
     files:
-        target_files: []
-        extra_editable_files: []
-        test_files: []
-        context_files_job: []
-        context_files_test: []
+      target_files: []
+      extra_editable_files: []
+      test_files: []
+      context_files_job: []
+      context_files_test: []
 
     plans:
-        job_one_plan: "markdown/templates/general.md"
-        job_two_plan: "markdown/templates/testing.md"
-        iterate_plan: "markdown/templates/testing_unit_iterate.md"
+      job_one_plan: "markdown/templates/general.md"
+      job_two_plan: "markdown/templates/testing.md"
+      iterate_plan: "markdown/templates/testing_unit_iterate.md"
 ```
 
 ### 5.2 Iteration Loops & Fallback Logic
@@ -1035,6 +716,7 @@ phases:
 When `pair_programming: true` is set, the pipeline wraps Aider in `script -qfe` (quiet, flush, exit-code, command mode) to create a real interactive PTY. This gives Aider's `prompt_toolkit` a proper terminal while capturing all output (stdout + stderr) to a file that flows through the `factory` launcher's `tee` pipeline.
 
 #### The Pair Programming Advantage
+
 While autonomous mode excels at repeatable batch jobs and overnight task chains, **Pair Programming Mode** is a primary highlight of the AI Factory pipeline for complex research, strategy drafting, and code architecture. It provides a human-in-the-loop research environment where querying RAG collections, debating trade-offs with the Knowledge Oracle, and running evidence validation scripts happen interactively at the `architect>` prompt. Tasks that historically required a week of manual literature reading, claim extraction, and cross-checking can be completed in a single day.
 
 #### Interactive Command Cheat-Sheet (`architect>` prompt)
@@ -1069,15 +751,15 @@ Inside an interactive pair programming session, all package tools are accessible
 
 #### Autonomous vs. Interactive Evidence Healing Flow
 
-* **Autonomous Mode (`pair_programming: false`)**:
+- **Autonomous Mode (`pair_programming: false`)**:
   1. `validations_context_check.sh` runs `aider-validate`. Mismatched `[evidence]` quotes trip a report and exit code 1.
   2. `aider-oracle` retrieves exact verbatim source chunks for each tripwire.
   3. The orchestrator catches exit code 1, captures the Oracle's corrections, and launches an automated Aider edit pass (`contextual_revalidation_template.md`). The Editor applies fixes and relabels `[evidence]` $\rightarrow$ `[fixed]`.
 
-* **Pair Programming Mode (`pair_programming: true`)**:
+- **Pair Programming Mode (`pair_programming: true`)**:
   1. You run `validations_context_check.sh` or `aider-validate` via `/run`.
   2. The exact audit report and Oracle verbatim corrections stream directly into your `architect>` chat window.
-  3. You review the findings and instruct Aider: *"Apply the Oracle's verbatim corrections above to target.md and relabel anchors from [evidence] to [fixed]."*
+  3. You review the findings and instruct Aider: _"Apply the Oracle's verbatim corrections above to target.md and relabel anchors from [evidence] to [fixed]."_
   4. You re-run `aider-validate` via `/run` to confirm 100% quote grounding (`0 unresolved / N total`).
 
 The `.aider.model.settings.yml` ensures your context stays locked in VRAM without getting flushed by automatic background tasks. Debate architect turns additionally override `max-chat-history-tokens` to 1,000,000 (effectively unlimited) so that multi-turn debate history is never truncated by Aider's summarization.
@@ -1104,7 +786,7 @@ Why this and not `uv run`/plain `python`:
 
 | Launcher                                       | Works for                                                            | Notes                                                                                           |
 | ---------------------------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `.aider_factory/bash/factory <cfg>`               | **everything** (ingest + Oracle + validation + code)                 | Canonical. Equivalent to `~/.local/share/uv/tools/aider-chat/bin/python run_workflow.py <cfg>`. |
+| `.aider_factory/bash/factory <cfg>`            | **everything** (ingest + Oracle + validation + code)                 | Canonical. Equivalent to `~/.local/share/uv/tools/aider-chat/bin/python run_workflow.py <cfg>`. |
 | `uv run --with pyyaml … run_workflow.py <cfg>` | only configs with **no ingestion** (`run_ocr_rag: false` everywhere) | Fails with `ImportError: lancedb` the moment a phase ingests (ingestion runs _in-process_).     |
 | `python … run_workflow.py`                     | nothing reliably                                                     | Your system Python lacks even `pyyaml`.                                                         |
 
@@ -1172,9 +854,9 @@ Every plan, debate instruction, and oracle template is a **user-editable Markdow
 
 There are two resolution schemes depending on the YAML block:
 
-| YAML block                     | Relative to         | Example path in YAML                              | Resolves to                                                         |
-| ------------------------------ | ------------------- | ------------------------------------------------- | ------------------------------------------------------------------- |
-| Phase `plans:` (all sub-keys)  | `.aider_factory/`      | `"markdown/templates/implement.md"`               | `.aider_factory/markdown/templates/implement.md`                       |
+| YAML block                     | Relative to         | Example path in YAML                                                     | Resolves to                                                                                |
+| ------------------------------ | ------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| Phase `plans:` (all sub-keys)  | `.aider_factory/`   | `"markdown/templates/implement.md"`                                      | `.aider_factory/markdown/templates/implement.md`                                           |
 | Phase `oracle:` (all sub-keys) | `working_directory` | `".aider_factory/markdown/internal/alt_apply_oracle_output_template.md"` | `<working_directory>/.aider_factory/markdown/internal/alt_apply_oracle_output_template.md` |
 
 This means phase-level `plans:` paths omit the `.aider_factory/` prefix, while phase-level `oracle:` paths must include it.
@@ -1189,29 +871,29 @@ Templates are organized into three tiers based on their relationship to the pipe
 
 **Strategy workflow** (`markdown/oracle_pre_plan/`) — Phase-0 templates for building a knowledge-base-grounded implementation plan before code is written. User-customizable; the pipeline loads them only when explicitly configured via `plans.ocr_phase_plan` or as `target_files`.
 
-| File                                  | Location (under `.aider_factory/`) | YAML key                     | Tier           | Mode          | Purpose                                                                           |
-| ------------------------------------- | ------------------------------- | ---------------------------- | -------------- | ------------- | --------------------------------------------------------------------------------- |
-| `implement.md`                        | `markdown/templates/`           | `plans.job_one_plan`         | User           | Code          | Architect instructions for feature implementation                                 |
-| `testing.md`                          | `markdown/templates/`           | `plans.job_two_plan`         | User           | Code          | Architect instructions for writing unit tests                                     |
-| `testing_unit_iterate.md`             | `markdown/templates/`           | `plans.iterate_plan`         | User           | Code          | Constraints appended during test-fix loops                                        |
-| `testing_helpers.md`                  | `markdown/templates/`           | `plans.job_two_plan`         | User           | Code          | Tests for utility/helper functions                                                |
-| `testing_helpers_iterate.md`          | `markdown/templates/`           | `plans.iterate_plan`         | User           | Code          | Constraints for helper test-fix loops                                             |
-| `integrate_testing.md`                | `markdown/templates/`           | `plans.job_two_plan`         | User           | Code          | Integration tests against a live database                                         |
-| `testing_integrate_iterate.md`        | `markdown/templates/`           | `plans.iterate_plan`         | User           | Code          | Constraints for integration test-fix loops                                        |
-| `validate.md`                         | `markdown/templates/`           | `plans.job_one_plan`         | User           | Code          | Senior code reviewer audit                                                        |
-| `post_test_validation.md`             | `markdown/templates/`           | `plans.job_one_plan`         | User           | Code          | Audit generated tests for "test-driven damage"                                    |
-| `general.md`                          | `markdown/templates/`           | `plans.job_one_plan`         | User           | Code          | Generic blank template for any task                                               |
-| `literary_review_template.md`         | `markdown/templates/`           | `oracle.template`            | User           | Review        | Oracle's generation instructions for literature reviews                           |
-| `job_debate.md`                       | `markdown/templates/`           | `oracle.job_debate_template` | User (create)  | Code debate   | Optional. Seeds the pre-edit debate before code is written                        |
-| `analyze_bugs.md`                     | `src/aider_factory/markdown/internal/` | `oracle.template`     | Infrastructure | Code debate   | Architect's debugging instructions for the escalation debate                      |
-| `deliberation_evidence_template.md`   | `markdown/internal/`            | `plans.deliberate_plan`      | Infrastructure | Review debate | Architect's role in evidence grounding debates                                    |
-| `apply_evidence_template.md`          | `markdown/internal/`            | `plans.apply_plan`           | Infrastructure | Review apply  | Apply editor's rules for inserting Oracle's verbatim corrections                  |
-| `contextual_revalidation_template.md` | `markdown/internal/`            | `plans.iterate_plan`         | Infrastructure | Review heal   | Architect's instructions for the heal loop                                        |
-| `strategy_instruct_template.md`       | `markdown/oracle_pre_plan/`     | `plans.ocr_phase_plan`       | Strategy       | Phase-0       | Architect instructions for querying oracle and building a strategy plan           |
-| `strategy_template.md`                | `markdown/oracle_pre_plan/`     | (output artifact)            | Strategy       | Phase-0       | Empty target populated by the architect; consumed downstream via `sticky_context` |
-| `alt_apply_oracle_output_template.md` | `markdown/oracle_pre_plan/`     | `plans.apply_plan` (alt)     | Strategy       | Review apply  | Alternative apply plan for post-validation oracle corrections                     |
-| `strategy_instruct_template.md`       | `markdown/oracle_pre_plan/`     | `plans.ocr_phase_plan`       | Strategy       | Phase-0       | Instructions for querying oracle and generating a grounded strategy plan         |
-| `strategy_template.md`                | `markdown/oracle_pre_plan/`     | `target_files`               | Strategy       | Phase-0       | Empty target populated by architect; passed downstream via `sticky_context`      |
+| File                                  | Location (under `.aider_factory/`)     | YAML key                     | Tier           | Mode          | Purpose                                                                           |
+| ------------------------------------- | -------------------------------------- | ---------------------------- | -------------- | ------------- | --------------------------------------------------------------------------------- |
+| `implement.md`                        | `markdown/templates/`                  | `plans.job_one_plan`         | User           | Code          | Architect instructions for feature implementation                                 |
+| `testing.md`                          | `markdown/templates/`                  | `plans.job_two_plan`         | User           | Code          | Architect instructions for writing unit tests                                     |
+| `testing_unit_iterate.md`             | `markdown/templates/`                  | `plans.iterate_plan`         | User           | Code          | Constraints appended during test-fix loops                                        |
+| `testing_helpers.md`                  | `markdown/templates/`                  | `plans.job_two_plan`         | User           | Code          | Tests for utility/helper functions                                                |
+| `testing_helpers_iterate.md`          | `markdown/templates/`                  | `plans.iterate_plan`         | User           | Code          | Constraints for helper test-fix loops                                             |
+| `integrate_testing.md`                | `markdown/templates/`                  | `plans.job_two_plan`         | User           | Code          | Integration tests against a live database                                         |
+| `testing_integrate_iterate.md`        | `markdown/templates/`                  | `plans.iterate_plan`         | User           | Code          | Constraints for integration test-fix loops                                        |
+| `validate.md`                         | `markdown/templates/`                  | `plans.job_one_plan`         | User           | Code          | Senior code reviewer audit                                                        |
+| `post_test_validation.md`             | `markdown/templates/`                  | `plans.job_one_plan`         | User           | Code          | Audit generated tests for "test-driven damage"                                    |
+| `general.md`                          | `markdown/templates/`                  | `plans.job_one_plan`         | User           | Code          | Generic blank template for any task                                               |
+| `literary_review_template.md`         | `markdown/templates/`                  | `oracle.template`            | User           | Review        | Oracle's generation instructions for literature reviews                           |
+| `job_debate.md`                       | `markdown/templates/`                  | `oracle.job_debate_template` | User (create)  | Code debate   | Optional. Seeds the pre-edit debate before code is written                        |
+| `analyze_bugs.md`                     | `src/aider_factory/markdown/internal/` | `oracle.template`            | Infrastructure | Code debate   | Architect's debugging instructions for the escalation debate                      |
+| `deliberation_evidence_template.md`   | `markdown/internal/`                   | `plans.deliberate_plan`      | Infrastructure | Review debate | Architect's role in evidence grounding debates                                    |
+| `apply_evidence_template.md`          | `markdown/internal/`                   | `plans.apply_plan`           | Infrastructure | Review apply  | Apply editor's rules for inserting Oracle's verbatim corrections                  |
+| `contextual_revalidation_template.md` | `markdown/internal/`                   | `plans.iterate_plan`         | Infrastructure | Review heal   | Architect's instructions for the heal loop                                        |
+| `strategy_instruct_template.md`       | `markdown/oracle_pre_plan/`            | `plans.ocr_phase_plan`       | Strategy       | Phase-0       | Architect instructions for querying oracle and building a strategy plan           |
+| `strategy_template.md`                | `markdown/oracle_pre_plan/`            | (output artifact)            | Strategy       | Phase-0       | Empty target populated by the architect; consumed downstream via `sticky_context` |
+| `alt_apply_oracle_output_template.md` | `markdown/oracle_pre_plan/`            | `plans.apply_plan` (alt)     | Strategy       | Review apply  | Alternative apply plan for post-validation oracle corrections                     |
+| `strategy_instruct_template.md`       | `markdown/oracle_pre_plan/`            | `plans.ocr_phase_plan`       | Strategy       | Phase-0       | Instructions for querying oracle and generating a grounded strategy plan          |
+| `strategy_template.md`                | `markdown/oracle_pre_plan/`            | `target_files`               | Strategy       | Phase-0       | Empty target populated by architect; passed downstream via `sticky_context`       |
 
 #### Writing Custom Templates
 
@@ -1253,8 +935,8 @@ All paths are relative to `working_directory` unless noted.
 
 #### Ephemeral Files (per-task lifecycle — wiped on next task start)
 
-| Artifact              | Path                                          | Contains                                                                                            |
-| --------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Artifact              | Path                                             | Contains                                                                                            |
+| --------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
 | Aider chat log        | `.aider_factory/.aider.chat.history.md`          | Full architect/editor conversation                                                                  |
 | Aider input log       | `.aider_factory/.aider.input.history`            | Raw input prompts sent to aider                                                                     |
 | Oracle transcript     | `.aider_factory/.oracle_chat.history.md`         | Retrieved LanceDB chunks (`<details>` block) + oracle Q&A                                           |
@@ -1266,15 +948,15 @@ All paths are relative to `working_directory` unless noted.
 
 #### Archived Copies (permanent — timestamped)
 
-| Artifact                   | Path                                                       | Contains                                                          |
-| -------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------- |
+| Artifact                   | Path                                                          | Contains                                                          |
+| -------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------- |
 | Aider chat archives        | `.aider_factory/logs/chat_history/<timestamp>_<task_id>.md`   | Timestamped copies of aider chat logs                             |
 | Oracle transcript archives | `.aider_factory/logs/oracle_history/<timestamp>_<task_id>.md` | Timestamped copies with full retrieved chunks in `<details>` tags |
 
 #### Permanent Artifacts (debate/validation outputs)
 
-| Artifact          | Path                                              | Contains                                       |
-| ----------------- | ------------------------------------------------- | ---------------------------------------------- |
+| Artifact          | Path                                                 | Contains                                       |
+| ----------------- | ---------------------------------------------------- | ---------------------------------------------- |
 | Debate transcript | `.aider_factory/logs/debates/<stem>.debate.md`       | Human-readable architect/oracle back-and-forth |
 | Debate ledger     | `.aider_factory/logs/debates/<stem>.debate.json`     | Machine-readable turn state + quote baseline   |
 | Verdict file      | `.aider_factory/logs/debates/<stem>.verdict.md`      | STATUS + GATE + PROPOSAL headers               |
@@ -1284,10 +966,10 @@ All paths are relative to `working_directory` unless noted.
 
 #### Server Logs
 
-| Server                                  | Command                                                                     |
-| --------------------------------------- | --------------------------------------------------------------------------- |
-| llama-server (desktop, port 8080)       | `journalctl -u llama-server -f`                                             |
-| llama-server (tablet/remote, port 8081) | `journalctl -u llama-multi-server -f` (or `llama-pair-router`)              |
+| Server                                  | Command                                                                        |
+| --------------------------------------- | ------------------------------------------------------------------------------ |
+| llama-server (desktop, port 8080)       | `journalctl -u llama-server -f`                                                |
+| llama-server (tablet/remote, port 8081) | `journalctl -u llama-multi-server -f` (or `llama-pair-router`)                 |
 | Pipeline execution                      | stdout/stderr of `.aider_factory/bash/factory` (pipe to `tee` for persistence) |
 
 ---
@@ -1340,7 +1022,7 @@ The RAG/OCR pipeline ingests both literature (PDFs, images, loose markdown) and 
 - **Active File Exclusion**: Any file that is a target, editable, or context file in the active phase is automatically excluded from the vector store. The `working_repo` is auto-derived from `os.path.basename(working_directory)` when not explicitly set in the YAML. This prevents stale code copies from polluting oracle retrieval. The explicit `rag.working_repo` override still works for edge cases.
 - **Fault-Tolerant Ingestion**: Each table build is wrapped in its own `try/except`. A single failing file (OCR endpoint unreachable, corrupt PDF, embedding error) does not kill the entire ingestion — remaining tables continue, and the pipeline proceeds with whatever tables succeeded.
 - **Legacy Schema Safety**: Multi-table code ingestion utilizes metadata columns (`source_type`, `language`, etc.). The pipeline enforces a strict invariant: attempting to append new data to an old-schema table without these metadata columns will gracefully abort. You must set `vectordb_overwrite: true` to rebuild legacy tables.
-- **Parallel OCR**: Set `rag.ocr_parallel: N` (default 1) to process N pages concurrently within each document via `ThreadPoolExecutor`. Match this to your llama-server's `--parallel` setting for the vision model. Pages are reassembled in order after completion. See Section 3.5 for tuning guidance.
+- **Parallel OCR**: Set `rag.ocr_parallel: N` (default 1) to process N pages concurrently within each document via `ThreadPoolExecutor`. Match this to your llama-server's `--parallel` setting for the vision model. Pages are reassembled in order after completion. See `local_setup_llamacpp.md` for parallel slot tuning guidance.
 - **Local/Cloud Routing**: Both embedding and OCR support dual routing. When `embed_api_base` / `ocr_api_base` is set, requests go directly to the local endpoint via HTTP. When empty or unset, requests route through `litellm` for cloud model routing (e.g. `gemini/text-embedding-004` for cloud embeddings, `gemini/gemini-2.5-flash` for cloud OCR).
 
 The `collection_name` in your `.env.yml` maps directly to a subdirectory under `.aider_factory/markdown/lanceDB/` (for literature ingestion). Code is ingested from the project directory.
@@ -1368,11 +1050,13 @@ The phase-level `batch` toggle controls how the documents in a collection map to
 - **`batch: true`** (default) — enables the **Multi-Table, Type-Routed** database architecture. Documents are chunked into type-specific tables (`<coll>_<repo>_code`, `<coll>_<repo>_docs`, `<coll>_docs`). Best for **corpus-wide** retrieval: the Oracle natively uses **Reciprocal Rank Fusion (RRF)** to fuse results from all tables in the collection directory simultaneously (automatically triggers the `*` fuse-all sentinel for pipeline debates).
 
   **Reciprocal Rank Fusion (RRF) Mechanics:**
-  When querying across multiple tables, `oracle_agent.py` executes parallel similarity searches across all constituent tables and merges the ranked lists using Reciprocal Rank Fusion:
+  When querying across multiple tables, both `oracle_agent.py` and `validator.py` execute parallel similarity searches across all constituent tables and merge the ranked lists using Reciprocal Rank Fusion:
   $$RRF\_Score(chunk) = \sum_{t \in Tables} \frac{1}{60 + rank_t(chunk)}$$
   Deduplication is performed using the key `(source_file, text[:64])`. The top $k$ highest-scoring chunks across all tables are returned.
 
   - You can filter fusion by corpus using `--type code` (targets `*_code` tables) or `--type docs` (targets `*_docs` tables).
+  - Exact table targeting: If you pass an exact table name to `--collection`, the pipeline isolates that table and skips fusion.
+
 - **`batch: false`** — each document gets its **own isolated table** (named after the sanitized file stem). Best for **per-document** work (focused queries, per-paper literature reviews). Two important consequences:
   - There is **no combined table**, and `--type` filtering excludes these tables. An Oracle query without `--collection` finds nothing — you must target a document (`oracle --collection <table>` or `oracle --list` to discover names).
   - A wildcard under `files:` (e.g. `literary_review/*.md`) is **glob-expanded and alphabetically sorted**. The pipeline **auto-creates** a per-document output `.md` for each source doc before expanding `target_files`, so a fresh collection resolves cleanly.
@@ -1397,6 +1081,8 @@ The pipeline injects the Oracle's configuration as `ORACLE_*` environment variab
 
 ```
 oracle "<question>"                                 # ask; uses the session's collection + retrieval mode
+oracle --claims-only "<question>"                   # instantly self-validate the Oracle's response for hallucinations
+oracle --claims-only --no-print "<question>"        # validate silently; only write the report to disk
 oracle --file <path> ["note"]                       # send a whole file as the message (via temp file; no size limit)
 oracle --collection <table> "<question>"            # target ONE document's table (batch:false)
 oracle --no-rag "<question>"                        # bypass RAG ingestion natively; force LLM reasoning only
@@ -1410,6 +1096,7 @@ oracle --type code|docs ...                         # narrow RRF fusion to code 
 # Complete Database Maintenance CLI:
 oracle --list-files                                 # list unique files across all collection tables
 oracle --add-file <path1> <path2> ...               # copy file(s) into collection and incrementally ingest
+oracle --add-file <path> --no-rag                   # OCR to Markdown ONLY; skip LanceDB vector indexing
 oracle --add-table <folder1> <folder2> ...          # copy folder(s) into collection and incrementally ingest
 oracle --add-web <url1> [url2...]                   # download URL/PDF and incrementally ingest into LanceDB
 oracle --add-web --file <urls.txt>                  # ingest line-separated URL file (supports ~/ and relative paths)
@@ -1420,6 +1107,8 @@ oracle --rm-file <filename>                         # surgically delete file chu
 oracle --rm-table <table_name>                      # drop a specific LanceDB table
 oracle --rm-db                                      # wipe lancedb/ vector store (preserves Markdown & OCR cache)
 ```
+
+**Smart Path Resolution:** The `--collection` flag accepts global paths (e.g., `--collection ~/projects/alpha/.aider_factory/markdown/lanceDB/alpha_docs`). The CLI will automatically extract `alpha_docs` as the collection name and auto-derive the `--db` path, eliminating the need to pass `--db` manually for cross-project queries.
 
 `--collection`/`--db`/`--mode`/`--list` and the maintenance commands are operator/power controls; the agent-facing skill (`.aider_factory/markdown/skills/oracle.md`) deliberately surfaces only `"question"`, `--file`, and `--collection` to keep the agent focused.
 
@@ -1604,6 +1293,7 @@ Assign the Oracle model via `rag_agent` in `.env.yml`, and disable reasoning for
 ### AI Factory Helper & Terminal Agent (`aider-helper`)
 
 The `aider-helper` CLI serves a dual role in your workspace:
+
 1. **Configuration Architect (Default):** Understands pipeline configuration schema, maintains `.env.yml` state, and applies minimal-delta edits to pipeline settings.
 2. **General AI Terminal Assistant (`--terminal` / `-t`):** Strips configuration persona constraints and YAML documentation warm-up context, transforming `aider-helper` into a clean, general-purpose AI software engineering assistant right in your terminal.
 
@@ -1629,6 +1319,9 @@ aider-helper query --context src/main.py,docs/api.md "Update target_files to inc
 # Conversational mode (no file writing)
 aider-helper query --ask "What are the available RAG retrieval modes?"
 
+# Master mode: load the full Factory Service Manual for deep architectural queries
+aider-helper query --master --ask "How do I configure a pre-edit debate?"
+
 # Clear configuration session history
 aider-helper --clear
 
@@ -1647,37 +1340,44 @@ aider-helper -t --clear
 ### The Oracle Session
 
 #### 1. Session Types & Files
+
 The Oracle maintains two separate session files to isolate conversational contexts:
+
 - `.oracle_session.json` — Used for regular, interactive `/run oracle "question"` queries.
 - `.oracle_debate_session.json` — Used for multi-turn debates (both CLI debates and
-autonomous pipeline deliberations).
+  autonomous pipeline deliberations).
 - `.helper_session.json` — Used for `aider-helper` CLI sessions.
 
 These are kept separate because the apply-phase cleanup wipes the main pipeline
 sessions but must not destroy debate context.
 
 #### 2. CLI Debate Session Lifecycle
+
 - **First Invocation**: The Oracle loads the full context, target files, and RAG chunks, then runs Oracle Turn 0 to generate a grounded assessment.
 - **Follow-up Invocations**: When the same question or follow-up question is asked against the same target files, the session is loaded from disk. The Oracle receives only the `NEW QUESTION: {question}` payload, preserving the loaded conversation history without re-processing the files or RAG chunks. This maintains a warm KV cache on the inference server.
 - **Context Changes**: If the YAML target files list changes, the file-list hash gate (`files_hash` validation) detects the mismatch, automatically clears the stale session and Aider history, and starts fresh.
 - **Manual Reset**: Running `oracle --clear` explicitly deletes all four session files (regular session, transcript, debate session, and debate Aider history) for a clean slate.
 
 #### 3. Autonomous Debate Session Lifecycle
-- **Oracle Turn 0 (Pre-Assessment)**: The Oracle analyzes the issue, context, and files, producing a grounded pre-assessment *before* the Architect's first turn.
+
+- **Oracle Turn 0 (Pre-Assessment)**: The Oracle analyzes the issue, context, and files, producing a grounded pre-assessment _before_ the Architect's first turn.
 - **Turn Accumulation**: During the debate, turns accumulate in memory and are persisted using `ORACLE_SESSION_FILE = .oracle_debate_session.json`.
 - **Round Transitions**:
   - `pass_round_history: false` (Default): The session is cleared between rounds. Each round is independent.
   - `pass_round_history: true`: The session is preserved across rounds, allowing Round 2 to resume with Round 1's full context and a warm KV cache.
 
 #### 4. Display & Terminal Colors
+
 - **Oracle Output**: Displayed in gruvbox pink (`#d3869b`), configurable via `colors.oracle_debate` in the YAML config or the `PIPELINE_COLOR_ORACLE` environment variable. This applies to both single queries and debate turns.
 - **Architect Output**: Displayed in sky blue (`#38bdf8`), configurable via `colors.architect_debate` or the `PIPELINE_COLOR_ARCHITECT` environment variable.
 
 # Corresponding entry in .aider.model.settings.yml
+
 - name: openai/qwen3.6-27b-90k:latest
   extra_params:
-      think: false
-      thinking_tokens: 0
+  think: false
+  thinking_tokens: 0
+
 ```
 
 ---
@@ -1699,9 +1399,11 @@ might be hallucinated and needs checking**. The system therefore does two differ
 different tools, cheapest-and-most-reliable first:
 
 ```
+
 PDF --(OCR: vision model)--> <stem>.md --(chunk+embed)--> LanceDB
-                                 │
-                                 └--(Oracle writes review with [evidence] "quotes")
+│
+└--(Oracle writes review with [evidence] "quotes")
+
 ```
 
 The jobs run **cheapest-and-most-reliable first** (deterministic-first): code does everything it
@@ -1790,7 +1492,9 @@ The single most common quote defect is an **ellipsis splice**: a generator stitc
 together with `...`, producing a "quote" that is not, as written, a continuous span of the source:
 
 ```
+
 [evidence] "the popular one-factor Heston (1993) ... is not able to reproduce the slow decay"
+
 ```
 
 Both halves are verbatim in the paper, but the stitched string is not — so it fails the exact
@@ -1943,15 +1647,17 @@ This whole chain is ONE phase (no separate `deliberate:` block); the nodes are g
 collapsed into one:
 
 ```
+
 PDF ──OCR──▶ <stem>.md ──chunk+embed──▶ LanceDB
-                  │
-  generate ...... oracle job (start_job: true) writes the review with [evidence] quotes
-  autofix ....... deterministic ellipsis-stitch ............... NO MODEL      (debate_loops set)
-  heal .......... exact-substring grounding + region check + agent heal ...... (post_validate)
-  ── escalation (only if debate_loops > 0) ─────────────────────────────────────────────
-  deliberate .... debate ONLY the residual
-  apply ......... apply an AGREED verdict (agent edits text) .. strict gate
-  finalize ...... promote grounded / flag [unsupported] ...... deterministic, authority
+│
+generate ...... oracle job (start_job: true) writes the review with [evidence] quotes
+autofix ....... deterministic ellipsis-stitch ............... NO MODEL (debate_loops set)
+heal .......... exact-substring grounding + region check + agent heal ...... (post_validate)
+── escalation (only if debate_loops > 0) ─────────────────────────────────────────────
+deliberate .... debate ONLY the residual
+apply ......... apply an AGREED verdict (agent edits text) .. strict gate
+finalize ...... promote grounded / flag [unsupported] ...... deterministic, authority
+
 ```
 
 Each rung reads its inputs from disk, so the ladder is splittable across phases or collapsible into
@@ -1966,15 +1672,17 @@ deterministic authority is the **test suite's exit code** (not exact-substring g
 no tags, no autofix, and no `[unsupported]`.
 
 ```
-  job_one ....... implement (job_one_plan)                     (run_job_one)
-  job_two ....... write tests + iterate-fix loop ............. (run_job_two / iterate_test)
-                  (soft-fails on exhaustion when debate_loops>0, deferring to the debate)
-  ── escalation (only if debate_loops > 0) ─────────────────────────────────────────────
-  deliberate .... debate the failing test; issue = the test log; gate = the test suite;
-                  the Architect AND the Oracle get the source + test + context files, plus
-                  reference chunks retrieved from the corpus (analyze_bugs.md template)
-  apply ......... apply an AGREED fix (agent edits code) then re-run the suite
-  final-check ... deterministic: re-run the suite ONCE to report honest pass/fail
+
+job_one ....... implement (job_one_plan) (run_job_one)
+job_two ....... write tests + iterate-fix loop ............. (run_job_two / iterate_test)
+(soft-fails on exhaustion when debate_loops>0, deferring to the debate)
+── escalation (only if debate_loops > 0) ─────────────────────────────────────────────
+deliberate .... debate the failing test; issue = the test log; gate = the test suite;
+the Architect AND the Oracle get the source + test + context files, plus
+reference chunks retrieved from the corpus (analyze_bugs.md template)
+apply ......... apply an AGREED fix (agent edits code) then re-run the suite
+final-check ... deterministic: re-run the suite ONCE to report honest pass/fail
+
 ```
 
 **Why the final-check?** The iterate loop verifies edit _N_ via the test-check at the _start_ of
@@ -1998,7 +1706,7 @@ existing review, no Oracle call) and `run_ocr_rag: false` (reuse the cached Lanc
 
 | Piece                 | Path                                                         | Role                                                                                                                                                                                                                     |
 | --------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Auditor               | `.aider_factory/python/validator.py`                            | exact-substring quote proof + embedding region check + **deterministic auto-fix** (`--autofix`) + **finalize** (`--finalize-unsupported`); relabels tags, writes report + ledger. Handles **multiple anchors per line**. |
+| Auditor               | `.aider_factory/python/validator.py`                            | exact-substring quote proof + embedding region check + **deterministic auto-fix** (`--autofix`) + **finalize** (`--finalize-unsupported`) + **raw text validation** (`--claims-only`); relabels tags, writes report.   |
 | Wrapper               | `.aider_factory/bash/validate`                                  | runs the auditor under Aider's Python (LanceDB/bge-small)                                                                                                                                                                |
 | Referee               | `.aider_factory/python/deliberate.py`                           | parses `PROPOSAL:`/`VERDICT:` lines; computes `agreed`/`deadlock`/`exhausted`/`clean`; writes the verdict                                                                                                                |
 | Orchestrator          | `.aider_factory/python/orchestrate.py`                          | runs the debate (`_run_deliberation`), the ask-mode Architect turns (`_aider_ask_turn`), the stateless Oracle turns (`_oracle_turn`), the strict gate (`_gate_run`); the apply loop + `soft_fail`                        |
@@ -2214,6 +1922,34 @@ curl -s http://192.168.100.1:8090/v1/chat/completions -H 'content-type: applicat
   -d '{"model":"minicheck-flan-t5-large","messages":[{"role":"user","content":"DOCUMENT:\nStudents study in the library for finals.\n\nCLAIM:\nThe students prepare for an exam.\n\nIs the CLAIM fully supported by the DOCUMENT? Answer only SUPPORTED or UNSUPPORTED."}]}'
 # -> {... "content":"0.98xx" ...}
 ```
+
+### 7.13 Raw Text Validation (`--claims-only`)
+
+While the core validation pipeline relies on `[evidence]` tags for exact-substring mathematical proofs, you can also validate **raw, quote-less text** (such as human-written READMEs or external LLM summaries) using the `--claims-only` flag.
+
+When you pass `--claims-only`, `aider-validate` bypasses the regex tag search. Instead, it:
+
+1. Chops the document into paragraphs (safely ignoring Markdown headers and code blocks to prevent noisy embeddings).
+2. Embeds each paragraph and retrieves the closest source chunks from LanceDB via Reciprocal Rank Fusion (RRF).
+3. Scores each paragraph using MiniCheck Entailment (if running) or Cosine Similarity (fallback).
+4. Generates a clean Markdown report detailing exactly which paragraphs failed and the source chunks retrieved.
+
+**YAML Auto-Discovery:**
+The CLI is designed to be frictionless. If you run the command from within a project directory, it will automatically parse your `.env.yml`, discover your active `collection_name`, and resolve the LanceDB path.
+
+```bash
+# Validate a file using auto-discovered YAML settings
+aider-validate --claims-only --file README.md
+
+# Validate silently (useful for CI/CD scripts); only writes the report to disk
+aider-validate --claims-only --no-print --file README.md
+
+# Validate against a specific global database
+aider-validate --claims-only --file README.md --collection ~/projects/alpha/.aider_factory/markdown/lanceDB/alpha_docs
+```
+
+**Oracle Self-Validation:**
+You can append `--claims-only` to any `aider-oracle` query. The Oracle will generate its answer, save it to a secure temporary file, and instantly run it through the validator before printing the result to your terminal. This provides real-time hallucination checking on RAG responses.
 
 ---
 

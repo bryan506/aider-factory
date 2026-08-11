@@ -5,24 +5,24 @@
 - **System Goal**: Review the refactored schema, logic, and function scopes in the source file shared in context. Generate comprehensive `testthat` integration tests in the target script found in `tests/testthat/`. These tests will execute against a **live TimeBase instance** using real historical trade data. Tests must verify that the functions correctly read from `warehouse-TRADES`, `OKX-OHLCV-1MIN`, work through all the integration logic and I/O related scenarios, and write results to the `FEATURES` stream with structurally valid data.table schemas and nested KV 'values' column. Ensure tests run for all function variants.
 
 - **Action**: Analyze the referenced `R/` source file. Identify the core function variants, their database interaction patterns, and their expected outputs against known historical data. Design integration tests that call the live functions with real `algo_id`, `symbol`, `symbol_hedge`, and `exchange` parameters. Use known trade periods from the live database to assert that outputs are numerically plausible, structurally correct, and written successfully. Note that when tests are already present in the target script, you may need to update them to reflect changes to the source script -- test code could have been written before the refactoring and may not be compatible with the updated code. Do not force tests updates if they are not necessary.
-    - **Connection Context**: Use `localhost:8022` for all TimeBase connections. The connection initialization in the test script must follow this logic:
-        ```R
-        library(TimeBaseR)
-        db_write <- get_timebase_connection("dxtick://localhost:8022", readonly = FALSE)
-        db_read <- get_timebase_connection("dxtick://localhost:8022", readonly = TRUE)
-        ```
-    - **Function Injection**: If the functions under test accept `db` or connection arguments, you MUST explicitly pass `db_read` and `db_write` into those arguments during testing to ensure the function uses the local test instance.
-    - **Test Fixture Data**:
-        - `algo_id`: `890`, `893`, `895`, `897`, `899`, and `901`
-        - `symbol`: `BTC-USD-260925` for all
-        - `symbol_hedge`: `BTCUSD` (algo 890), `BTC-USD-260626` (algo 893), `BTCUSDT` (algos 895, 897, 899, 901)
-        - `exchange`: `OKX` for all
-        - Trade period for algo 890: `2026-02-06` to `2026-02-06`
-        - Trade period for algo 893: `2026-02-07` to `2026-02-08`
-        - Trade period for algo 895: `2026-02-12` to `2026-02-15`
-        - Trade period for algo 897: `2026-02-16` to `2026-02-22`
-        - Trade period for algo 899: `2026-02-26` to `2026-03-02`
-        - Trade period for algo 901: `2026-03-03` to `2026-03-03`
+  - **Connection Context**: Use `localhost:8022` for all TimeBase connections. The connection initialization in the test script must follow this logic:
+    ```R
+    library(TimeBaseR)
+    db_write <- get_timebase_connection("dxtick://localhost:8022", readonly = FALSE)
+    db_read <- get_timebase_connection("dxtick://localhost:8022", readonly = TRUE)
+    ```
+  - **Function Injection**: If the functions under test accept `db` or connection arguments, you MUST explicitly pass `db_read` and `db_write` into those arguments during testing to ensure the function uses the local test instance.
+  - **Test Fixture Data**:
+    - `algo_id`: `890`, `893`, `895`, `897`, `899`, and `901`
+    - `symbol`: `BTC-USD-260925` for all
+    - `symbol_hedge`: `BTCUSD` (algo 890), `BTC-USD-260626` (algo 893), `BTCUSDT` (algos 895, 897, 899, 901)
+    - `exchange`: `OKX` for all
+    - Trade period for algo 890: `2026-02-06` to `2026-02-06`
+    - Trade period for algo 893: `2026-02-07` to `2026-02-08`
+    - Trade period for algo 895: `2026-02-12` to `2026-02-15`
+    - Trade period for algo 897: `2026-02-16` to `2026-02-22`
+    - Trade period for algo 899: `2026-02-26` to `2026-03-02`
+    - Trade period for algo 901: `2026-03-03` to `2026-03-03`
 
 - **Integration Strategy**: Integration tests connect to real infrastructure — do NOT mock `TimeBaseR` database calls. The live `db_read` and `db_write` connections must be resolved by the functions themselves via `.resolve_db` for the backfill functions (`_b`) and hardcoded connections in the live functions (`_l`). **Do NOT use weak assertions (e.g., merely checking if a status is SUCCESS or ERROR). You must explicitly validate the schema of the returned payload or dry-run output—assert specific column names, data types, numeric plausibility (e.g., values are not all NA or 0), and non-empty row counts to ensure data integrity.** Use `tryCatch` inside tests to capture and surface TimeBase connection errors clearly.
 
@@ -31,8 +31,8 @@
 - **State Continuity Testing**: You MUST include test tasks that verify rolling state. For backfill functions (`_b`), simulate two sequential runs (e.g., Run 1 for Day 1, Run 2 for Day 2) and assert that the prior state is successfully picked up and accumulated.
 
 - **State Management & Cleanup (MANDATORY)**: The test suite must run against a clean destination state to ensure accurate integration testing without early-exit false positives. You MUST physically write data during these tests (`dry_run = FALSE`) to test continuity.
-    - To ensure the `FEATURES` stream is clean, you MUST include the stream purging logic (`stream$deleteData(...)` provided in the Index) at the very top of your test script.
-    - You must also wrap the purge logic in a `withr::defer()` block within your tests to ensure the database is cleaned up after the test completes or crashes.
+  - To ensure the `FEATURES` stream is clean, you MUST include the stream purging logic (`stream$deleteData(...)` provided in the Index) at the very top of your test script.
+  - You must also wrap the purge logic in a `withr::defer()` block within your tests to ensure the database is cleaned up after the test completes or crashes.
 
 - **Anti-Laziness & Debugging Protocol**: You are STRICTLY FORBIDDEN from adding `skip_if_not()` or skipping tests just because an assertion fails. If an assertion like `expect_true("FEATURES" %in% streams)` fails, do NOT assume the database is offline. Assume YOUR code is wrong and use explicit techniques like `print(str(streams))` to debug the object structures instead of skipping the test.
 
@@ -47,10 +47,10 @@
 - **Constraint 4 (Strict Integration Focus)**: Do NOT write unit tests (tests using manually crafted, mock `data.table` or other type objects consistent with current usage) in this integration test file. Every test here must evaluate the actual handoff between the source R code and the live TimeBase database. Pure logic tests belong exclusively in the unit testing suite.
 
 - **Additional Focus Points**:
-    - **Connectivity Resilience**: Design tests that verify how the function behaves when external systems are slow, unreachable, or return empty/malformed payloads.
-    - **Data Integrity**: Assert that the data written to the destination exactly matches the schema requirements of the downstream consumers.
-    - **Idempotency**: Ensure tests are designed to be run repeatedly without polluting the target system or leaving "zombie" state behind.
-    - **Testing Connections**: Don't test timebase connectivity directly. Use a query to retrieve data to check if the connection is working instead.
+  - **Connectivity Resilience**: Design tests that verify how the function behaves when external systems are slow, unreachable, or return empty/malformed payloads.
+  - **Data Integrity**: Assert that the data written to the destination exactly matches the schema requirements of the downstream consumers.
+  - **Idempotency**: Ensure tests are designed to be run repeatedly without polluting the target system or leaving "zombie" state behind.
+  - **Testing Connections**: Don't test timebase connectivity directly. Use a query to retrieve data to check if the connection is working instead.
 
 ---
 
@@ -77,76 +77,15 @@
 - **Phase 1: Connectivity & Schema Verification (MANDATORY)**: The Architect must first identify the "External Contract." Before writing tasks, list the required inputs from the source system and the required schema of the target system. Your plan must start by verifying that a basic connection can be established and that a "ping" or "first-row" query returns the expected column headers and data types.
 
 - **Phase 2: Comprehensive Test Decision Matrix (MANDATORY)**: Use Chain-of-Thought reasoning to output a section named `## Integration Boundary & Use Case Analysis`. You must deeply investigate the target source file and construct a comprehensive Decision Matrix mapping out every possible scenario that requires testing. Do not rely on generic examples; derive these strictly from the code's specific logic, parameters, and database interactions:
-    - **Identify All Use Cases**: Map out all primary execution paths, data ingestion variants, and successful expected states.
-    - **Identify All Edge Cases**: Look for boundary conditions, extreme parameter values, mathematical vulnerabilities (like division by zero on empty payloads), and time/state gaps.
-    - **Identify All System Boundaries**: Analyze the handoff between R and the database. What happens on timeouts, malformed schema returns, or zero-row returns?
-    - **The Decision Matrix**: Output a comprehensive markdown table summarizing this analysis. The table must have columns: `Category` (Use Case/Edge Case/Boundary), `Scenario Description`, `Target Code Logic`, and `Required Integration Test`.
-    - **Enforcement**: Your generated Atomic Tasks below MUST cover every single row in your Decision Matrix. You are expected to be exhaustive.
+  - **Identify All Use Cases**: Map out all primary execution paths, data ingestion variants, and successful expected states.
+  - **Identify All Edge Cases**: Look for boundary conditions, extreme parameter values, mathematical vulnerabilities (like division by zero on empty payloads), and time/state gaps.
+  - **Identify All System Boundaries**: Analyze the handoff between R and the database. What happens on timeouts, malformed schema returns, or zero-row returns?
+  - **The Decision Matrix**: Output a comprehensive markdown table summarizing this analysis. The table must have columns: `Category` (Use Case/Edge Case/Boundary), `Scenario Description`, `Target Code Logic`, and `Required Integration Test`.
+  - **Enforcement**: Your generated Atomic Tasks below MUST cover every single row in your Decision Matrix. You are expected to be exhaustive.
 
 - **Phase 3: Operational Handoff (Aider Execution)**: The Architect will finalize the Atomic Tasks. The Editor will implement these, focusing on ensuring the test scripts are "self-healing" (i.e., they close their own database connections regardless of whether the test passes or fails).
 
 ---
-
-## 4. Atomic Task List (`tasks` format)
-
-> Architect: For each task, provide the "Tight Description" the Editor and testing model needs to implement the test script.
-
-### [Task ID: 001] - [Task Title]
-
-- **Target File**: `tests/testthat/test-target_file.R`
-
-- **Essential Elements**: (Brief comma-separated list of the functions or behaviors to be tested)
-
-- **Tight Description**: Provide precise testing logic, expected inputs, and the specific `expect_equal` or `expect_true` assertions required.
-
-- **Syntax Example**: (if applicable) Provide a code snippet of the exact `testthat` structure or syntax needed.
-
-## REQUIRED OUTPUT FORMAT
-
-> Architect: You MUST structure your entire response exactly like the template below. Do not add conversational filler.
-
-```markdown
-## Integration Boundary Analysis
-
-### External Contract Identified:
-
-1. ...
-
-### Predicted System Boundaries & Failure Modes:
-
-| Boundary / Failure Mode | Target Code Logic | Required Live/Dry-Run Scenario |
-| ----------------------- | ----------------- | ------------------------------ |
-| ...                     | ...               | ...                            |
-
----
-
-## Test Plan
-
-### [Task ID: 001] - [Task Title]
-
-- **Target File**: `...`
-- **Essential Elements**: `...`
-- **Tight Description**: `...`
-- **Syntax Example**: `...`
-
----
-
-## Atomic Tasks
-
-### [Task ID: 001] - [Task Title]
-
-```r
-# Code implementation here
-```
-
-...
-
----
-
-## Testing Summary
-
-- [ ] Task 001...
-```
 
 ## Index
 

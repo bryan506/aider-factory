@@ -39,16 +39,21 @@ def search_searxng(query, academic=False, engines=None, top=10, time_range=None)
         sys.exit(1)
 
 
-def render_research_report(query, results, engines_used="all"):
-    """Write markdown research report to .aider_factory/markdown/research/."""
-    slug = rag_manager.table_name_for(query)[:40]
-    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+def render_research_report(query, results, engines_used="all", out_path=None):
+    """Write markdown research report to .aider_factory/markdown/research/ or a custom path."""
+    if not out_path:
+        slug = rag_manager.table_name_for(query)[:40]
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    project_dir = os.getcwd()
-    out_dir = os.path.join(project_dir, ".aider_factory", "markdown", "research")
-    os.makedirs(out_dir, exist_ok=True)
+        project_dir = os.getcwd()
+        out_dir = os.path.join(project_dir, ".aider_factory", "markdown", "research")
+        os.makedirs(out_dir, exist_ok=True)
 
-    out_path = os.path.join(out_dir, f"{slug}_{stamp}_report.md")
+        out_path = os.path.join(out_dir, f"{slug}_{stamp}_report.md")
+    else:
+        out_dir = os.path.dirname(os.path.abspath(out_path))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
 
     lines = [
         f"# Research Report: {query}",
@@ -201,9 +206,9 @@ def run_sitemap_harvester(target_url, grep_pat=None, grep_ex_pat=None, depth=1, 
 def main():
     if len(sys.argv) < 2:
         print(
-            'usage: aider-research search "<query>" [--academic] [--engines e1,e2] [--top N] [--time-range day|month|year]\n'
+            'usage: aider-research search "<query>" [--academic] [--engines e1,e2] [--top N] [--time-range day|month|year] [--links-only|-l] [--out <file>]\n'
             '   or: aider-research search "<url>" --sitemap [--grep "<pat>"] [--grep-exclude "<pat>"] [--site-depth N] [--out <file>]\n'
-            '   or: aider-research search --file <query.txt> [--academic] [--top N]'
+            '   or: aider-research search --file <query.txt> [--academic] [--top N] [--links-only|-l] [--out <file>]'
         )
         sys.exit(0)
 
@@ -278,9 +283,11 @@ def main():
 
     opts = args
     academic = "--academic" in opts
+    links_only = "--links-only" in opts or "-l" in opts
     top = 10
     engines = None
     time_range = None
+    out_path = None
 
     if "--top" in opts:
         idx = opts.index("--top")
@@ -294,14 +301,33 @@ def main():
         idx = opts.index("--time-range")
         if idx + 1 < len(opts):
             time_range = opts[idx + 1]
+    if "--out" in opts:
+        idx = opts.index("--out")
+        if idx + 1 < len(opts):
+            out_path = opts[idx + 1]
 
     results = search_searxng(
         query, academic=academic, engines=engines, top=top, time_range=time_range
     )
-    eng_label = (
-        "science (academic)" if academic else (engines or "searxng-default")
-    )
-    render_research_report(query, results, engines_used=eng_label)
+    
+    if links_only:
+        urls = [res.get("url") for res in results if res.get("url")]
+        if out_path:
+            out_dir = os.path.dirname(os.path.abspath(out_path))
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as f:
+                for u in urls:
+                    f.write(u + "\n")
+            print(f"[research] Saved {len(urls)} links to {out_path}", file=sys.stderr)
+        
+        for u in urls:
+            print(u)
+    else:
+        eng_label = (
+            "science (academic)" if academic else (engines or "searxng-default")
+        )
+        render_research_report(query, results, engines_used=eng_label, out_path=out_path)
 
 
 if __name__ == "__main__":

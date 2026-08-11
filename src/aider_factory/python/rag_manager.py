@@ -31,8 +31,6 @@ for _n in ("httpx", "urllib3"):
 for _n in ("huggingface_hub", "sentence_transformers", "transformers"):
     logging.getLogger(_n).setLevel(logging.ERROR)
 
-import re
-
 import Levenshtein
 
 log = logging.getLogger("rag_manager")
@@ -75,10 +73,45 @@ def embed_texts(texts, backend, model, api_base, batch_size=8):
         else:
             # Cloud model: route through litellm (gemini/, openai/, etc.)
             import litellm
+            import sys
+            
+            try:
+                from aider_factory.python.cost_tracker import fmt_token_count, fmt_cost_usd, _PROCESS_SESSION_COST
+                import aider_factory.python.cost_tracker as ct
+            except ImportError:
+                from cost_tracker import fmt_token_count, fmt_cost_usd, _PROCESS_SESSION_COST
+                import cost_tracker as ct
+
+            total_sent = 0
+            total_cost = 0.0
 
             for i in range(0, len(texts), batch_size):
                 r = litellm.embedding(model=model, input=texts[i : i + batch_size])
                 out.extend(d["embedding"] for d in r["data"])
+                
+                try:
+                    usage = r.get("usage", {})
+                    if hasattr(usage, "model_dump"): usage = usage.model_dump()
+                    elif hasattr(usage, "dict"): usage = usage.dict()
+                    elif not isinstance(usage, dict): usage = vars(usage) if hasattr(usage, "__dict__") else {}
+                    total_sent += usage.get("prompt_tokens", 0)
+                except Exception:
+                    pass
+
+                try:
+                    total_cost += float(litellm.completion_cost(completion_response=r) or 0.0)
+                except Exception:
+                    pass
+            
+            if total_sent > 0 or total_cost > 0:
+                ct._PROCESS_SESSION_COST += total_cost
+                session_cost = ct._PROCESS_SESSION_COST
+                print(
+                    f"Tokens: {fmt_token_count(total_sent)} sent, 0 received. "
+                    f"Cost: ${fmt_cost_usd(total_cost)} message, "
+                    f"${fmt_cost_usd(session_cost)} session.",
+                    file=sys.stderr
+                )
     elif backend == "sentence-transformers":
         from sentence_transformers import SentenceTransformer
 
@@ -456,12 +489,21 @@ def _ocr_image(png_path, model_id, api_base, prompt_text, max_tokens=2048, timeo
             else:
                 # Cloud model: route through litellm (gemini/, openai/, etc.)
                 import litellm
+                try:
+                    from aider_factory.python.cost_tracker import response_content, litellm_cost_line
+                except ImportError:
+                    from cost_tracker import response_content, litellm_cost_line
 
                 kwargs = {"model": model_id, "messages": messages}
                 if max_tokens:
                     kwargs["max_tokens"] = max_tokens
                 r = litellm.completion(**kwargs)
-                return r["choices"][0]["message"]["content"]
+                
+                cost_line = litellm_cost_line(r, persist_session=False)
+                import sys
+                print(cost_line, file=sys.stderr)
+                
+                return response_content(r)
         except Exception as e:
             last_err = e
             if attempt < retries:

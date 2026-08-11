@@ -21,6 +21,12 @@ for k in old_env:
 
 try:
     assert bootstrap.detect_api_key() == (None, None), "Should return None when no keys are present"
+    
+    # Test local endpoint bypass
+    os.environ["AIDER_HELPER_API_BASE"] = "http://localhost:8080/v1"
+    assert bootstrap.detect_api_key() == ("CUSTOM_LOCAL", "dummy"), "Should bypass key check for local endpoints"
+    os.environ.pop("AIDER_HELPER_API_BASE")
+    
     os.environ["GEMINI_API_KEY"] = "gemini-test-key"
     assert bootstrap.detect_api_key() == ("GEMINI_API_KEY", "gemini-test-key"), "Should detect GEMINI_API_KEY"
 finally:
@@ -60,6 +66,7 @@ try:
          with open(tmp_session.name, "r") as f:
              sess_data_2 = json.load(f)
          assert len(sess_data_2) == 7, "Session must accumulate messages directly without hashing reset"
+         assert "CURRENT CONFIGURATION STATE:" in sess_data_2[-2]["content"], "Must inject fresh YAML state on follow-up turns to prevent split-brain"
 
          # Test session clearing
          bootstrap.clear_helper_session()
@@ -145,5 +152,37 @@ finally:
             os.remove(tmp_term_session.name)
         except OSError:
             pass
+
+# 6. Test Master Mode Logic
+print("Starting Master Mode Logic Unit Tests...")
+tmp_master_session = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+tmp_master_session.close()
+
+tmp_master_yaml = tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False)
+tmp_master_yaml.write("name: master_test")
+tmp_master_yaml.close()
+
+try:
+    with patch("bootstrap.get_helper_session_file", return_value=tmp_master_session.name), \
+         patch("litellm.completion", return_value=mock_response), \
+         patch("os.environ", {"GEMINI_API_KEY": "test-key"}):
+
+        bootstrap.run_query("explain architecture", tmp_master_yaml.name, "", ask_mode=True, master_mode=True)
+        
+        with open(tmp_master_session.name, "r") as f:
+            master_data = json.load(f)
+        
+        assert len(master_data) == 5, "Master session should contain system + warm-up + turn 1 prompt/response"
+        assert "FACTORY SERVICE MANUAL:" in master_data[1]["content"], "Master mode must inject the Factory Service Manual"
+        assert "full Factory Service Manual" in master_data[2]["content"], "Master mode must update the acknowledgment message"
+
+    print("✅ Master Mode Logic PASS")
+finally:
+    for f in [tmp_master_session.name, tmp_master_yaml.name]:
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
 print("\n🎉 All helper logic unit tests passed!")

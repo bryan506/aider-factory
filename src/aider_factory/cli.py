@@ -339,20 +339,48 @@ def research_cli():
 def helper_cli():
     """Global 'aider-helper' CLI entry point."""
     import argparse
-    parser = argparse.ArgumentParser(description="aider-helper: Your lifetime AI Factory configuration assistant.")
+    
+    epilog_text = """
+Environment Variables for Custom Models:
+  You can customize the model and endpoint used by aider-helper at any time.
+
+  For local endpoints (e.g., llama.cpp/LM Studio):
+    export AIDER_HELPER_MODEL="openai/qwen2.5-coder:latest"
+    export AIDER_HELPER_API_BASE="http://192.168.100.1:8080/v1"
+    export OPENAI_API_KEY="sk-dummy"
+
+  For other cloud providers (e.g., Anthropic):
+    export AIDER_HELPER_MODEL="anthropic/claude-3-5-sonnet-20241022"
+    export ANTHROPIC_API_KEY="your-key"
+
+  To revert back to default cloud settings:
+    unset AIDER_HELPER_MODEL AIDER_HELPER_API_BASE
+"""
+
+    parser = argparse.ArgumentParser(
+        description="aider-helper: Your lifetime AI Factory configuration assistant.",
+        epilog=epilog_text,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     subparsers = parser.add_subparsers(dest="command")
     
     # Bootstrap command
     subparsers.add_parser("bootstrap", help="Bootstrap a new workspace configuration.")
     
     # Query command (default)
-    query_parser = subparsers.add_parser("query", help="Query or modify configurations.")
+    query_parser = subparsers.add_parser(
+        "query", 
+        help="Query or modify configurations.",
+        epilog=epilog_text,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     query_parser.add_argument("instruction", nargs="?", help="The instruction or question for the helper.")
     query_parser.add_argument("--file", "-f", default=None, help="Target configuration YAML file.")
     query_parser.add_argument("--context", "-c", default="", help="Comma-separated extra context files.")
     query_parser.add_argument("--ask", action="store_true", help="Conversational mode (no file writing).")
     query_parser.add_argument("--terminal", "-t", action="store_true", help="Terminal agent mode (strips YAML config context).")
     query_parser.add_argument("--clear", action="store_true", help="Wipe the active helper session history.")
+    query_parser.add_argument("--master", "-m", action="store_true", help="Master mode: loads the full Factory Service Manual into context.")
     
     # Parse args
     args, unknown = parser.parse_known_args()
@@ -368,15 +396,19 @@ def helper_cli():
     else:
         terminal_val = getattr(args, "terminal", False) or ("--terminal" in sys.argv or "-t" in sys.argv)
         clear_val = getattr(args, "clear", False) or ("--clear" in sys.argv)
+        master_val = getattr(args, "master", False) or ("--master" in sys.argv or "-m" in sys.argv)
 
         if clear_val:
             clear_helper_session(terminal_mode=terminal_val)
             sys.exit(0)
             return
 
-        instruction = getattr(args, "instruction", None)
-        if not instruction and unknown:
-            instruction = " ".join([u for u in unknown if u not in ("--terminal", "-t", "--ask", "--clear")])
+        instruction_parts = []
+        if getattr(args, "instruction", None):
+            instruction_parts.append(args.instruction)
+        if unknown:
+            instruction_parts.extend([u for u in unknown if u not in ("--terminal", "-t", "--ask", "--clear", "--master", "-m")])
+        instruction = " ".join(instruction_parts)
         
         file_val = getattr(args, "file", None)
         context_val = getattr(args, "context", "")
@@ -386,5 +418,5 @@ def helper_cli():
             parser.print_help()
             sys.exit(0)
             
-        run_query(instruction, file_val, context_val, ask_val, terminal_mode=terminal_val)
+        run_query(instruction, file_val, context_val, ask_val, terminal_mode=terminal_val, master_mode=master_val)
 

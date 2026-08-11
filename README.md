@@ -32,6 +32,7 @@ You do not have to buy into a monolithic ecosystem. Each component of `aider-fac
 A multi-tiered, deterministic-first validation system that can be used in both **code** or **review** paths, and in **autonomous** or **pair programming** modes.
 * **The tags are the state:** The LLM cannot award itself a passing grade. Only the deterministic validator promotes tags from `[evidence]` to `[validated]` or `[fixed]`.
 * **Exact Substring Proof:** A quote is either an exact verbatim substring of the source, or it is a tripwire. No fuzzy thresholds.
+* **Raw Text Validation:** Fact-check any quote-less, human-written, or LLM-generated text using semantic chunking, Reciprocal Rank Fusion (RRF), and Entailment scoring.
 * **Free Ellipsis Auto-Stitching:** Automatically splits quotes on `...`, matches the fragments in the source, and auto-replaces them with the continuous source span if the gap is small—saving massive token costs with 0 LLM calls.
 * **Unique commands and flags** make it a treat to use across different workflows.
 
@@ -64,7 +65,7 @@ Automates multi-phase development workflows. It manages file context, coordinate
 A standalone, terminal-first RAG client. It parses codebases structurally using `tree-sitter` AST chunking, indexes literature into LanceDB, and answers queries using local or cloud models. It includes a built-in **two-party referee debate** engine for high-stakes architectural decisions.
 
 ### 3. 🛡️ `aider-validate` (The Fact-Checker)
-A deterministic validator designed for CI/CD. It audits generated text against source documents. It features an **exact-substring check** and a **free, deterministic ellipsis auto-stitcher** that repairs split quotes without calling an LLM. It integrates with `MiniCheck` for sentence-level entailment verification.
+A deterministic validator designed for CI/CD. It audits generated text against source documents. It features an **exact-substring check**, a **free, deterministic ellipsis auto-stitcher**, and a **raw text hallucination scanner** (`--claims-only`). It natively integrates with `MiniCheck` for state-of-the-art sentence-level entailment verification.
 
 ### 4. 🔍 `aider-research` (The Private Search Agent)
 A vendor-free metasearch CLI. It auto-provisions a local, rootless **SearXNG** container via Podman/Docker, aggregates search engines, applies academic filters, and generates clean Markdown research reports.
@@ -126,9 +127,18 @@ aider-helper query -t --context src/main.py "Review this file for potential memo
 aider-helper -t --clear
 ```
 
+### Pipeline Configuration & Architecture Expert (`aider-helper --master`)
+```bash
+# Load the full Factory Service Manual into context to ask deep architectural questions
+aider-helper query --master "How do I configure a pre-edit debate in my YAML?"
+```
+
 ### Metasearch the Web Privately
 ```bash
 aider-research search \"negative income tax labor supply\" --academic --top 5
+
+# Return only a list of URLs and save to a file
+aider-research search \"latest advancements in RAG\" --links-only --out urls.txt
 ```
 
 ### Ingest and Query Local Documentation
@@ -148,6 +158,12 @@ aider-oracle --debate code \"Should we migrate from SQLite to PostgreSQL?\"
 ### Run Deterministic Quote Validation (CI/CD Ready)
 ```bash
 aider-validate --file review.md --source source_ocr.md --report report.md --autofix
+```
+
+### Fact-Check Raw Text for Hallucinations (Zero-Config)
+```bash
+# Auto-discovers your LanceDB vector store and scores every paragraph
+aider-validate --claims-only --file LLM_summary_response.md
 ```
 
 ---

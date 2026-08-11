@@ -1,5 +1,7 @@
 import os
 import sys
+import io
+import contextlib
 import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
@@ -77,6 +79,31 @@ class TestValidatorClaimsOnly(unittest.TestCase):
         self.assertIn("0.20 (LOW, entail)", report_content)
         self.assertIn("[source: src2.md]", report_content)
         self.assertNotIn("Paragraph 1", report_content)
+
+    @patch("validator._verify")
+    def test_claims_only_print_behavior_on_failure(self, mock_verify):
+        """Test that the full report prints to stdout on failure, unless --no-print is set."""
+        # Force a failure
+        mock_verify.return_value = ("cosine", 0.2, [("src.md", "chunk")], 0.6)
+        
+        # 1. Test WITHOUT --no-print (Should print report to stdout)
+        self.args.no_print = False
+        captured_stdout = io.StringIO()
+        with contextlib.redirect_stdout(captured_stdout):
+            validator._run_claims_only(self.args)
+        
+        stdout_text = captured_stdout.getvalue()
+        self.assertIn("2 unsupported claims found", stdout_text)
+        self.assertIn("## Paragraph 1", stdout_text)
+        self.assertIn("## Paragraph 2", stdout_text)
+        
+        # 2. Test WITH --no-print (Should keep stdout empty)
+        self.args.no_print = True
+        captured_stdout_empty = io.StringIO()
+        with contextlib.redirect_stdout(captured_stdout_empty):
+            validator._run_claims_only(self.args)
+            
+        self.assertEqual(captured_stdout_empty.getvalue().strip(), "")
 
     @patch("sys.argv", ["validator.py", "--file", "dummy.md", "--claims-only", "--no-print"])
     @patch("validator._run_claims_only")

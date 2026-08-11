@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -19,17 +20,13 @@ class TestE2EClaimsOnly(unittest.TestCase):
         import shutil
         shutil.rmtree(self.temp_dir)
 
-    def test_claims_only_cli_execution(self):
-        """
-        Smoke test to ensure the CLI accepts the --claims-only flag without 
-        requiring --source or --report, and executes without crashing.
-        """
+    def test_claims_only_cli_with_no_print(self):
+        """Subprocess E2E: --no-print should keep stdout completely empty."""
         env = os.environ.copy()
-        # Point to a dummy DB directory so _region gracefully returns None
         env["ORACLE_RAG_DB_DIR"] = os.path.join(self.temp_dir, "fake_db")
         
         cmd = [
-            "python3", self.validator_script,
+            sys.executable, self.validator_script,
             "--file", self.file_path,
             "--claims-only",
             "--no-print"
@@ -37,11 +34,25 @@ class TestE2EClaimsOnly(unittest.TestCase):
         
         result = subprocess.run(cmd, env=env, capture_output=True, text=True)
         
-        # Because the DB is missing, _region returns (None, []). 
-        # The logic `if score is not None and score < thr:` safely ignores it.
-        # It should exit 0 and print that all claims are grounded.
-        self.assertEqual(result.returncode, 0, f"Validator crashed: {result.stderr}")
+        self.assertEqual(result.returncode, 0)
         self.assertIn("all claims grounded", result.stderr)
+        # TRUE E2E ASSERTION: Stdout must be completely silent
+        self.assertEqual(result.stdout.strip(), "", "Stdout should be empty when --no-print is used")
+
+    def test_claims_only_cli_default_prints(self):
+        """Subprocess E2E: Omitting --no-print should print the summary to stdout."""
+        env = os.environ.copy()
+        env["ORACLE_RAG_DB_DIR"] = os.path.join(self.temp_dir, "fake_db")
         
-        # Verify the auto-generated report path was printed to stderr
-        self.assertIn("agent_response", result.stderr)
+        cmd = [
+            sys.executable, self.validator_script,
+            "--file", self.file_path,
+            "--claims-only"
+        ]
+        
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("all claims grounded", result.stderr)
+        # TRUE E2E ASSERTION: Stdout must contain the summary
+        self.assertIn("all claims grounded", result.stdout, "Stdout should contain the summary when --no-print is omitted")

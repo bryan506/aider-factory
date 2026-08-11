@@ -3,7 +3,6 @@ import os
 import sys
 import json
 import shutil
-import hashlib
 import subprocess
 from pathlib import Path
 
@@ -53,6 +52,8 @@ def clear_helper_session(terminal_mode=False):
             pass
 
 def detect_api_key():
+    if os.environ.get("AIDER_HELPER_API_BASE"):
+        return "CUSTOM_LOCAL", "dummy"
     keys = ["GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY", "OPENCODE_API_KEY"]
     for k in keys:
         if os.environ.get(k):
@@ -75,8 +76,6 @@ def run_bootstrap(target_dir):
     print("====================================================\n")
     
     key_name, _ = detect_api_key()
-    if not key_name:
-        print_key_help_and_exit()
 
     profile = {}
     
@@ -190,12 +189,10 @@ def run_bootstrap(target_dir):
         profile["embed_backend"] = ""
         profile["query_prefix"] = ""
 
-    # Synthesize config
+    # Synthesize config deterministically
     repo_name = get_repo_name()
-    # __file__ is in src/aider_factory/python/, so parent is src/aider_factory/
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     master_env_path = os.path.join(pkg_dir, "default_configs", "env.yml")
-    yaml_docs_path = os.path.join(pkg_dir, "markdown", "yaml_docs_sample.md")
     
     # Bootstrap .aider_factory directory structure
     local_aider_factory_dir = Path(target_dir) / ".aider_factory"
@@ -203,103 +200,67 @@ def run_bootstrap(target_dir):
     
     target_yaml_path = local_aider_factory_dir / f".env_{repo_name}.yml"
     
-    print("\n[+] Customizing configuration template...")
-    try:
-        import litellm
+    print("\n[+] Generating configuration...")
+    
+    with open(master_env_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # 1. Project Identity
+    sensible_name = f"{os.path.basename(os.getcwd()).replace('_', ' ').replace('-', ' ').title()} Pipeline"
+    cwd = os.getcwd()
+    content = content.replace('name: "My Project"', f'name: "{sensible_name}"')
+    content = content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
+
+    # 2. Test Framework
+    content = content.replace('test_command_prefix: "docker exec -i --user myuser -w /path/to/project -e RETICULATE_PYTHON=/home/myuser/.venv-rocker/bin/python3 rocker-rstudio"', f'test_command_prefix: "{profile["test_command_prefix"]}"')
+    content = content.replace('test_runner: "Rscript .aider_factory/tests/run_tests.R {file}"', f'test_runner: "{profile["test_runner"]}"')
+    content = content.replace('test_naming_and_path: "tests/testthat/test-{stem}.R"', f'test_naming_and_path: "{profile["test_naming_and_path"]}"')
+
+    # 3. Models
+    content = content.replace('architect_agent: "gemini/gemini-3.5-flash"', f'architect_agent: "{profile["architect_agent"]}"')
+    content = content.replace('editor_agent: "gemini/gemini-2.5-flash"', f'editor_agent: "{profile["editor_agent"]}"')
+    content = content.replace('editor_agent_test: "gemini/gemini-2.5-flash"', f'editor_agent_test: "{profile["editor_agent"]}"')
+    content = content.replace('editor_agent_test_fallback: "gemini/gemini-2.5-flash"', f'editor_agent_test_fallback: "{profile["architect_agent"]}"')
+
+    # 4. Operating Mode
+    if profile["operating_mode"] == "autonomous":
+        content = content.replace('pair_programming: true', 'pair_programming: false')
+        content = content.replace('auto_test: false', 'auto_test: true')
+
+    # 5. File Lists
+    def format_yaml_list(items):
+        if not items:
+            return "[]"
+        return "\n" + "\n".join(f'        - "{item}"' for item in items)
+
+    content = content.replace('target_files: []', f'target_files: {format_yaml_list(profile["target_files"])}')
+    content = content.replace('context_files_job: []', f'context_files_job: {format_yaml_list(profile.get("context_files", []))}')
+    content = content.replace('context_files_test: []', f'context_files_test: {format_yaml_list(profile.get("context_files", []))}')
+
+    # 6. Knowledge Oracle (RAG)
+    if profile["use_rag"]:
+        content = content.replace('collection_name: "working_repo_lib"', f'collection_name: "{profile["rag_collection"]}"')
+        content = content.replace('run_ocr_rag: false', 'run_ocr_rag: true')
+        content = content.replace('grounding_agent: "openai/minicheck-flan-t5-large"', 'grounding_agent: ""') # Disabled by default
+        if profile["rag_agent"]:
+            content = content.replace('rag_agent: "gemini/gemini-2.5-flash"', f'rag_agent: "{profile["rag_agent"]}"')
+        if profile["ocr_agent"]:
+            content = content.replace('ocr_agent: "glm-ocr-f16:LATEST"', f'ocr_agent: "{profile["ocr_agent"]}"')
+        if profile["embed_model"]:
+            content = content.replace('embed_model: "qwen3-embedding-8b-8k:LATEST"', f'embed_model: "{profile["embed_model"]}"')
+        if profile["embed_backend"]:
+            content = content.replace('embed_backend: "sentence-transformers"', f'embed_backend: "{profile["embed_backend"]}"')
+        if profile["query_prefix"]:
+            content = content.replace('query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: "', f'query_prefix: "{profile["query_prefix"]}"')
+
+    # Standardize the analyze_bugs template path to use the portable src/aider_factory relative path
+    content = content.replace('template: ".aider_factory/markdown/internal/analyze_bugs.md"', 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"')
+    content = content.replace('template: "markdown/internal/analyze_bugs.md"', 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"')
+
+    with open(target_yaml_path, "w", encoding="utf-8") as f:
+        f.write(content)
         
-        with open(master_env_path, "r", encoding="utf-8") as f:
-            master_content = f.read()
-        with open(yaml_docs_path, "r", encoding="utf-8") as f:
-            yaml_docs = f.read()
-
-        prompt = (
-            f"Customize the following master env.yml template based on the user's profile.\n\n"
-            f"USER PROFILE:\n{json.dumps(profile, indent=2)}\n\n"
-            f"MASTER TEMPLATE:\n{master_content}\n\n"
-            f"YAML DOCUMENTATION REFERENCE:\n{yaml_docs[:15000]}\n\n"
-            f"CRITICAL INSTRUCTION: The generated YAML must contain EXACTLY ONE phase under the 'phases:' block, "
-            f"configured strictly according to the USER PROFILE. Do not include or append any other placeholder, "
-            f"example, or extra phases from the documentation or templates.\n\n"
-            f"Return ONLY the complete, updated YAML content inside a markdown code block."
-        )
-
-        response = litellm.completion(
-            model=arch_model if "gemini/" in arch_model else "gemini/gemini-2.5-flash",
-            messages=[
-                {"role": "system", "content": PERSONA_PROMPT},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        ans = response.choices[0].message.content
-        
-        # Extract YAML from markdown code block
-        yaml_content = ans
-        if "```yaml" in ans:
-            yaml_content = ans.split("```yaml")[1].split("```")[0].strip()
-        elif "```" in ans:
-            yaml_content = ans.split("```")[1].split("```")[0].strip()
-
-        # Sanity check to ensure LLM output conforms to standardized dynamic requirements
-        sensible_name = f"{os.path.basename(os.getcwd()).replace('_', ' ').replace('-', ' ').title()} Pipeline"
-        cwd = os.getcwd()
-        yaml_content = yaml_content.replace('name: "My Project"', f'name: "{sensible_name}"')
-        yaml_content = yaml_content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
-
-        # Standardize the analyze_bugs template path to use the portable src/aider_factory relative path
-        yaml_content = yaml_content.replace('template: ".aider_factory/markdown/internal/analyze_bugs.md"', 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"')
-        yaml_content = yaml_content.replace('template: "markdown/internal/analyze_bugs.md"', 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"')
-
-        # Inject user RAG choices into synthesized LLM output if RAG is enabled
-        if profile["use_rag"]:
-            yaml_content = yaml_content.replace('collection_name: ""', f'collection_name: "{profile["rag_collection"]}"')
-            yaml_content = yaml_content.replace('run_ocr_rag: false', 'run_ocr_rag: true')
-            yaml_content = yaml_content.replace('grounding_agent: "openai/minicheck-flan-t5-large"', 'grounding_agent: ""') # Disabled by default
-            if profile["rag_agent"]:
-                yaml_content = yaml_content.replace('rag_agent: "gemini/gemini-2.5-flash"', f'rag_agent: "{profile["rag_agent"]}"')
-            if profile["ocr_agent"]:
-                yaml_content = yaml_content.replace('ocr_agent: "glm-ocr-f16:LATEST"', f'ocr_agent: "{profile["ocr_agent"]}"')
-            if profile["embed_model"]:
-                yaml_content = yaml_content.replace('embed_model: "qwen3-embedding-8b-8k:LATEST"', f'embed_model: "{profile["embed_model"]}"')
-            if profile["embed_backend"]:
-                yaml_content = yaml_content.replace('embed_backend: "sentence-transformers"', f'embed_backend: "{profile["embed_backend"]}"')
-            if profile["query_prefix"]:
-                yaml_content = yaml_content.replace('query_prefix: "Query: "', f'query_prefix: "{profile["query_prefix"]}"')
-
-        with open(target_yaml_path, "w", encoding="utf-8") as f:
-            f.write(yaml_content)
-            
-        print(f"✅ Created {target_yaml_path}")
-        
-    except Exception as e:
-        print(f"⚠️ Synthesis failed: {e}. Copying master template directly as fallback.")
-        sensible_name = f"{os.path.basename(os.getcwd()).replace('_', ' ').replace('-', ' ').title()} Pipeline"
-        cwd = os.getcwd()
-        with open(master_env_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        content = content.replace('name: "My Project"', f'name: "{sensible_name}"')
-        content = content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
-
-        # Standardize the analyze_bugs template path to use the portable src/aider_factory relative path
-        content = content.replace('template: ".aider_factory/markdown/internal/analyze_bugs.md"', 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"')
-        content = content.replace('template: "markdown/internal/analyze_bugs.md"', 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"')
-        
-        if profile["use_rag"]:
-            content = content.replace('collection_name: ""', f'collection_name: "{profile["rag_collection"]}"')
-            content = content.replace('run_ocr_rag: false', 'run_ocr_rag: true')
-            content = content.replace('grounding_agent: "openai/minicheck-flan-t5-large"', 'grounding_agent: ""') # Disabled by default
-            if profile["rag_agent"]:
-                content = content.replace('rag_agent: "gemini/gemini-2.5-flash"', f'rag_agent: "{profile["rag_agent"]}"')
-            if profile["ocr_agent"]:
-                content = content.replace('ocr_agent: "glm-ocr-f16:LATEST"', f'ocr_agent: "{profile["ocr_agent"]}"')
-            if profile["embed_model"]:
-                content = content.replace('embed_model: "qwen3-embedding-8b-8k:LATEST"', f'embed_model: "{profile["embed_model"]}"')
-            if profile["embed_backend"]:
-                content = content.replace('embed_backend: "sentence-transformers"', f'embed_backend: "{profile["embed_backend"]}"')
-            if profile["query_prefix"]:
-                content = content.replace('query_prefix: "Query: "', f'query_prefix: "{profile["query_prefix"]}"')
-
-        with open(target_yaml_path, "w", encoding="utf-8") as f:
-            f.write(content)
+    print(f"✅ Created {target_yaml_path}")
 
     # Initialize other default files
     # Add parent directory (src/aider_factory/) to path dynamically to import cli
@@ -329,7 +290,12 @@ def run_bootstrap(target_dir):
     print("  # To revert back to default cloud settings:")
     print("  unset AIDER_HELPER_MODEL AIDER_HELPER_API_BASE")
 
-def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=False):
+    if not key_name:
+        print("\n⚠️  No LLM API key was detected in your environment.")
+        print("If you plan to use cloud models, remember to export your key (e.g., export GEMINI_API_KEY=\"...\")")
+        print("and add it to your ~/.bashrc or ~/.zshrc.")
+
+def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=False, master_mode=False):
     """Query configuration or run general terminal assistant using direct litellm session persistence."""
     key_name, _ = detect_api_key()
     if not key_name:
@@ -343,8 +309,15 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
     else:
         session_file = get_helper_session_file()
         if not file_path:
-            file_path = os.path.join(".aider_factory", f".env_{repo_name}.yml")
-            if not os.path.exists(file_path):
+            std_path = os.path.join(".aider_factory", ".env.yml")
+            repo_path = os.path.join(".aider_factory", f".env_{repo_name}.yml")
+            
+            if os.path.exists(std_path):
+                file_path = std_path
+            elif os.path.exists(repo_path):
+                file_path = repo_path
+            else:
+                file_path = std_path
                 pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                 master_env_path = os.path.join(pkg_dir, "default_configs", "env.yml")
                 os.makedirs(".aider_factory", exist_ok=True)
@@ -357,6 +330,9 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(content)
                 print(f"ℹ️ Created configuration file from template: {file_path}")
+        elif not os.path.exists(file_path):
+            print(f"❌ Error: Configuration file not found: {file_path}", file=sys.stderr)
+            sys.exit(1)
 
     messages = []
     if os.path.exists(session_file):
@@ -370,7 +346,9 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         except Exception:
             pass
 
-    if not messages:
+    is_new_session = not messages
+
+    if is_new_session:
         if terminal_mode:
             messages.append({"role": "system", "content": TERMINAL_PERSONA_PROMPT})
             messages.append({"role": "assistant", "content": "Terminal agent initialized. Ready to assist with your workspace tasks."})
@@ -381,9 +359,23 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
                 yaml_docs = f.read()
             with open(file_path, "r", encoding="utf-8") as f:
                 active_config = f.read()
+                
+            user_content = f"YAML DOCUMENTATION:\n{yaml_docs[:15000]}\n\nACTIVE CONFIGURATION:\n{active_config}"
+            ack_msg = "Acknowledged. I have loaded the pipeline documentation and your active configuration."
+                
+            if master_mode:
+                manual_path = os.path.join(pkg_dir, "markdown", "factory_service_manual.md")
+                if os.path.exists(manual_path):
+                    with open(manual_path, "r", encoding="utf-8") as f:
+                        manual_docs = f.read()
+                    user_content += f"\n\nFACTORY SERVICE MANUAL:\n{manual_docs}"
+                    ack_msg = "Acknowledged. I have loaded the pipeline documentation, your active configuration, and the full Factory Service Manual."
+                
+            ack_msg += " How can I help you modify or understand your pipeline today?"
+
             messages.append({"role": "system", "content": PERSONA_PROMPT})
-            messages.append({"role": "user", "content": f"YAML DOCUMENTATION:\n{yaml_docs[:15000]}\n\nACTIVE CONFIGURATION:\n{active_config}"})
-            messages.append({"role": "assistant", "content": "Acknowledged. I have loaded the pipeline documentation and your active configuration. How can I help you modify or understand your pipeline today?"})
+            messages.append({"role": "user", "content": user_content})
+            messages.append({"role": "assistant", "content": ack_msg})
 
     # Append user context files if specified
     user_context = ""
@@ -400,7 +392,16 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         if ctx_blocks:
             user_context = "\n\nEXTRA CONTEXT FILES:\n" + "\n\n".join(ctx_blocks)
 
-    messages.append({"role": "user", "content": f"{instruction}{user_context}"})
+    # Inject current config state on follow-up turns to prevent split-brain overwrites
+    config_context = ""
+    if not terminal_mode and not is_new_session and file_path and os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                config_context = f"\n\nCURRENT CONFIGURATION STATE:\n```yaml\n{f.read()}\n```"
+        except Exception:
+            pass
+
+    messages.append({"role": "user", "content": f"{instruction}{config_context}{user_context}"})
 
     # Call litellm with streaming
     import litellm
@@ -412,24 +413,91 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         "OPENCODE_API_KEY": "openai/opencode",
         "OPENAI_API_KEY": "openai/gpt-4o"
     }
-    model = model_map.get(key_name, "openai/gpt-4o")
+    model = os.environ.get("AIDER_HELPER_MODEL") or model_map.get(key_name, "openai/gpt-4o")
+    api_base = os.environ.get("AIDER_HELPER_API_BASE")
     
     print(f"{_HELPER_COLOR}[aider-helper] Asking {model}...{_RESET}\n")
     try:
-        response = litellm.completion(
-            model=model,
-            messages=messages,
-            stream=True
-        )
-        
-        full_reply = []
-        for chunk in response:
-            content = chunk.choices[0].delta.content or ""
-            print(content, end="", flush=True)
-            full_reply.append(content)
-        print("\n")
-        
-        reply_text = "".join(full_reply)
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True}
+        }
+        if api_base:
+            kwargs["api_base"] = api_base
+            if key_name == "CUSTOM_LOCAL":
+                kwargs["api_key"] = "dummy"
+
+        response = litellm.completion(**kwargs)
+
+        final_usage = None
+
+        try:
+            from rich.console import Console
+            from rich.live import Live
+            from rich.markdown import Markdown
+
+            console = Console()
+            reply_text = ""
+            with Live(console=console, refresh_per_second=15, transient=False) as live:
+                for chunk in response:
+                    content = chunk.choices[0].delta.content or "" if chunk.choices else ""
+                    reply_text += content
+                    live.update(Markdown(reply_text))
+                    
+                    if getattr(chunk, "usage", None):
+                        final_usage = chunk.usage
+            print("\n")
+        except ImportError:
+            # Fallback if rich is somehow unavailable
+            full_reply = []
+            for chunk in response:
+                content = chunk.choices[0].delta.content or "" if chunk.choices else ""
+                print(content, end="", flush=True)
+                full_reply.append(content)
+                if getattr(chunk, "usage", None):
+                    final_usage = chunk.usage
+            print("\n")
+            reply_text = "".join(full_reply)
+            
+        try:
+            try:
+                from aider_factory.python.cost_tracker import fmt_token_count, fmt_cost_usd
+                import aider_factory.python.cost_tracker as ct
+            except ImportError:
+                from cost_tracker import fmt_token_count, fmt_cost_usd
+                import cost_tracker as ct
+            
+            if final_usage:
+                sent = getattr(final_usage, "prompt_tokens", 0)
+                recv = getattr(final_usage, "completion_tokens", 0)
+                # Compute approx cost using litellm cost calculator if needed, or fallback.
+                # LiteLLM cost calculator needs a completion response.
+                class MockResp:
+                    def __init__(self, usage, model):
+                        self.usage = usage
+                        self.model = model
+                
+                try:
+                    msg_cost = float(litellm.completion_cost(completion_response=MockResp(final_usage, model)) or 0.0)
+                except Exception:
+                    msg_cost = 0.0
+                    
+                ct._PROCESS_SESSION_COST += msg_cost
+                session_cost = ct._PROCESS_SESSION_COST
+                
+                import sys
+                print(
+                    f"Tokens: {fmt_token_count(sent)} sent, "
+                    f"{fmt_token_count(recv)} received. "
+                    f"Cost: ${fmt_cost_usd(msg_cost)} message, "
+                    f"${fmt_cost_usd(session_cost)} session.",
+                    file=sys.stderr
+                )
+        except Exception as e:
+            pass
+
         messages.append({"role": "assistant", "content": reply_text})
         
         # Save session history directly

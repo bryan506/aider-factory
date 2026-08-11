@@ -169,6 +169,18 @@ def _claim_block(raw_lines, idx, margin, para_margin=0):
     return "\n".join(raw_lines[lo : hi + 1]).strip()
 
 
+def _rrf_merge(result_lists, k, c=60):
+    """Reciprocal Rank Fusion across per-table hit lists -> one deterministic top-k."""
+    scores, keep = {}, {}
+    for rows in result_lists:
+        for rank, r in enumerate(rows):
+            key = (r.get("source_file", ""), (r.get("text", "") or "")[:64])
+            scores[key] = scores.get(key, 0.0) + 1.0 / (c + rank)
+            keep[key] = r
+    ranked = sorted(scores, key=scores.get, reverse=True)[:k]
+    return [keep[key] for key in ranked]
+
+
 def _region(block, db_dir, collection, k):
     """Embed the review passage and compare to the paper's LanceDB table (cosine).
 
@@ -181,13 +193,6 @@ def _region(block, db_dir, collection, k):
     import sys
 
     from rag_manager import embed_texts
-
-    if collection == "*":
-        print(
-            "[validator] fuse-all '*' sentinel rejected; single-table only.",
-            file=sys.stderr,
-        )
-        return None, []
 
     backend = os.environ.get("ORACLE_EMBED_BACKEND", "sentence-transformers")
     api_base = os.environ.get("ORACLE_EMBED_API_BASE")
@@ -206,21 +211,42 @@ def _region(block, db_dir, collection, k):
             )
             return None, []
 
-    rows = []
+    per_table = []
     with contextlib.redirect_stdout(sys.stderr):
         try:
             import lancedb
 
             db = lancedb.connect(db_dir)
-            table = db.open_table(collection)
+            _n = db.list_tables() if hasattr(db, "list_tables") else db.table_names()
+            all_tables = list(getattr(_n, "tables", _n))
+
+            if collection and collection != "*":
+                if collection in all_tables:
+                    tables = [collection]
+                else:
+                    tables = [t for t in all_tables if t.startswith(collection + "_")]
+            else:
+                tables = list(all_tables)
+
+            if not tables:
+                return None, []
 
             # NO prefix (passage-to-passage comparison)
             bvec = embed_texts([block], backend, model, api_base)[0]
-            rows = table.search(bvec).metric("cosine").limit(k).to_list()
+            
+            for t in tables:
+                try:
+                    table = db.open_table(t)
+                    per_table.append(table.search(bvec).metric("cosine").limit(k).to_list())
+                except Exception:
+                    continue
         except Exception:
             return None, []
+
+    rows = _rrf_merge(per_table, k) if len(per_table) > 1 else (per_table[0] if per_table else [])
     if not rows:
         return None, []
+        
     sim = 1.0 - float(rows[0].get("_distance", 1.0))
     chunks = [
         (r.get("source_file", "unknown"), (r.get("text", "") or "").strip())
@@ -288,7 +314,17 @@ def _entail(claim, chunks, a):
                 kwargs["api_base"] = a.grounding_api_base
             if getattr(a, "grounding_api_key", None):
                 kwargs["api_key"] = a.grounding_api_key
-            reply = litellm.completion(**kwargs)["choices"][0]["message"]["content"]
+            
+            r = litellm.completion(**kwargs)
+            
+            try:
+                from aider_factory.python.cost_tracker import response_content, litellm_cost_line
+            except ImportError:
+                from cost_tracker import response_content, litellm_cost_line
+
+            reply = response_content(r)
+            cost_line = litellm_cost_line(r, persist_session=False)
+            print(cost_line, file=sys.stderr)
         except Exception as e:
             print(
                 f"[entail] verifier failed: {e} (falling back to cosine)",
@@ -844,6 +880,40 @@ def main():
         "--rescue-threshold", dest="rescue_threshold", type=float, default=None
     )
     a = ap.parse_args()
+
+    # Auto-discover collection from YAML if missing
+    if not a.collection:
+        import yaml
+        for yaml_name in [".env_auto_ocr.yml", ".env.yml"]:
+            yaml_path = os.path.join(os.getcwd(), ".aider_factory", yaml_name)
+            if not os.path.exists(yaml_path):
+                yaml_path = os.path.join(os.getcwd(), yaml_name)
+            if os.path.exists(yaml_path):
+                try:
+                    with open(yaml_path, "r") as f:
+                        cfg = yaml.safe_load(f) or {}
+                    phases = cfg.get("phases", [])
+                    if phases:
+                        active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
+                        rag_cfg = active_phase.get("rag", {})
+                        if rag_cfg and rag_cfg.get("collection_name"):
+                            a.collection = rag_cfg.get("collection_name")
+                            break
+                except Exception:
+                    pass
+
+    # Auto-discover DB path if missing but collection is known
+    if not a.db and a.collection:
+        # If the collection contains a slash, treat it as a global path
+        if "/" in a.collection or "\\" in a.collection:
+            abs_coll = os.path.abspath(os.path.normpath(a.collection))
+            a.db = os.path.join(abs_coll, "lancedb")
+            a.collection = os.path.basename(abs_coll)
+        else:
+            # Otherwise, treat it as a local project collection
+            inferred_db = os.path.join(os.getcwd(), ".aider_factory", "markdown", "lanceDB", a.collection, "lancedb")
+            if os.path.isdir(inferred_db):
+                a.db = inferred_db
 
     if not os.path.isfile(a.file):
         print(f"[validate] missing file: {a.file} (skipping)", file=sys.stderr)

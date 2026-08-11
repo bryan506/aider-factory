@@ -79,7 +79,7 @@ A vendor-free metasearch CLI. It auto-provisions a local, rootless **SearXNG** c
 sudo apt install -y podman
 
 # 2. Install aider-factory globally via uv
-uv tool install --force git+ssh://git@gitlab.com/bryanrod182/aider-factory.git
+uv tool install --force git+https://github.com/bryan506/aider-factory.git
 
 # 3. Export your API key
 export GEMINI_API_KEY="your-api-key-here"
@@ -101,12 +101,12 @@ Ensure you have Python 3.12 and [uv](https://astral.sh/uv/) installed.
 ### Global Installation (Recommended)
 ```bash
 sudo apt install -y podman
-uv tool install --force git+ssh://git@gitlab.com/bryanrod182/aider-factory.git
+uv tool install --force git+https://github.com/bryan506/aider-factory.git
 ```
 
 ### Editable Installation (For Developers)
 ```bash
-git clone git+ssh://git@gitlab.com/bryanrod182/aider-factory.git
+git clone https://github.com/bryan506/aider-factory.git
 cd aider-factory
 uv tool install --force --editable .
 ```

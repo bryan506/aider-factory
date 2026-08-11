@@ -96,10 +96,10 @@ The AI Factory pipeline is packaged as a global Python tool, meaning you can ini
 
 ##### Method A: Standard Installation (Recommended for regular use)
 
-Builds an isolated global sandbox directly from GitLab and registers the CLI commands:
+Builds an isolated global sandbox directly from GitHub and registers the CLI commands:
 
 ```bash
-uv tool install --force git+ssh://git@gitlab.com/bryanrod182/aider-factory.git
+uv tool install --force git+https://github.com/bryan506/aider-factory.git
 ```
 
 ##### Method B: Editable Installation (Recommended for developers/contributors)
@@ -108,7 +108,7 @@ Clones the repository locally and symlinks it, allowing any code changes you mak
 
 ```bash
 # Clone the repository
-git clone git+ssh://git@gitlab.com/bryanrod182/aider-factory.git
+git clone https://github.com/bryan506/aider-factory.git
 cd aider-factory
 
 # Install globally in Editable Mode

@@ -2,7 +2,7 @@
 
 ⚠️ **Active Development:** This repository is currently being prepared for its official open-source release. Feel free to explore, star, and watch the repo as we finalize the initial stable version!
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python: 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![Platform: Linux](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)](https://www.kernel.org/)
 [![Powered by Aider](https://img.shields.io/badge/Powered%20by-Aider-orange.svg)](https://aider.chat)
@@ -197,6 +197,6 @@ graph TD
 
 ## 📜 License & Disclaimer
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 **aider-factory** is an independent, community-driven open-source project. It is not affiliated with, sponsored by, endorsed by, or associated with Paul Gauthier, the official Aider project, or Oracle Corporation.

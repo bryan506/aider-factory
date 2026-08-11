@@ -1,6 +1,6 @@
 # aider-factory 🏭
 
-⚠️ **Active Development:** This repository is currently being prepared for its official open-source release. Feel free to explore, star, and watch the repo as we finalize the initial stable version!
+⚠️ **Active Development:** This package is fully usable right now and has been tested in active workflows with great results! We are currently doing a bit of cleanup and benchmarking before the official stable release. Feel free to explore, use it, and star the repo!
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python: 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/downloads/)

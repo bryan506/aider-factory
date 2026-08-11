@@ -21,7 +21,7 @@ import bootstrap
 
 # 1. Test CLI Help Invariant
 with patch.object(sys, "argv", ["aider-helper", "--help"]), \
-     patch("sys.exit") as mock_exit:
+     patch("sys.exit", side_effect=SystemExit) as mock_exit:
     try:
         cli.helper_cli()
     except SystemExit:
@@ -38,8 +38,9 @@ with patch("bootstrap.run_query") as mock_run_query, \
 print("  ✅ Unquoted Instruction Parsing PASS")
 
 # 1c. Test Missing File Graceful Exit
-with patch.object(sys, "argv", ["aider-helper", "query", "test", "-f", "does_not_exist.yml"]), \
-     patch("sys.exit") as mock_exit:
+with patch.object(sys, "argv", ["aider-helper", "query", "test", "-f", "definitely_does_not_exist_99999.yml"]), \
+     patch("sys.exit", side_effect=SystemExit) as mock_exit, \
+     patch("litellm.completion"):
     try:
         cli.helper_cli()
     except SystemExit:
@@ -48,13 +49,14 @@ with patch.object(sys, "argv", ["aider-helper", "query", "test", "-f", "does_not
 print("  ✅ Missing File Graceful Exit PASS")
 
 # 2. Test Key Gate Validation
-old_env = {k: os.environ.get(k) for k in ["GEMINI_API_KEY", "OPENAI_API_KEY"]}
+old_env = {k: os.environ.get(k) for k in ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY", "OPENCODE_API_KEY", "AIDER_HELPER_API_BASE"]}
 for k in old_env:
     os.environ.pop(k, None)
 
 try:
     with patch.object(sys, "argv", ["aider-helper", "query", "Explain loops"]), \
-         patch("sys.exit") as mock_exit:
+         patch("sys.exit", side_effect=SystemExit) as mock_exit, \
+         patch("litellm.completion"):
         try:
             cli.helper_cli()
         except SystemExit:
@@ -170,7 +172,7 @@ try:
 
     # D. E2E Standalone --clear Command
     with patch.object(sys, "argv", ["aider-helper", "query", "--clear"]), \
-         patch("sys.exit") as mock_exit:
+         patch("sys.exit", side_effect=SystemExit) as mock_exit:
         try:
             cli.helper_cli()
         except SystemExit:
@@ -206,7 +208,7 @@ try:
 
     # F. E2E Standalone Terminal --clear Command
     with patch.object(sys, "argv", ["aider-helper", "query", "--terminal", "--clear"]), \
-         patch("sys.exit") as mock_exit:
+         patch("sys.exit", side_effect=SystemExit) as mock_exit:
         try:
             cli.helper_cli()
         except SystemExit:
@@ -230,7 +232,7 @@ try:
     if os.path.exists(session_file):
         os.remove(session_file)
 
-    with patch.object(sys, "argv", ["aider-helper", "query", "Explain architecture", "--master", "--ask"]), \
+    with patch.object(sys, "argv", ["aider-helper", "query", "Explain skills", "--master", "--ask"]), \
          patch("litellm.completion", return_value=mock_stream):
         cli.helper_cli()
 
@@ -239,12 +241,34 @@ try:
         master_sess_data = json.load(f)
     
     user_msg = master_sess_data[1]["content"]
-    assert "FACTORY SERVICE MANUAL:" in user_msg, "Master mode must inject the service manual"
+    assert "SKILLS REFERENCE:" in user_msg, "Master mode must inject the skills reference"
+    assert "FACTORY SERVICE MANUAL:" not in user_msg, "Master mode must NOT inject the service manual"
     
     ast_msg = master_sess_data[2]["content"]
-    assert "full Factory Service Manual" in ast_msg, "Master mode must update the acknowledgment message"
+    assert "and the skills reference" in ast_msg, "Master mode must update the acknowledgment message"
     
     print("  ✅ E2E Master Mode (--master / -m) Context Check PASS")
+
+    # I. E2E Expert Mode (--expert / -e) Context Check
+    if os.path.exists(session_file):
+        os.remove(session_file)
+
+    with patch.object(sys, "argv", ["aider-helper", "query", "Explain architecture", "--expert", "--ask"]), \
+         patch("litellm.completion", return_value=mock_stream):
+        cli.helper_cli()
+
+    assert os.path.exists(session_file), "Session file must be created on expert query"
+    with open(session_file, "r") as f:
+        expert_sess_data = json.load(f)
+    
+    user_msg = expert_sess_data[1]["content"]
+    assert "SKILLS REFERENCE:" in user_msg, "Expert mode must inject the skills reference"
+    assert "FACTORY SERVICE MANUAL:" in user_msg, "Expert mode must inject the service manual"
+    
+    ast_msg = expert_sess_data[2]["content"]
+    assert "the skills reference, and the full Factory Service Manual" in ast_msg, "Expert mode must update the acknowledgment message"
+    
+    print("  ✅ E2E Expert Mode (--expert / -e) Context Check PASS")
 
 finally:
     if os.path.exists(tmp_yaml.name):

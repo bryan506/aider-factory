@@ -380,7 +380,8 @@ Environment Variables for Custom Models:
     query_parser.add_argument("--ask", action="store_true", help="Conversational mode (no file writing).")
     query_parser.add_argument("--terminal", "-t", action="store_true", help="Terminal agent mode (strips YAML config context).")
     query_parser.add_argument("--clear", action="store_true", help="Wipe the active helper session history.")
-    query_parser.add_argument("--master", "-m", action="store_true", help="Master mode: loads the full Factory Service Manual into context.")
+    query_parser.add_argument("--master", "-m", action="store_true", help="Master mode: loads the skills reference documents into context.")
+    query_parser.add_argument("--expert", "-e", action="store_true", help="Expert mode: loads both the skills reference and the full Factory Service Manual into context.")
     
     # Parse args
     args, unknown = parser.parse_known_args()
@@ -397,6 +398,7 @@ Environment Variables for Custom Models:
         terminal_val = getattr(args, "terminal", False) or ("--terminal" in sys.argv or "-t" in sys.argv)
         clear_val = getattr(args, "clear", False) or ("--clear" in sys.argv)
         master_val = getattr(args, "master", False) or ("--master" in sys.argv or "-m" in sys.argv)
+        expert_val = getattr(args, "expert", False) or ("--expert" in sys.argv or "-e" in sys.argv)
 
         if clear_val:
             clear_helper_session(terminal_mode=terminal_val)
@@ -407,7 +409,7 @@ Environment Variables for Custom Models:
         if getattr(args, "instruction", None):
             instruction_parts.append(args.instruction)
         if unknown:
-            instruction_parts.extend([u for u in unknown if u not in ("--terminal", "-t", "--ask", "--clear", "--master", "-m")])
+            instruction_parts.extend([u for u in unknown if u not in ("--terminal", "-t", "--ask", "--clear", "--master", "-m", "--expert", "-e")])
         instruction = " ".join(instruction_parts)
         
         file_val = getattr(args, "file", None)
@@ -418,5 +420,5 @@ Environment Variables for Custom Models:
             parser.print_help()
             sys.exit(0)
             
-        run_query(instruction, file_val, context_val, ask_val, terminal_mode=terminal_val, master_mode=master_val)
+        run_query(instruction, file_val, context_val, ask_val, terminal_mode=terminal_val, master_mode=master_val, expert_mode=expert_val)
 

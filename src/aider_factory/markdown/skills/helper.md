@@ -42,10 +42,16 @@ aider-helper query --ask "What are the available RAG retrieval modes?"
 ```
 
 ### Master Mode (`--master` / `-m`)
-Injects the entire `factory_service_manual.md` (the comprehensive architectural documentation) into the helper's context. 
+Injects the skills reference documents into the helper's context. This gives the agent knowledge of specific CLI tools and agent capabilities without overwhelming it with deep architectural theory.
+```bash
+aider-helper query -m --ask "How do I use the aider-oracle debate feature?"
+```
+
+### Expert Mode (`--expert` / `-e`)
+Injects both the skills reference documents AND the entire `factory_service_manual.md` (the comprehensive architectural documentation) into the helper's context.
 *Warning: This consumes a large number of tokens. Use only for deep, complex architectural questions.*
 ```bash
-aider-helper query -m --ask "How do I configure a pre-edit debate with pass_round_history?"
+aider-helper query -e --ask "How do I configure a pre-edit debate with pass_round_history?"
 ```
 
 ---

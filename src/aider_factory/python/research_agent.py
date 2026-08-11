@@ -311,7 +311,16 @@ def main():
     )
     
     if links_only:
-        urls = [res.get("url") for res in results if res.get("url")]
+        urls = []
+        seen = set()
+        for res in results:
+            u = res.get("url")
+            if isinstance(u, str):
+                u = u.strip()
+                if u.startswith(("http://", "https://")) and u not in seen:
+                    urls.append(u)
+                    seen.add(u)
+
         if out_path:
             out_dir = os.path.dirname(os.path.abspath(out_path))
             if out_dir:

@@ -152,10 +152,10 @@ aider-helper query --master "How do I configure a pre-edit debate in my YAML?"
 ### Metasearch the Web Privately
 
 ```bash
-aider-research search \"negative income tax labor supply\" --academic --top 5
+aider-research search "negative income tax labor supply" --academic --top 5
 
-# Return only a list of URLs and save to a file
-aider-research search \"latest advancements in RAG\" --links-only --out urls.txt
+# Return only a list of URLs (Supports natural operators like site:, filetype:)
+aider-research search "site:lemonade-server.ai/docs" --links-only --out urls.txt
 ```
 
 ### Ingest and Query Local Documentation

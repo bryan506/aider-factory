@@ -167,18 +167,52 @@ try:
          patch("litellm.completion", return_value=mock_response), \
          patch("os.environ", {"GEMINI_API_KEY": "test-key"}):
 
-        bootstrap.run_query("explain architecture", tmp_master_yaml.name, "", ask_mode=True, master_mode=True)
+        bootstrap.run_query("explain skills", tmp_master_yaml.name, "", ask_mode=True, master_mode=True)
         
         with open(tmp_master_session.name, "r") as f:
             master_data = json.load(f)
         
         assert len(master_data) == 5, "Master session should contain system + warm-up + turn 1 prompt/response"
-        assert "FACTORY SERVICE MANUAL:" in master_data[1]["content"], "Master mode must inject the Factory Service Manual"
-        assert "full Factory Service Manual" in master_data[2]["content"], "Master mode must update the acknowledgment message"
+        assert "SKILLS REFERENCE:" in master_data[1]["content"], "Master mode must inject the skills reference"
+        assert "FACTORY SERVICE MANUAL:" not in master_data[1]["content"], "Master mode must NOT inject the Factory Service Manual"
+        assert "and the skills reference" in master_data[2]["content"], "Master mode must update the acknowledgment message"
 
     print("✅ Master Mode Logic PASS")
 finally:
     for f in [tmp_master_session.name, tmp_master_yaml.name]:
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+# 7. Test Expert Mode Logic
+print("Starting Expert Mode Logic Unit Tests...")
+tmp_expert_session = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+tmp_expert_session.close()
+
+tmp_expert_yaml = tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False)
+tmp_expert_yaml.write("name: expert_test")
+tmp_expert_yaml.close()
+
+try:
+    with patch("bootstrap.get_helper_session_file", return_value=tmp_expert_session.name), \
+         patch("litellm.completion", return_value=mock_response), \
+         patch("os.environ", {"GEMINI_API_KEY": "test-key"}):
+
+        bootstrap.run_query("explain architecture", tmp_expert_yaml.name, "", ask_mode=True, expert_mode=True)
+        
+        with open(tmp_expert_session.name, "r") as f:
+            expert_data = json.load(f)
+        
+        assert len(expert_data) == 5, "Expert session should contain system + warm-up + turn 1 prompt/response"
+        assert "SKILLS REFERENCE:" in expert_data[1]["content"], "Expert mode must inject the skills reference"
+        assert "FACTORY SERVICE MANUAL:" in expert_data[1]["content"], "Expert mode must inject the Factory Service Manual"
+        assert "the skills reference, and the full Factory Service Manual" in expert_data[2]["content"], "Expert mode must update the acknowledgment message"
+
+    print("✅ Expert Mode Logic PASS")
+finally:
+    for f in [tmp_expert_session.name, tmp_expert_yaml.name]:
         if os.path.exists(f):
             try:
                 os.remove(f)

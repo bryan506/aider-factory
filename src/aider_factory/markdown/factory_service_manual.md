@@ -351,8 +351,8 @@ aider-research search "liquidity adjusted volatility" --academic --time-range mo
 # Read query from a file (multiline inputs are automatically collapsed to a single-line query)
 aider-research search --file ./.query_prompt.txt --academic
 
-# Return ONLY a list of URLs (useful for piping to oracle --add-web)
-aider-research search "open source LLM orchestration" --links-only --out temp/urls.txt
+# Return ONLY a list of URLs (Supports natural operators like site:, filetype:)
+aider-research search "site:lemonade-server.ai/docs" --links-only --out temp/urls.txt
 
 # Sitemap Discovery & URL Filtering (deterministic, $0 LLM cost)
 aider-research search "https://opencode.ai/" --sitemap --grep "docs|api" --grep-exclude "zh-cn|de|ja" --site-depth 2 --out temp/opencode_urls.txt

@@ -11,8 +11,8 @@ Use this skill when searching online topics, fetching literature or web document
 # 2. Metasearch using a file for multiline / complex citations
 /run .aider_factory/bash/research search --file query.txt --academic --top 10
 
-# 3. Metasearch returning ONLY links (useful for piping to oracle --add-web)
-/run .aider_factory/bash/research search "machine learning in finance" --links-only --out temp/links.txt
+# 3. Metasearch returning ONLY links (Supports natural operators like site:, filetype:)
+/run .aider_factory/bash/research search "site:lemonade-server.ai/docs" --links-only --out temp/links.txt
 
 # 4. Sitemap Discovery & URL Harvesting (Deterministic)
 /run .aider_factory/bash/research search "https://docs.example.com" --sitemap --grep "api|guide" --grep-exclude "zh-cn" --site-depth 2 --out temp/urls.txt
@@ -45,6 +45,13 @@ aider-oracle --collection <collection_name> --add-web "https://<domain.com>/<doc
 # Scenario D: Download Only (No RAG Indexing)
 # Download and convert to Markdown, but skip LanceDB vector indexing
 aider-oracle --collection <collection_name> --add-web "https://<domain.com>/<document>.pdf" --no-rag
+
+# Scenario E: Site-Specific Search to RAG Ingestion (Using Search Operators)
+# SearXNG inherits natural search operators (site:, filetype:, etc.).
+# 1. Search a specific domain and extract ONLY the raw URLs to a file
+aider-research search "site:lemonade-server.ai/docs" --top 20 --links-only --out temp/lemonade_urls.txt
+# 2. Feed the generated URL list straight to the Oracle for ingestion
+aider-oracle --collection Lemonade_DB --add-web --file temp/lemonade_urls.txt
 
 # After any ingestion, the collection is immediately ready to query:
 aider-oracle --collection <collection_name> "<your query here>"

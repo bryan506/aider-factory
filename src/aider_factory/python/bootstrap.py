@@ -295,7 +295,7 @@ def run_bootstrap(target_dir):
         print("If you plan to use cloud models, remember to export your key (e.g., export GEMINI_API_KEY=\"...\")")
         print("and add it to your ~/.bashrc or ~/.zshrc.")
 
-def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=False, master_mode=False):
+def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=False, master_mode=False, expert_mode=False):
     """Query configuration or run general terminal assistant using direct litellm session persistence."""
     key_name, _ = detect_api_key()
     if not key_name:
@@ -363,13 +363,25 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
             user_content = f"YAML DOCUMENTATION:\n{yaml_docs[:15000]}\n\nACTIVE CONFIGURATION:\n{active_config}"
             ack_msg = "Acknowledged. I have loaded the pipeline documentation and your active configuration."
                 
-            if master_mode:
+            if master_mode or expert_mode:
+                skills_dir = os.path.join(pkg_dir, "markdown", "skills")
+                skills_content = ""
+                if os.path.exists(skills_dir) and os.path.isdir(skills_dir):
+                    for skill_file in sorted(os.listdir(skills_dir)):
+                        if skill_file.endswith(".md"):
+                            with open(os.path.join(skills_dir, skill_file), "r", encoding="utf-8") as f:
+                                skills_content += f"\n### {skill_file}\n{f.read()}\n"
+                if skills_content:
+                    user_content += f"\n\nSKILLS REFERENCE:\n{skills_content}"
+                    ack_msg = "Acknowledged. I have loaded the pipeline documentation, your active configuration, and the skills reference."
+
+            if expert_mode:
                 manual_path = os.path.join(pkg_dir, "markdown", "factory_service_manual.md")
                 if os.path.exists(manual_path):
                     with open(manual_path, "r", encoding="utf-8") as f:
                         manual_docs = f.read()
                     user_content += f"\n\nFACTORY SERVICE MANUAL:\n{manual_docs}"
-                    ack_msg = "Acknowledged. I have loaded the pipeline documentation, your active configuration, and the full Factory Service Manual."
+                    ack_msg = "Acknowledged. I have loaded the pipeline documentation, your active configuration, the skills reference, and the full Factory Service Manual."
                 
             ack_msg += " How can I help you modify or understand your pipeline today?"
 
@@ -487,7 +499,6 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
                 ct._PROCESS_SESSION_COST += msg_cost
                 session_cost = ct._PROCESS_SESSION_COST
                 
-                import sys
                 print(
                     f"Tokens: {fmt_token_count(sent)} sent, "
                     f"{fmt_token_count(recv)} received. "

@@ -257,8 +257,8 @@ def run_bootstrap(target_dir):
         content = content.replace('editor_ollama_api: "http://192.168.100.1:8080/v1"', f'editor_ollama_api: "{cluster_config["editor_ollama_api"]}"')
         content = content.replace('rag_agent_api: "http://192.168.100.1:8080/v1"', f'rag_agent_api: "{cluster_config["rag_agent_api"]}"')
         if "architect_agent" in cluster_config:
-            content = content.replace(f'architect_agent: "{profile["architect_agent"]}"', f'architect_agent: "{cluster_config["architect_agent"]}"')
-            content = content.replace(f'editor_agent: "{profile["editor_agent"]}"', f'editor_agent: "{cluster_config["editor_agent"]}"')
+            profile["architect_agent"] = cluster_config["architect_agent"]
+            profile["editor_agent"] = cluster_config["editor_agent"]
 
     # 2. Test Framework
     content = content.replace('test_command_prefix: "docker exec -i --user myuser -w /path/to/project -e RETICULATE_PYTHON=/home/myuser/.venv-rocker/bin/python3 rocker-rstudio"', f'test_command_prefix: "{profile["test_command_prefix"]}"')

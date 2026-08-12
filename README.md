@@ -81,6 +81,7 @@ A deterministic validator designed for CI/CD. It audits generated text against s
 ### 4. 🔍 `aider-research` (The Private Search Agent)
 
 A vendor-free metasearch CLI. It auto-provisions a local, rootless **SearXNG** container via Podman/Docker, aggregates search engines, applies academic filters, and generates clean Markdown research reports.
+- **Note on Rate Limiting:** Because this tool scrapes upstream engines directly to preserve your privacy, aggressive automated queries may trigger IP rate limits (CAPTCHAs). If you see "0 results" or "Unresponsive engines", simply turn on a VPN or rotate your VPN server to get a fresh IP address.
 
 ---
 

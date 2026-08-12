@@ -152,10 +152,10 @@ def fetch_and_convert_url(url, job_dir):
 
     # Step C: Trafilatura HTML Extraction
     try:
-        downloaded = trafilatura.fetch_url(url)
-        if downloaded:
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code == 200:
             extracted = trafilatura.extract(
-                downloaded,
+                r.text,
                 output_format="markdown",
                 include_tables=True,
                 include_links=False,

@@ -6,15 +6,72 @@ import datetime
 import os
 import re
 import sys
+import json
+import time
 import requests
 import rag_manager
 
 SEARXNG_DEFAULT_URL = os.environ.get("SEARXNG_BASE_URL", "http://localhost:8088")
 
+def get_dynamic_searxng_fallbacks():
+    """Fetch or load cached top 5 SearXNG public instances."""
+    project_dir = os.getcwd()
+    cache_dir = os.path.join(project_dir, ".aider_factory", "logs", "cache")
+    cache_file = os.path.join(cache_dir, "searxng_fallbacks.json")
+    
+    # 1. Check cache validity (24 hours = 86400 seconds)
+    if os.path.exists(cache_file):
+        if time.time() - os.path.getmtime(cache_file) < 86400:
+            try:
+                with open(cache_file, "r") as f:
+                    return json.load(f)
+            except Exception:
+                pass  # Fallback to fetching if file is corrupted
+                
+    # 2. Fetch live data
+    print("[research] Fetching live reliable instances from searx.space...", file=sys.stderr)
+    try:
+        r = requests.get("https://searx.space/data/instances.json", timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        
+        good_instances = []
+        for url, info in data.get("instances", {}).items():
+            if info.get("network_type") != "normal":
+                continue
+            
+            uptime_month = info.get("uptime", {}).get("uptimeMonth") or 0
+            timing_data = info.get("timing", {}) or {}
+            search_data = timing_data.get("search") or {}
+            all_data = search_data.get("all") or {}
+            timing = all_data.get("median", 999)
+            
+            grade = info.get("html", {}).get("grade")
+            engines = info.get("engines", {}) or {}
+            google_engine = engines.get("google cse", {}) or {}
+            google_error = google_engine.get("error_rate") or 0
+            
+            if uptime_month >= 99 and grade in ["A", "A+", "V"] and google_error < 50:
+                good_instances.append((url, uptime_month, timing))
+        
+        # Sort by Uptime (highest to lowest), then Latency (lowest to highest)
+        good_instances.sort(key=lambda x: (x[1] * -1, x[2]))
+        top_urls = [x[0] for x in good_instances[:5]]
+        
+        if top_urls:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(cache_file, "w") as f:
+                json.dump(top_urls, f)
+            return top_urls
+    except Exception as e:
+        print(f"[research] Failed to fetch searx.space data: {e}", file=sys.stderr)
+        
+    # 3. Emergency hardcoded fallback if API fails AND cache is empty
+    return ["https://searx.tiekoetter.com", "https://search.mdosch.de"]
+
 
 def search_searxng(query, academic=False, engines=None, top=10, time_range=None):
     """Query SearXNG JSON API and return parsed list of result dicts."""
-    url = f"{SEARXNG_DEFAULT_URL.rstrip('/')}/search"
     params = {"q": query, "format": "json"}
     if academic:
         params["categories"] = "science"
@@ -24,19 +81,45 @@ def search_searxng(query, academic=False, engines=None, top=10, time_range=None)
     if time_range:
         params["time_range"] = time_range
 
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        results = data.get("results", [])
-        return results[:top]
-    except Exception as e:
-        print(f"[research] SearXNG search failed ({url}): {e}", file=sys.stderr)
-        print(
-            " -> Ensure SearXNG user service is active: systemctl --user status searxng",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (AI-Factory/1.0; Research Engine)",
+        "Accept": "application/json"
+    }
+
+    dynamic_urls = get_dynamic_searxng_fallbacks()
+    base_urls = [SEARXNG_DEFAULT_URL] + dynamic_urls
+
+    for i, base_url in enumerate(base_urls):
+        url = f"{base_url.rstrip('/')}/search"
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            results = data.get("results", [])
+            
+            if results:
+                if i > 0:
+                    print(f"[research] Success using fallback instance: {base_url}", file=sys.stderr)
+                return results[:top]
+                
+            unresponsive = data.get("unresponsive_engines", [])
+            if unresponsive:
+                engine_names = [e[0] if isinstance(e, list) and len(e) > 0 else str(e) for e in unresponsive]
+                print(f"[research] Warning: {base_url} returned 0 results. Unresponsive: {', '.join(engine_names)}", file=sys.stderr)
+            else:
+                print(f"[research] Warning: {base_url} returned 0 results.", file=sys.stderr)
+                
+        except Exception as e:
+            print(f"[research] Search failed on {base_url}: {e}", file=sys.stderr)
+            if i == 0 and "localhost" in base_url:
+                print(" -> Ensure local SearXNG is active: systemctl --user status searxng", file=sys.stderr)
+
+    print(
+        "[research] CRITICAL: Rate limit exceeded across local and all public fallback instances.\n"
+        "           If running massive batch jobs, you must configure a paid rotating proxy in your local SearXNG settings.yml.", 
+        file=sys.stderr
+    )
+    return []
 
 
 def render_research_report(query, results, engines_used="all", out_path=None):

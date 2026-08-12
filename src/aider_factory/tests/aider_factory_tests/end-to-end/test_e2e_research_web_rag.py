@@ -41,15 +41,18 @@ class TestE2EResearchWebRAG(unittest.TestCase):
             shutil.rmtree(self.job_dir)
         os.environ.pop("ORACLE_EXPLICIT_COLLECTION", None)
 
+    @patch("rag_manager.embed_texts")
     @patch("research_agent.search_searxng")
-    @patch("rag_web.trafilatura.fetch_url")
+    @patch("rag_web.requests.get")
     @patch("rag_web.trafilatura.extract")
     def test_e2e_research_and_web_rag_pipeline(
-        self, mock_extract, mock_fetch, mock_search
+        self, mock_extract, mock_get, mock_search, mock_embed
     ):
         print("\n==================================================")
         print("Starting E2E Web Research & RAG Smoke Test...")
         print("==================================================")
+        
+        mock_embed.return_value = [[0.1] * 384]
 
         # 1. Mock SearXNG Search
         mock_search.return_value = [
@@ -70,8 +73,21 @@ class TestE2EResearchWebRAG(unittest.TestCase):
         print(f"  ✅ Step 1: Research report generated: {report_path}")
 
         # 2. Mock Web Ingestion (--add-web)
-        mock_fetch.return_value = "<html><body><h1>Labor Elasticity Study</h1><p>Detailed empirical results show elasticity is 0.15.</p></body></html>"
-        mock_extract.return_value = "# Labor Elasticity Study\n\nDetailed empirical results show labor supply elasticity is 0.15 for primary earners."
+        def mock_get_side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "llms.txt" in url:
+                resp.status_code = 404
+            else:
+                resp.status_code = 200
+                resp.text = "<html><body><h1>Labor Elasticity Study</h1><p>Detailed empirical results show elasticity is 0.15.</p></body></html>"
+            return resp
+            
+        mock_get.side_effect = mock_get_side_effect
+        
+        # Must be >= 100 chars to pass Trafilatura check and avoid Playwright fallback
+        mock_extract.return_value = "# Labor Elasticity Study\n\nDetailed empirical results show labor supply elasticity is 0.15 for primary earners. This extra text ensures we pass the 100 character limit for Trafilatura."
+
+        mock_embed.return_value = [[0.1] * 384]
 
         url = "https://example.com/labor_supply_study"
         rc = oracle_agent._add_web_maintenance([url])
@@ -139,10 +155,10 @@ class TestE2EResearchWebRAG(unittest.TestCase):
 
     @patch("research_agent.requests.get")
     @patch("rag_web.requests.head")
-    @patch("rag_web.trafilatura.fetch_url")
+    @patch("rag_web.requests.get")
     @patch("rag_web.trafilatura.extract")
     def test_e2e_sitemap_research_to_oracle_add_web_hand_off(
-        self, mock_extract, mock_fetch, mock_head, mock_get
+        self, mock_extract, mock_rag_get, mock_head, mock_get
     ):
         """Full Pipeline Hand-off Test:
         1. research_agent extracts & filters sitemap URLs to file via --sitemap.
@@ -187,8 +203,19 @@ class TestE2EResearchWebRAG(unittest.TestCase):
         head_resp.headers = {"Content-Type": "text/html"}
         mock_head.return_value = head_resp
 
-        mock_fetch.return_value = "<html><body><h1>Getting Started</h1><p>Documentation text.</p></body></html>"
-        mock_extract.return_value = "# Getting Started\n\nDocumentation text for OpenCode."
+        def mock_rag_get_side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "llms.txt" in url:
+                resp.status_code = 404
+            else:
+                resp.status_code = 200
+                resp.text = "<html><body><h1>Getting Started</h1><p>Documentation text.</p></body></html>"
+            return resp
+            
+        mock_rag_get.side_effect = mock_rag_get_side_effect
+        
+        # Must be >= 100 chars to pass Trafilatura check and avoid Playwright fallback
+        mock_extract.return_value = "# Getting Started\n\nDocumentation text for OpenCode. This extra text ensures we pass the 100 character limit for Trafilatura so we do not trigger the Playwright fallback."
 
         def mock_embed(texts, backend, model, api_base, batch_size=8):
             return [[0.1] * 384 for _ in texts]

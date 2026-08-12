@@ -358,13 +358,25 @@ aider-research search "site:lemonade-server.ai/docs" --links-only --out temp/url
 aider-research search "https://opencode.ai/" --sitemap --grep "docs|api" --grep-exclude "zh-cn|de|ja" --site-depth 2 --out temp/opencode_urls.txt
 ```
 
+#### Handling Search Engine Rate Limiting (CAPTCHAs)
+
+Because `aider-research` uses a local SearXNG instance to scrape upstream engines (Google, DuckDuckGo), aggressive automated queries will eventually cause those engines to flag your IP address and serve CAPTCHAs. 
+
+To mitigate this automatically, `aider-research` implements a **Dynamic Public Instance Fallback**. If your local SearXNG instance hits a CAPTCHA (returning 0 results), the agent fetches the top 5 healthiest public instances from `searx.space` (cached for 24 hours) and seamlessly retries your query. If all public fallbacks are also rate-limited, it throws a `CRITICAL` warning.
+
+**The Architectural Decision:** We deliberately reject bolting on commercial search APIs (like Tavily or Exa) to preserve the pipeline's **Strict Privacy and Open Source** invariant. Your queries should never leave your infrastructure. We solve network problems at the network layer.
+
+**The Solutions:**
+1. **Solo / Local Workflows:** Turn on a system-wide VPN (like IVPN, Mullvad, or ProtonVPN). When you get rate-limited, simply rotate your VPN server to get a fresh IP address. This requires zero configuration.
+2. **Enterprise / High-Volume Workflows:** For unattended, massive scraping, configure SearXNG's `settings.yml` to route outbound traffic through a **Rotating Residential Proxy Network** (e.g., BrightData, Oxylabs). This ensures every query uses a different IP, permanently bypassing CAPTCHAs while keeping the orchestrator 100% private.
+
 #### Multi-Stage URL Conversion Pipeline (`rag_web.py`)
 
 When URLs are processed via `aider-research` or ingested via `oracle --add-web`, the pipeline executes a deterministic multi-stage classification and extraction pipeline (`rag_web.py`):
 
 1. **Content-Type HEAD Sniff:** Performs a fast HEAD request. If `application/pdf` or a `.pdf` extension is detected, it directly downloads the binary PDF.
 2. **`llms.txt` Discovery:** Checks `{domain}/llms.txt`. If present ($>50$ bytes), it extracts the structured AI-friendly Markdown documentation.
-3. **Trafilatura HTML Extraction:** Fetches HTML and converts main body text into clean Markdown with embedded table structures.
+3. **Trafilatura HTML Extraction:** Fetches HTML using a spoofed `Mozilla/5.0` User-Agent to bypass basic WAFs (Web Application Firewalls) and Cloudflare bot-checks, then converts main body text into clean Markdown with embedded table structures.
 4. **Headless Playwright Fallback:** If Trafilatura fails or yields $<100$ bytes (e.g., JavaScript Single-Page Applications), it launches a headless Chromium browser instance via Playwright to render the page and extract Markdown.
    - _JIT Provisioning Note:_ If the Chromium executable is missing, `rag_web.py` will attempt to automatically install it in the background (`playwright install chromium`). This involves downloading a ~150MB binary to `~/.cache/ms-playwright`. If this automated fallback fails (often due to corporate network blocks, firewalls, or air-gapped environments), the extraction will safely error without crashing the pipeline. You can manually pre-provision the browser by running `uv run playwright install chromium`.
 

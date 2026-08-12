@@ -63,6 +63,7 @@ def probe_get(name, url, expected_key, timeout=10):
 
 # Models
 chat_model = "qwen3.6-27B-90k-udq4kxl:LATEST"
+node2_chat_model = "qwen3.6-27b-90k:latest"
 embed_model = "qwen3-embedding-8b-8k:LATEST"
 router_model = "qwen3.6-27b-90k:LATEST"
 minicheck_model = "openai/minicheck-flan-t5-large"
@@ -91,7 +92,7 @@ probe_post(
 probe_post(
     "Node 2 (Chat)", 
     "http://192.168.100.2:8080/v1/chat/completions", 
-    {"model": chat_model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5}, 
+    {"model": node2_chat_model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5}, 
     "choices"
 )
 

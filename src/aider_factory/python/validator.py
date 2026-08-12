@@ -36,7 +36,13 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
+import uuid
+
+# Generate session ID once per pipeline run for KV-cache stickiness
+_PIPELINE_SESSION_ID = os.environ.get("LITELLM_SESSION_ID") or str(uuid.uuid4())
+os.environ["LITELLM_SESSION_ID"] = _PIPELINE_SESSION_ID
 
 # Quiet noisy ML/HTTP libs (region check loads sentence-transformers via lancedb).
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
@@ -309,7 +315,11 @@ def _entail(claim, chunks, a):
         try:
             import litellm
 
-            kwargs = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+            kwargs = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID}
+            }
             if getattr(a, "grounding_api_base", None):
                 kwargs["api_base"] = a.grounding_api_base
             if getattr(a, "grounding_api_key", None):

@@ -124,9 +124,35 @@ def test_oracle_session_context_not_duplicated():
             os.environ.pop(k, None)
 
 
+def test_oracle_passes_session_id():
+    if "ORACLE_RETRIEVE_MODE" in os.environ:
+        del os.environ["ORACLE_RETRIEVE_MODE"]
+
+    with patch("litellm.completion") as mock_completion:
+        mock_resp = MagicMock()
+        mock_completion.return_value = mock_resp
+
+        with patch("sys.argv", ["oracle", "test query"]), \
+             patch.dict("os.environ", {"ORACLE_AGENT_MODEL": "dummy-model", "ORACLE_RETRIEVE_MODE": "no_retrieve"}), \
+             patch("oracle_agent._response_content", return_value="answer"), \
+             patch("oracle_agent._litellm_cost_line", return_value=""), \
+             patch("oracle_agent._append_transcript"), \
+             patch("oracle_agent._validate_oracle_response"):
+            
+            oracle_agent.main()
+
+        mock_completion.assert_called_once()
+        kwargs = mock_completion.call_args[1]
+        assert "custom_headers" in kwargs, "custom_headers must be passed"
+        assert "x-litellm-session-id" in kwargs["custom_headers"], "Session ID must be in headers"
+        assert kwargs["custom_headers"]["x-litellm-session-id"] == oracle_agent._PIPELINE_SESSION_ID, "Session ID must match pipeline ID"
+    print("  ✅ Session ID is correctly passed to litellm.")
+
+
 if __name__ == "__main__":
     test_no_rag_flag()
     test_no_rag_absolute_override()
     test_standard_mode()
     test_oracle_session_context_not_duplicated()
+    test_oracle_passes_session_id()
     print("\n🎉 All CLI Oracle Tests Passed!")

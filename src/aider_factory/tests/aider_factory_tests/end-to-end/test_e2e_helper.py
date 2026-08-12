@@ -270,6 +270,52 @@ try:
     
     print("  ✅ E2E Expert Mode (--expert / -e) Context Check PASS")
 
+    # J. E2E Cluster Config Discovery
+    print("  Starting E2E Cluster Config Discovery Test...")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        with patch("builtins.input") as mock_input, \
+             patch("subprocess.run"), \
+             patch("bootstrap._discover_cluster_config") as mock_discover, \
+             patch("bootstrap.detect_api_key") as mock_detect:
+
+            mock_detect.return_value = ("OPENAI_API_KEY", "dummy")
+            mock_input.side_effect = [
+                "src/main.py", # target files
+                "",            # context files
+                "1",           # framework
+                "1",           # mode
+                "dummy-arch",  # arch model
+                "dummy-edit",  # edit model
+                "n",           # use rag
+            ]
+
+            mock_discover.return_value = {
+                "architect_api_base": "http://e2e-cluster:8080/v1",
+                "editor_ollama_api": "http://e2e-cluster:8080/v1",
+                "rag_agent_api": "http://e2e-cluster:8080/v1",
+                "api_key": "dummy",
+                "available_models": ["e2e-model"],
+                "architect_agent": "e2e-model",
+                "editor_agent": "e2e-model"
+            }
+
+            original_cwd = os.getcwd()
+            os.chdir(tmp_dir)
+            try:
+                bootstrap.run_bootstrap(tmp_dir)
+                repo_name = bootstrap.get_repo_name()
+                yaml_path = os.path.join(tmp_dir, ".aider_factory", f".env_{repo_name}.yml")
+
+                assert os.path.exists(yaml_path), "Generated YAML must exist"
+                with open(yaml_path, "r") as f:
+                    content = f.read()
+
+                assert "http://e2e-cluster:8080/v1" in content, "Cluster API base must be injected"
+                assert "e2e-model" in content, "Cluster model must be injected"
+            finally:
+                os.chdir(original_cwd)
+    print("  ✅ E2E Cluster Config Discovery PASS")
+
 finally:
     if os.path.exists(tmp_yaml.name):
         os.remove(tmp_yaml.name)

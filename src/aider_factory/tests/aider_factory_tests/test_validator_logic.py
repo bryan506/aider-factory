@@ -48,3 +48,31 @@ current_items = [{"quote": "Quote A", "tag": "evidence"}]
 floor_violation = bool(baseline) and len(current_items) < len(baseline)
 assert floor_violation == True
 print("✅ Deletion Guard (Floor Violation) PASS")
+
+# 5. Test Session ID Injection in Entailment
+print("Starting Session ID Injection Tests...")
+from unittest.mock import patch, MagicMock
+
+with patch("litellm.completion") as mock_completion:
+    mock_resp = MagicMock()
+    mock_choice = MagicMock()
+    mock_choice.message.content = "SUPPORTED"
+    mock_resp.choices = [mock_choice]
+    mock_completion.return_value = mock_resp
+
+    class DummyArgs:
+        grounding_model = "dummy-model"
+        grounding_api_base = None
+        grounding_api_key = None
+
+    with patch("validator._parse_entail", return_value=1.0), \
+         patch("sys.stderr"), patch("sys.stdout"):
+        
+        validator._entail("claim", [("src", "text")], DummyArgs())
+
+    mock_completion.assert_called_once()
+    kwargs = mock_completion.call_args.kwargs
+    assert "custom_headers" in kwargs, "custom_headers must be passed"
+    assert "x-litellm-session-id" in kwargs["custom_headers"], "Session ID must be in headers"
+    assert kwargs["custom_headers"]["x-litellm-session-id"] == validator._PIPELINE_SESSION_ID, "Session ID must match pipeline ID"
+print("✅ Session ID Injection PASS")

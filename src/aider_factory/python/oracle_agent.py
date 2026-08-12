@@ -13,7 +13,13 @@ import datetime
 import json
 import logging
 import os
+import subprocess
 import sys
+import uuid
+
+# Generate session ID once per pipeline run for KV-cache stickiness
+_PIPELINE_SESSION_ID = os.environ.get("LITELLM_SESSION_ID") or str(uuid.uuid4())
+os.environ["LITELLM_SESSION_ID"] = _PIPELINE_SESSION_ID
 
 # Quiet noisy ML/HTTP libraries (env vars must be set before they import).
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
@@ -393,7 +399,11 @@ def _run_auto():
         try:
             import litellm
 
-            kwargs = {"model": model, "messages": messages}
+            kwargs = {
+                "model": model,
+                "messages": messages,
+                "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID}
+            }
             if api_base:
                 kwargs["api_base"] = api_base
             if api_key:
@@ -1558,7 +1568,11 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
         try:
             import litellm
 
-            _t0_kwargs = {"model": oracle_model, "messages": oracle_messages}
+            _t0_kwargs = {
+                "model": oracle_model,
+                "messages": oracle_messages,
+                "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID}
+            }
             if oracle_api:
                 _t0_kwargs["api_base"] = oracle_api
                 _t0_kwargs["api_key"] = "sk-dummy"
@@ -1689,7 +1703,11 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
             try:
                 import litellm
 
-                kwargs = {"model": oracle_model, "messages": oracle_messages}
+                kwargs = {
+                    "model": oracle_model,
+                    "messages": oracle_messages,
+                    "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID}
+                }
                 if oracle_api:
                     kwargs["api_base"] = oracle_api
                     kwargs["api_key"] = "sk-dummy"
@@ -1746,6 +1764,13 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
 
 def _ensure_oracle_config():
     """Populate missing ORACLE_* environment variables from the active YAML config."""
+    # Inject LITELLM_BASE_URL fallback for cluster mode
+    if os.environ.get("LITELLM_BASE_URL"):
+        os.environ.setdefault("ORACLE_AGENT_API_BASE", os.environ["LITELLM_BASE_URL"])
+        os.environ.setdefault("ORACLE_EMBED_API_BASE", os.environ["LITELLM_BASE_URL"])
+    if os.environ.get("LITELLM_API_KEY"):
+        os.environ.setdefault("ORACLE_AGENT_API_KEY", os.environ["LITELLM_API_KEY"])
+
     if os.environ.get("ORACLE_AGENT_MODEL") and os.environ.get("ORACLE_EMBED_BACKEND"):
         return
 
@@ -1951,7 +1976,11 @@ def main():
         try:
             import litellm
 
-            kwargs = {"model": model, "messages": messages}
+            kwargs = {
+                "model": model,
+                "messages": messages,
+                "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID}
+            }
             if api_base:
                 kwargs["api_base"] = api_base
             if api_key:

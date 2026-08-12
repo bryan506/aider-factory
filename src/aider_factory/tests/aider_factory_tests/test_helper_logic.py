@@ -219,4 +219,38 @@ finally:
             except OSError:
                 pass
 
+# 8. Test Cluster Config Discovery
+print("Starting Cluster Config Discovery Tests...")
+with patch("bootstrap.requests.get") as mock_get:
+    with patch.dict("os.environ", {"LITELLM_BASE_URL": "http://mock-cluster:8080/v1", "LITELLM_API_KEY": "mock-key"}):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"data": [{"id": "mock-model-1"}, {"id": "mock-model-2"}]}
+        mock_get.return_value = mock_resp
+
+        config = bootstrap._discover_cluster_config()
+
+        assert config is not None, "Config should not be None"
+        assert config["architect_api_base"] == "http://mock-cluster:8080/v1", "Should set API base"
+        assert config["available_models"] == ["mock-model-1", "mock-model-2"], "Should extract models"
+        assert config["architect_agent"] == "mock-model-1", "Should set architect agent"
+print("✅ Cluster Config Discovery PASS")
+
+# 9. Test Session ID Injection
+print("Starting Session ID Injection Tests...")
+with patch("litellm.completion") as mock_completion, \
+     patch("bootstrap.detect_api_key", return_value=("OPENAI_API_KEY", "dummy")):
+    mock_resp = MagicMock()
+    mock_resp.__iter__.return_value = []
+    mock_completion.return_value = mock_resp
+
+    bootstrap.run_query("test", None, "", True, terminal_mode=True)
+
+    mock_completion.assert_called_once()
+    kwargs = mock_completion.call_args.kwargs
+    assert "custom_headers" in kwargs, "custom_headers must be passed"
+    assert "x-litellm-session-id" in kwargs["custom_headers"], "Session ID must be in headers"
+    assert kwargs["custom_headers"]["x-litellm-session-id"] == bootstrap._PIPELINE_SESSION_ID, "Session ID must match pipeline ID"
+print("✅ Session ID Injection PASS")
+
 print("\n🎉 All helper logic unit tests passed!")

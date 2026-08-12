@@ -4,7 +4,12 @@ import sys
 import json
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
+
+# Generate session ID once per pipeline run for KV-cache stickiness
+_PIPELINE_SESSION_ID = os.environ.get("LITELLM_SESSION_ID") or str(uuid.uuid4())
+os.environ["LITELLM_SESSION_ID"] = _PIPELINE_SESSION_ID
 
 # Quiet noisy ML/HTTP/API libraries
 for _n in ("httpx", "urllib3", "LiteLLM", "litellm"):
@@ -30,6 +35,40 @@ TERMINAL_PERSONA_PROMPT = (
     "Answer questions clearly, accurately, and concisely based on the user's prompt and provided context files.\n"
     "Provide well-structured code, explanations, and unix commands when requested."
 )
+
+def _discover_cluster_config():
+    """Auto-discover cluster configuration from LiteLLM router."""
+    import os
+    import requests
+
+    base_url = os.environ.get("LITELLM_BASE_URL")
+    api_key = os.environ.get("LITELLM_API_KEY")
+
+    if not base_url:
+        return None
+
+    config = {
+        "architect_api_base": base_url,
+        "editor_ollama_api": base_url,
+        "rag_agent_api": base_url,
+        "api_key": api_key or "sk-dummy",
+    }
+
+    try:
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        response = requests.get(f"{base_url.rstrip('/')}/models", headers=headers, timeout=10)
+        if response.status_code == 200:
+            models = response.json().get("data", [])
+            model_ids = [m["id"] for m in models]
+            config["available_models"] = model_ids
+            if model_ids:
+                config["architect_agent"] = model_ids[0]
+                config["editor_agent"] = model_ids[0]
+    except Exception as e:
+        print(f"[bootstrap] Warning: Could not query /models: {e}", file=sys.stderr)
+
+    return config
+
 
 def get_repo_name():
     return os.path.basename(os.getcwd()).strip().replace(" ", "_")
@@ -210,6 +249,16 @@ def run_bootstrap(target_dir):
     cwd = os.getcwd()
     content = content.replace('name: "My Project"', f'name: "{sensible_name}"')
     content = content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
+
+    # Auto-discover cluster config and override defaults if present
+    cluster_config = _discover_cluster_config()
+    if cluster_config:
+        content = content.replace('architect_api_base: "http://192.168.100.2:8080/v1"', f'architect_api_base: "{cluster_config["architect_api_base"]}"')
+        content = content.replace('editor_ollama_api: "http://192.168.100.1:8080/v1"', f'editor_ollama_api: "{cluster_config["editor_ollama_api"]}"')
+        content = content.replace('rag_agent_api: "http://192.168.100.1:8080/v1"', f'rag_agent_api: "{cluster_config["rag_agent_api"]}"')
+        if "architect_agent" in cluster_config:
+            content = content.replace(f'architect_agent: "{profile["architect_agent"]}"', f'architect_agent: "{cluster_config["architect_agent"]}"')
+            content = content.replace(f'editor_agent: "{profile["editor_agent"]}"', f'editor_agent: "{cluster_config["editor_agent"]}"')
 
     # 2. Test Framework
     content = content.replace('test_command_prefix: "docker exec -i --user myuser -w /path/to/project -e RETICULATE_PYTHON=/home/myuser/.venv-rocker/bin/python3 rocker-rstudio"', f'test_command_prefix: "{profile["test_command_prefix"]}"')
@@ -433,6 +482,7 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         kwargs = {
             "model": model,
             "messages": messages,
+            "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID},
             "stream": True,
             "stream_options": {"include_usage": True}
         }

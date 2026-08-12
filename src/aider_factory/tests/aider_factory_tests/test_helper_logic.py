@@ -221,7 +221,7 @@ finally:
 
 # 8. Test Cluster Config Discovery
 print("Starting Cluster Config Discovery Tests...")
-with patch("bootstrap.requests.get") as mock_get:
+with patch("requests.get") as mock_get:
     with patch.dict("os.environ", {"LITELLM_BASE_URL": "http://mock-cluster:8080/v1", "LITELLM_API_KEY": "mock-key"}):
         mock_resp = MagicMock()
         mock_resp.status_code = 200

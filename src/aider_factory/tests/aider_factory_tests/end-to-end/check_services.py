@@ -9,141 +9,127 @@ print("==================================================")
 print("Checking Local Service Endpoints...")
 print("==================================================")
 
-# 1. Check Qwen3 Embedding Model
-embed_url = "http://192.168.100.1:8080/v1/embeddings"
-embed_payload = {"model": "qwen3-embedding-8b-8k:LATEST", "input": ["dimension probe"]}
-print(f"Sending probe to Embedding Server: {embed_url} ...")
-try:
-    req = urllib.request.Request(
-        embed_url,
-        data=json.dumps(embed_payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=10) as response:
-        res_data = json.loads(response.read().decode("utf-8"))
-        if "data" in res_data and len(res_data["data"]) > 0:
-            dim = len(res_data["data"][0]["embedding"])
-            print(f"  ✅ Embedding Server is ONLINE. Embedding dimension: {dim}")
-        else:
-            print(
-                f"  ❌ Embedding Server returned unexpected response: {res_data}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-except Exception as e:
-    print(f"  ❌ Embedding Server is OFFLINE or unreachable: {e}", file=sys.stderr)
-    sys.exit(1)
+all_passed = True
 
-# 1b. Check Local Editor Server (192.168.100.1:8080)
-editor_url = "http://192.168.100.1:8080/v1/chat/completions"
-editor_payload = {
-    "model": "qwen3.6-27B-90k-udq4kxl:LATEST",
-    "messages": [{"role": "user", "content": "ping"}],
-    "max_tokens": 5
-}
-print(f"Sending probe to Editor Server: {editor_url} ...")
-try:
-    req = urllib.request.Request(
-        editor_url,
-        data=json.dumps(editor_payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=10) as response:
-        res_data = json.loads(response.read().decode("utf-8"))
-        if "choices" in res_data:
-            print("  ✅ Editor Server is ONLINE and responding.")
-        else:
-            print(f"  ❌ Editor Server returned unexpected response: {res_data}", file=sys.stderr)
-            sys.exit(1)
-except Exception as e:
-    print(f"  ❌ Editor Server is OFFLINE or unreachable: {e}", file=sys.stderr)
-    sys.exit(1)
+def probe_post(name, url, payload, expected_key, timeout=10):
+    global all_passed
+    print(f"\nSending probe to {name}: {url} ...")
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            if expected_key in res_data:
+                if expected_key == "data" and len(res_data["data"]) > 0 and "embedding" in res_data["data"][0]:
+                    dim = len(res_data["data"][0]["embedding"])
+                    print(f"  ✅ {name} is ONLINE. Embedding dimension: {dim}")
+                elif expected_key == "choices" and len(res_data["choices"]) > 0:
+                    reply = res_data["choices"][0]["message"]["content"].strip()
+                    reply_display = reply if len(reply) < 30 else reply[:27] + "..."
+                    print(f"  ✅ {name} is ONLINE. Reply: '{reply_display}'")
+                else:
+                    print(f"  ✅ {name} is ONLINE.")
+            else:
+                print(f"  ❌ {name} returned unexpected response: {res_data}", file=sys.stderr)
+                all_passed = False
+    except Exception as e:
+        print(f"  ❌ {name} is OFFLINE or unreachable: {e}", file=sys.stderr)
+        all_passed = False
 
-# 1c. Check Primary Router & OCR Server (192.168.100.2:8081)
-router_url = "http://192.168.100.2:8081/v1/chat/completions"
-router_payload = {
-    "model": "qwen3.6-27b-90k:LATEST",
-    "messages": [{"role": "user", "content": "ping"}],
-    "max_tokens": 5
-}
-print(f"Sending probe to Primary Router: {router_url} ...")
-try:
-    req = urllib.request.Request(
-        router_url,
-        data=json.dumps(router_payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=10) as response:
-        res_data = json.loads(response.read().decode("utf-8"))
-        if "choices" in res_data:
-            print("  ✅ Primary Router Server is ONLINE and responding.")
-        else:
-            print(f"  ❌ Primary Router Server returned unexpected response: {res_data}", file=sys.stderr)
-            sys.exit(1)
-except Exception as e:
-    print(f"  ❌ Primary Router Server is OFFLINE or unreachable: {e}", file=sys.stderr)
-    sys.exit(1)
+def probe_get(name, url, expected_key, timeout=10):
+    global all_passed
+    print(f"\nSending probe to {name}: {url} ...")
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (AI-Factory/1.0)"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            if expected_key in res_data:
+                count = len(res_data[expected_key])
+                print(f"  ✅ {name} is ONLINE. Returned {count} items.")
+            else:
+                print(f"  ❌ {name} returned unexpected response: {res_data}", file=sys.stderr)
+                all_passed = False
+    except Exception as e:
+        print(f"  ❌ {name} is OFFLINE or unreachable: {e}", file=sys.stderr)
+        all_passed = False
 
-# 2. Check SearXNG Meta-Search Engine
-searxng_url = "http://localhost:8088/search?q=Nighthawk+SmartNIC&format=json"
-print(f"\nSending probe to SearXNG Server: {searxng_url} ...")
-try:
-    req = urllib.request.Request(
-        searxng_url,
-        headers={"User-Agent": "Mozilla/5.0 (AI-Factory/1.0)"},
-        method="GET",
-    )
-    with urllib.request.urlopen(req, timeout=10) as response:
-        res_data = json.loads(response.read().decode("utf-8"))
-        if "results" in res_data:
-            results_count = len(res_data["results"])
-            print(f"  ✅ SearXNG Server is ONLINE. Returned {results_count} search results.")
-        else:
-            print(
-                f"  ❌ SearXNG Server returned unexpected response (missing 'results'): {res_data}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-except Exception as e:
-    print(f"  ❌ SearXNG Server is OFFLINE or unreachable on port 8088: {e}", file=sys.stderr)
-    sys.exit(1)
+# Models
+chat_model = "qwen3.6-27B-90k-udq4kxl:LATEST"
+embed_model = "qwen3-embedding-8b-8k:LATEST"
+router_model = "qwen3.6-27b-90k:LATEST"
+minicheck_model = "openai/minicheck-flan-t5-large"
 
-# 3. Check MiniCheck Entailment Verifier
-minicheck_url = "http://192.168.100.1:8090/v1/chat/completions"
-minicheck_payload = {
-    "model": "openai/minicheck-flan-t5-large",
-    "messages": [
-        {
-            "role": "user",
-            "content": "Document: Nighthawk is a SmartNIC. Claim: Nighthawk is a SmartNIC. Is the claim supported? Reply 1 for yes, 0 for no:",
-        }
-    ],
-}
-print(f"\nSending probe to MiniCheck Server: {minicheck_url} ...")
-try:
-    req = urllib.request.Request(
-        minicheck_url,
-        data=json.dumps(minicheck_payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=10) as response:
-        res_data = json.loads(response.read().decode("utf-8"))
-        if "choices" in res_data and len(res_data["choices"]) > 0:
-            reply = res_data["choices"][0]["message"]["content"]
-            print(f"  ✅ MiniCheck Server is ONLINE. Reply: '{reply.strip()}'")
-        else:
-            print(
-                f"  ❌ MiniCheck Server returned unexpected response: {res_data}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-except Exception as e:
-    print(f"  ❌ MiniCheck Server is OFFLINE or unreachable: {e}", file=sys.stderr)
-    sys.exit(1)
+# 1. Node 1 (192.168.100.1:8080)
+probe_post(
+    "Node 1 (Embedding)", 
+    "http://192.168.100.1:8080/v1/embeddings", 
+    {"model": embed_model, "input": ["dimension probe"]}, 
+    "data"
+)
+probe_post(
+    "Node 1 (Chat)", 
+    "http://192.168.100.1:8080/v1/chat/completions", 
+    {"model": chat_model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5}, 
+    "choices"
+)
 
-print("\n🎉 All local endpoints are ONLINE and fully responsive!")
-sys.exit(0)
+# 2. Node 2 (192.168.100.2:8080)
+probe_post(
+    "Node 2 (Embedding)", 
+    "http://192.168.100.2:8080/v1/embeddings", 
+    {"model": embed_model, "input": ["dimension probe"]}, 
+    "data"
+)
+probe_post(
+    "Node 2 (Chat)", 
+    "http://192.168.100.2:8080/v1/chat/completions", 
+    {"model": chat_model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5}, 
+    "choices"
+)
+
+# 3. Node 2 Router/OCR (192.168.100.2:8081)
+probe_post(
+    "Node 2 Router/OCR", 
+    "http://192.168.100.2:8081/v1/chat/completions", 
+    {"model": router_model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5}, 
+    "choices"
+)
+
+# 4. SearXNG
+probe_get(
+    "SearXNG Server",
+    "http://localhost:8088/search?q=Nighthawk+SmartNIC&format=json",
+    "results"
+)
+
+# 5. MiniCheck
+probe_post(
+    "MiniCheck Server", 
+    "http://192.168.100.1:8090/v1/chat/completions", 
+    {
+        "model": minicheck_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Document: Nighthawk is a SmartNIC. Claim: Nighthawk is a SmartNIC. Is the claim supported? Reply 1 for yes, 0 for no:",
+            }
+        ],
+        "max_tokens": 5
+    }, 
+    "choices"
+)
+
+if all_passed:
+    print("\n🎉 All local endpoints are ONLINE and fully responsive!")
+    sys.exit(0)
+else:
+    print("\n⚠️ Some endpoints failed the health check. See details above.", file=sys.stderr)
+    sys.exit(1)

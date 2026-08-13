@@ -335,8 +335,24 @@ def init_user_project(cwd=None):
             shutil.copy(src_conventions, local_conventions)
 
 
+def ensure_aider_installed():
+    """Ensure ~/.local/bin is in PATH and aider is installed globally."""
+    local_bin = os.path.expanduser("~/.local/bin")
+    current_path = os.environ.get("PATH", "")
+    if os.path.exists(local_bin) and local_bin not in current_path.split(os.pathsep):
+        os.environ["PATH"] = f"{local_bin}{os.pathsep}{current_path}"
+        
+    if not shutil.which("aider"):
+        print("📦 [aider-factory] 'aider' not found. Auto-installing aider-chat globally via uv...", file=sys.stderr)
+        try:
+            subprocess.run(["uv", "tool", "install", "aider-chat"], check=False)
+        except Exception as e:
+            print(f"⚠️ [aider-factory] Could not auto-install aider-chat: {e}", file=sys.stderr)
+
+
 def main():
     """Global 'aider-factory' CLI entry point."""
+    ensure_aider_installed()
     init_user_project()
 
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
@@ -352,6 +368,7 @@ def main():
 
 def oracle_cli():
     """Global 'aider-oracle' CLI entry point."""
+    ensure_aider_installed()
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, os.path.join(pkg_dir, "python"))
     os.environ["AI_FACTORY_PKG_DIR"] = pkg_dir
@@ -363,6 +380,7 @@ def oracle_cli():
 
 def validate_cli():
     """Global 'aider-validate' CLI entry point."""
+    ensure_aider_installed()
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, os.path.join(pkg_dir, "python"))
     os.environ["AI_FACTORY_PKG_DIR"] = pkg_dir
@@ -374,6 +392,7 @@ def validate_cli():
 
 def research_cli():
     """Global 'aider-research' CLI entry point."""
+    ensure_aider_installed()
     ensure_searxng_service()
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, os.path.join(pkg_dir, "python"))
@@ -385,6 +404,7 @@ def research_cli():
 
 def helper_cli():
     """Global 'aider-helper' CLI entry point."""
+    ensure_aider_installed()
     import argparse
     
     epilog_text = """

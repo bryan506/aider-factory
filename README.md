@@ -15,7 +15,7 @@ Designed with a "bolt-on, bolt-off" UNIX philosophy, `aider-factory` can be run 
 
 ## 🚀 The Core Draws
 
-### 1. A Barebones, YAML-Configured Aider Harness
+### 1. A Barebones, YAML-Configured Aider Harness & Quickstart
 
 If you want a simple, lightweight, and repeatable way to automate Aider without the bloat of heavy agent frameworks, `aider-factory` does this out of the box.
 

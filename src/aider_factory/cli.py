@@ -257,6 +257,53 @@ def init_user_project(cwd=None):
         content = content.replace('name: "My Project"', f'name: "{sensible_name}"')
         content = content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
         
+        # Quickstart: Auto-discover a target file and context file
+        target_file = None
+        for ext in [".py", ".R", ".js", ".ts", ".go", ".rs", ".md", ".txt"]:
+            for f in os.listdir(cwd):
+                if f.endswith(ext) and not f.startswith(".") and os.path.isfile(os.path.join(cwd, f)):
+                    target_file = f
+                    break
+            if target_file:
+                break
+        
+        if not target_file:
+            target_file = "scratchpad.py"
+            with open(os.path.join(cwd, target_file), "w", encoding="utf-8") as f:
+                f.write("# Quickstart scratchpad\n")
+                
+        context_file = None
+        for ext in [".md", ".txt", ".py", ".R"]:
+            for f in os.listdir(cwd):
+                if f.endswith(ext) and not f.startswith(".") and f != target_file and os.path.isfile(os.path.join(cwd, f)):
+                    context_file = f
+                    break
+            if context_file:
+                break
+
+        content = content.replace('target_files: []', f'target_files:\n        - "{target_file}"')
+        if context_file:
+            content = content.replace('context_files_job: []', f'context_files_job:\n        - "{context_file}"')
+            
+        # Quickstart: Auto-discover cluster configuration
+        try:
+            python_dir = os.path.join(pkg_dir, "python")
+            if python_dir not in sys.path:
+                sys.path.insert(0, python_dir)
+            from bootstrap import _discover_cluster_config
+            cluster_config = _discover_cluster_config()
+            if cluster_config:
+                content = content.replace('architect_api_base: "http://192.168.100.2:8080/v1"', f'architect_api_base: "{cluster_config["architect_api_base"]}"')
+                content = content.replace('editor_ollama_api: "http://192.168.100.1:8080/v1"', f'editor_ollama_api: "{cluster_config["editor_ollama_api"]}"')
+                content = content.replace('rag_agent_api: "http://192.168.100.1:8080/v1"', f'rag_agent_api: "{cluster_config["rag_agent_api"]}"')
+                if "architect_agent" in cluster_config:
+                    content = content.replace('architect_agent: "gemini/gemini-3.5-flash"', f'architect_agent: "{cluster_config["architect_agent"]}"')
+                    content = content.replace('editor_agent: "gemini/gemini-2.5-flash"', f'editor_agent: "{cluster_config["editor_agent"]}"')
+                    content = content.replace('editor_agent_test: "gemini/gemini-2.5-flash"', f'editor_agent_test: "{cluster_config["editor_agent"]}"')
+                    content = content.replace('editor_agent_test_fallback: "gemini/gemini-2.5-flash"', f'editor_agent_test_fallback: "{cluster_config["architect_agent"]}"')
+        except Exception:
+            pass
+        
         with open(local_env_yaml, "w", encoding="utf-8") as f:
             f.write(content)
 

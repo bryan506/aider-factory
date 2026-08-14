@@ -1819,7 +1819,7 @@ def _ensure_oracle_config():
         phase_models = (active_phase.get("models") or {}) if active_phase else {}
         phase_rag = (active_phase.get("rag") or {}) if active_phase else {}
 
-        rag_agent = phase_models.get("rag_agent") or config.get("models", {}).get("rag_agent", "gemini/gemini-3.5-flash")
+        rag_agent = phase_models.get("rag_agent") or config.get("models", {}).get("rag_agent", "gemini/gemini-3.6-flash")
         arch_agent = phase_models.get("architect_agent") or config.get("models", {}).get("architect_agent", rag_agent)
 
         embed_model = phase_rag.get("embed_model") or global_rag.get("embed_model", "qwen3-embedding-8b-8k:LATEST")

@@ -297,7 +297,7 @@ def init_user_project(cwd=None):
                 content = content.replace('editor_ollama_api: "http://192.168.100.1:8080/v1"', f'editor_ollama_api: "{cluster_config["editor_ollama_api"]}"')
                 content = content.replace('rag_agent_api: "http://192.168.100.1:8080/v1"', f'rag_agent_api: "{cluster_config["rag_agent_api"]}"')
                 if "architect_agent" in cluster_config:
-                    content = content.replace('architect_agent: "gemini/gemini-3.5-flash"', f'architect_agent: "{cluster_config["architect_agent"]}"')
+                    content = content.replace('architect_agent: "gemini/gemini-3.6-flash"', f'architect_agent: "{cluster_config["architect_agent"]}"')
                     content = content.replace('editor_agent: "gemini/gemini-2.5-flash"', f'editor_agent: "{cluster_config["editor_agent"]}"')
                     content = content.replace('editor_agent_test: "gemini/gemini-2.5-flash"', f'editor_agent_test: "{cluster_config["editor_agent"]}"')
                     content = content.replace('editor_agent_test_fallback: "gemini/gemini-2.5-flash"', f'editor_agent_test_fallback: "{cluster_config["architect_agent"]}"')

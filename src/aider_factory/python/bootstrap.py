@@ -179,7 +179,7 @@ def run_bootstrap(target_dir):
         print("  (Aider model list unavailable. Using standard presets.)")
 
     print("\n[5] Model Selection:")
-    arch_default = "gemini/gemini-3.5-flash" if provider == "gemini" else "openai/gpt-4o"
+    arch_default = "gemini/gemini-3.6-flash" if provider == "gemini" else "openai/gpt-4o"
     edit_default = "gemini/gemini-2.5-flash" if provider == "gemini" else "openai/gpt-4o-mini"
     
     arch_model = input(f"Enter Architect model [default: {arch_default}]: ").strip() or arch_default
@@ -267,7 +267,7 @@ def run_bootstrap(target_dir):
     content = content.replace('test_naming_and_path: "tests/testthat/test-{stem}.R"', f'test_naming_and_path: "{profile["test_naming_and_path"]}"')
 
     # 3. Models
-    content = content.replace('architect_agent: "gemini/gemini-3.5-flash"', f'architect_agent: "{profile["architect_agent"]}"')
+    content = content.replace('architect_agent: "gemini/gemini-3.6-flash"', f'architect_agent: "{profile["architect_agent"]}"')
     content = content.replace('editor_agent: "gemini/gemini-2.5-flash"', f'editor_agent: "{profile["editor_agent"]}"')
     content = content.replace('editor_agent_test: "gemini/gemini-2.5-flash"', f'editor_agent_test: "{profile["editor_agent"]}"')
     content = content.replace('editor_agent_test_fallback: "gemini/gemini-2.5-flash"', f'editor_agent_test_fallback: "{profile["architect_agent"]}"')

@@ -59,7 +59,8 @@ def _discover_cluster_config():
         response = requests.get(f"{base_url.rstrip('/')}/models", headers=headers, timeout=10)
         if response.status_code == 200:
             models = response.json().get("data", [])
-            model_ids = [m["id"] for m in models]
+            # Prepend openai/ so Aider knows to use the OpenAI-compatible API format
+            model_ids = [m["id"] if "/" in m["id"] else f"openai/{m['id']}" for m in models]
             config["available_models"] = model_ids
             if model_ids:
                 config["architect_agent"] = model_ids[0]

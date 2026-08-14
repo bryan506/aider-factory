@@ -40,7 +40,7 @@ def run_e2e_test(mock_get, mock_sub, mock_bash, mock_searxng):
                     content = f.read()
                 
                 assert 'architect_api_base: "http://e2e-cluster:8080/v1"' in content, "Cluster API must be injected"
-                assert 'architect_agent: "qwen-e2e-model"' in content, "Cluster model must be injected"
+                assert 'architect_agent: "openai/qwen-e2e-model"' in content, "Cluster model must be injected with provider prefix"
                 assert 'target_files:\n        - "scratchpad.py"' in content, "Scratchpad must be injected"
                 
                 print("  ✅ E2E Factory Quickstart Cluster Discovery PASS")

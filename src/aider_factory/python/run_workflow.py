@@ -189,7 +189,7 @@ os.environ["PIPELINE_COLOR_ORACLE"] = _hex_to_ansi(
     _colors_cfg.get("oracle_debate"), "\033[38;2;211;134;155m"
 )
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
+script_dir = os.path.dirname(os.path.abspath(__file__))  # Verified
 
 
 def resolve_template_path(path_val):

@@ -128,7 +128,7 @@ try:
     os.environ["GEMINI_API_KEY"] = "mock-key"
     
     # A. Conversational Mode -> should NOT write to disk
-    with patch.object(sys, "argv", ["aider-helper", "query", "Modify", "-f", tmp_yaml.name, "--ask"]), \
+    with patch.object(sys, "argv", ["aider-helper", "query", "Modify", "-f", tmp_yaml.name, "-a"]), \
          patch("litellm.completion", return_value=mock_stream):
         cli.helper_cli()
         
@@ -158,7 +158,7 @@ try:
     assert os.path.exists(session_file), "Session file must be created on first query"
     with open(session_file, "r") as f:
         sess_data = json.load(f)
-    assert len(sess_data) == 5, "Should contain system + warm-up + turn 1 prompt/response"
+    assert len(sess_data) == 3, "Should contain system + turn 1 prompt/response"
 
     # Second turn
     with patch.object(sys, "argv", ["aider-helper", "query", "And condition?", "-f", tmp_yaml.name, "--ask"]), \
@@ -167,7 +167,7 @@ try:
         
     with open(session_file, "r") as f:
         sess_data_2 = json.load(f)
-    assert len(sess_data_2) == 7, "Session must accumulate messages directly across subsequent CLI calls"
+    assert len(sess_data_2) == 5, "Session must accumulate messages directly across subsequent CLI calls"
     print("  ✅ E2E Session Persistence PASS")
 
     # D. E2E Standalone --clear Command
@@ -194,7 +194,7 @@ try:
     assert os.path.exists(term_session_file), "Terminal session file must be created on terminal query"
     with open(term_session_file, "r") as f:
         term_sess_data = json.load(f)
-    assert len(term_sess_data) == 4, "Terminal session should contain system + greeting + turn 1 prompt/response (4 messages)"
+    assert len(term_sess_data) == 3, "Terminal session should contain system + turn 1 prompt/response (3 messages)"
 
     # Second terminal query
     with patch.object(sys, "argv", ["aider-helper", "query", "Follow up on terminal session", "--terminal"]), \
@@ -203,7 +203,7 @@ try:
 
     with open(term_session_file, "r") as f:
         term_sess_data_2 = json.load(f)
-    assert len(term_sess_data_2) == 6, "Terminal session must accumulate messages across CLI calls (6 messages)"
+    assert len(term_sess_data_2) == 5, "Terminal session must accumulate messages across CLI calls (5 messages)"
     print("  ✅ E2E Terminal Mode (--terminal / -t) Persistence PASS")
 
     # F. E2E Standalone Terminal --clear Command
@@ -232,20 +232,28 @@ try:
     if os.path.exists(session_file):
         os.remove(session_file)
 
+    # Turn 1: Master Mode
     with patch.object(sys, "argv", ["aider-helper", "query", "Explain skills", "--master", "--ask"]), \
          patch("litellm.completion", return_value=mock_stream):
         cli.helper_cli()
 
-    assert os.path.exists(session_file), "Session file must be created on master query"
     with open(session_file, "r") as f:
         master_sess_data = json.load(f)
     
     user_msg = master_sess_data[1]["content"]
-    assert "SKILLS REFERENCE:" in user_msg, "Master mode must inject the skills reference"
+    assert "SKILLS REFERENCE:" in user_msg, "Master mode must append the skills reference persistently"
     assert "FACTORY SERVICE MANUAL:" not in user_msg, "Master mode must NOT inject the service manual"
     
-    ast_msg = master_sess_data[2]["content"]
-    assert "and the skills reference" in ast_msg, "Master mode must update the acknowledgment message"
+    # Turn 2: Follow-up without Master Mode
+    with patch.object(sys, "argv", ["aider-helper", "query", "Follow up", "--ask"]), \
+         patch("litellm.completion", return_value=mock_stream):
+        cli.helper_cli()
+        
+    with open(session_file, "r") as f:
+        master_sess_data_2 = json.load(f)
+        
+    assert "SKILLS REFERENCE:" in master_sess_data_2[1]["content"], "Skills reference must survive in Turn 1 history"
+    assert "SKILLS REFERENCE:" not in master_sess_data_2[3]["content"], "Skills reference must NOT be duplicated in Turn 2"
     
     print("  ✅ E2E Master Mode (--master / -m) Context Check PASS")
 
@@ -253,24 +261,121 @@ try:
     if os.path.exists(session_file):
         os.remove(session_file)
 
+    # Turn 1: Expert Mode
     with patch.object(sys, "argv", ["aider-helper", "query", "Explain architecture", "--expert", "--ask"]), \
          patch("litellm.completion", return_value=mock_stream):
         cli.helper_cli()
 
-    assert os.path.exists(session_file), "Session file must be created on expert query"
     with open(session_file, "r") as f:
         expert_sess_data = json.load(f)
     
     user_msg = expert_sess_data[1]["content"]
-    assert "SKILLS REFERENCE:" in user_msg, "Expert mode must inject the skills reference"
-    assert "FACTORY SERVICE MANUAL:" in user_msg, "Expert mode must inject the service manual"
-    
-    ast_msg = expert_sess_data[2]["content"]
-    assert "the skills reference, and the full Factory Service Manual" in ast_msg, "Expert mode must update the acknowledgment message"
+    assert "SKILLS REFERENCE:" in user_msg, "Expert mode must append the skills reference persistently"
+    assert "FACTORY SERVICE MANUAL:" in user_msg, "Expert mode must append the service manual persistently"
+
+    # Turn 2: Follow-up without Expert Mode
+    with patch.object(sys, "argv", ["aider-helper", "query", "Follow up", "--ask"]), \
+         patch("litellm.completion", return_value=mock_stream):
+        cli.helper_cli()
+        
+    with open(session_file, "r") as f:
+        expert_sess_data_2 = json.load(f)
+        
+    assert "FACTORY SERVICE MANUAL:" in expert_sess_data_2[1]["content"], "Manual must survive in Turn 1 history"
+    assert "FACTORY SERVICE MANUAL:" not in expert_sess_data_2[3]["content"], "Manual must NOT be duplicated in Turn 2"
     
     print("  ✅ E2E Expert Mode (--expert / -e) Context Check PASS")
 
-    # J. E2E Cluster Config Discovery
+    # I2. E2E Repo Map Persistence Check
+    if os.path.exists(session_file):
+        os.remove(session_file)
+        
+    os.makedirs(".aider_factory", exist_ok=True)
+    e2e_repo_map_path = os.path.join(".aider_factory", "static_repo_map.md")
+    with open(e2e_repo_map_path, "w", encoding="utf-8") as f:
+        f.write("src/e2e_module.py\n  def e2e_func()\n")
+
+    try:
+        # Turn 1: Pass --repo-map (-r)
+        with patch.object(sys, "argv", ["aider-helper", "query", "Analyze codebase", "--ask", "-r"]), \
+             patch("litellm.completion", return_value=mock_stream):
+            cli.helper_cli()
+            
+        with open(session_file, "r") as f:
+            repo_map_sess_data = json.load(f)
+            
+        assert "REPOSITORY MAP:" in repo_map_sess_data[1]["content"], "Repo map must be saved persistently to the turn"
+        assert "src/e2e_module.py" in repo_map_sess_data[1]["content"], "Repo map content must be present"
+        
+        # Turn 2: Do NOT pass --repo-map
+        with patch.object(sys, "argv", ["aider-helper", "query", "Follow up", "--ask"]), \
+             patch("litellm.completion", return_value=mock_stream):
+            cli.helper_cli()
+            
+        with open(session_file, "r") as f:
+            repo_map_sess_data_2 = json.load(f)
+            
+        assert "REPOSITORY MAP:" in repo_map_sess_data_2[1]["content"], "Repo map from Turn 1 must survive in the persistent history for Turn 2"
+        assert "REPOSITORY MAP:" not in repo_map_sess_data_2[3]["content"], "Repo map must NOT be duplicated into Turn 2"
+        
+        print("  ✅ E2E Repo Map Persistence PASS")
+    finally:
+        if os.path.exists(e2e_repo_map_path):
+            os.remove(e2e_repo_map_path)
+
+    # I3. E2E Context File Persistence Check
+    if os.path.exists(session_file):
+        os.remove(session_file)
+        
+    tmp_ctx = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False)
+    tmp_ctx.write("def dummy(): pass")
+    tmp_ctx.close()
+
+    try:
+        # Turn 1: Pass the file
+        with patch.object(sys, "argv", ["aider-helper", "query", "Analyze this", "--ask", "-c", tmp_ctx.name]), \
+             patch("litellm.completion", return_value=mock_stream):
+            cli.helper_cli()
+            
+        with open(session_file, "r") as f:
+            ctx_sess_data = json.load(f)
+            
+        assert "def dummy(): pass" in ctx_sess_data[1]["content"], "Context file must be saved persistently to the turn"
+        
+        # Turn 2: Do NOT pass the file
+        with patch.object(sys, "argv", ["aider-helper", "query", "Follow up", "--ask"]), \
+             patch("litellm.completion", return_value=mock_stream):
+            cli.helper_cli()
+            
+        with open(session_file, "r") as f:
+            ctx_sess_data_2 = json.load(f)
+            
+        assert "def dummy(): pass" in ctx_sess_data_2[1]["content"], "Context file from Turn 1 must survive in the persistent history for Turn 2"
+        assert "def dummy(): pass" not in ctx_sess_data_2[3]["content"], "Context file must NOT be duplicated into Turn 2"
+        
+        print("  ✅ E2E Context File Persistence PASS")
+    finally:
+        os.remove(tmp_ctx.name)
+
+    # J. E2E Combined Short Flags (-mta)
+    term_session_file = os.path.join(".aider_factory", ".helper_terminal_session.json")
+    if os.path.exists(term_session_file):
+        os.remove(term_session_file)
+
+    with patch.object(sys, "argv", ["aider-helper", "query", "-mta", "Combined test"]), \
+         patch("litellm.completion", return_value=mock_stream):
+        cli.helper_cli()
+
+    assert os.path.exists(term_session_file), "Terminal session file must be created for -t"
+    with open(term_session_file, "r") as f:
+        mta_sess_data = json.load(f)
+        
+    assert len(mta_sess_data) == 3, "Session must contain system + turn 1 prompt/response"
+    assert "SKILLS REFERENCE:" in mta_sess_data[1]["content"], "Master mode context must be injected for -m"
+    assert mta_sess_data[0]["content"] == bootstrap.TERMINAL_PERSONA_PROMPT, "Must use terminal persona for -t"
+    print("  ✅ E2E Combined Short Flags (-mta) PASS")
+
+    # K. E2E Cluster Config Discovery
     print("  Starting E2E Cluster Config Discovery Test...")
     with tempfile.TemporaryDirectory() as tmp_dir:
         with patch("builtins.input") as mock_input, \

@@ -117,22 +117,27 @@ uv tool install --force --editable .
 
 ---
 
-#### Initializing Your Project Workspace
+#### Initializing Your Project Workspace (Zero-Touch Onboarding)
+
+The AI Factory is designed for **Zero-Touch Onboarding**. You do not need to manually edit your `$PATH`, install Chromium, or hunt down cluster IP addresses. 
 
 To initialize your project:
 
 ```bash
-# 1. Navigate to your project directory
+# 1. Navigate to any project directory (even an empty one)
 cd your-project
 
-# 2. Run aider-factory once to initialize the workspace
+# 2. Run aider-factory once
 aider-factory
-
-# 3. Or, use the interactive helper to bootstrap a custom configuration
-aider-helper bootstrap
 ```
 
-On the first run, the tool will automatically bootstrap a 100% zero-clutter agent workspace:
+On the first run, the tool will automatically:
+1. **Auto-Install Dependencies:** Check if `aider-chat` is installed globally. If not, it installs it via `uv` in the background and dynamically injects `~/.local/bin` into your active memory.
+2. **Provision Browsers:** Download Playwright Chromium binaries if they are missing from your cache.
+3. **Cluster Auto-Discovery:** Query your network's LiteLLM router to auto-discover available models, prepending the `openai/` prefix so Aider knows exactly how to route them.
+4. **Auto-Target Discovery:** Scan your folder for code files to set as targets. If the folder is completely empty, it generates a `scratchpad.py` so you can start coding immediately.
+
+This bootstraps a 100% zero-clutter agent workspace:
 
 At the project root:
 
@@ -224,9 +229,18 @@ aider-helper query --ask "What are the available RAG retrieval modes?"
 # Master mode: load the full Factory Service Manual for deep architectural queries
 aider-helper query --master --ask "How do I configure a pre-edit debate?"
 
+# Inject the static repository map for architectural queries
+aider-helper query --repo-map -t "Which files handle the database connection?"
+
 # General AI Terminal Assistant Mode (strips YAML config context)
 aider-helper query --terminal "How do I optimize a PostgreSQL query with CTEs?"
 aider-helper query -t --context src/main.py "Identify any race conditions in this code"
+
+# POSIX Short-Flag Combining (Master + Terminal + Ask)
+aider-helper query -mta "Explain the debate KV cache strategy"
+
+# When combining with Context (-c), it must be the last letter because it takes an argument
+aider-helper query -atc src/main.py "Review this file"
 
 # Clear helper session history (target specific session)
 aider-helper --clear            # Clears YAML configuration session history
@@ -1349,6 +1363,23 @@ aider-helper --terminal --clear
 aider-helper -t --clear
 ```
 
+#### The "Append-Only" KV-Cache Persistence Model
+
+`aider-helper` is mathematically optimized to preserve your LLM's KV-cache (Prefix Cache) on your inference servers (e.g., vLLM, llama.cpp). It uses an **Append-Only** memory architecture.
+
+When you pass heavy documents to the helper using `--master`, `--expert`, or `--context <file>`, the helper appends those documents to the *current turn* in your persistent `.json` history. 
+
+**Why this matters (Layman's Terms):**
+If you ask a question with `-t -e` (Terminal + Expert mode), the helper sends the 30,000-token Factory Manual to the LLM. The LLM spends compute time reading it and saves it to its VRAM cache. 
+When you ask your *next* question, you do **not** need to pass `-e` again. The helper simply appends your new, short question to the history. Because the beginning of the conversation hasn't changed, the LLM recognizes the prefix, hits the cache perfectly, and answers instantly without re-reading the manual.
+
+**Workflow Best Practices:**
+1. **Load heavy context once:** `aider-helper query -t -c massive_script.py "What does this do?"`
+2. **Follow up infinitely:** `aider-helper query -t "How can I optimize the loop?"` (100% Cache Hit).
+3. **Seamless Mode Switching:** You can freely switch between `--ask` (brainstorming) and standard queries (editing). The safety mechanism preventing disk writes is enforced in Python, meaning the LLM's system prompt never changes, and your cache never busts.
+
+---
+
 ### The Oracle Session
 
 #### 1. Session Types & Files
@@ -1820,7 +1851,19 @@ implementation checklist when wiring a new project:
 > and the code test runner set at the TOP level (`test_command_prefix` + `test_runner`). See the
 > annotated examples in the YAML reference.
 
-### 7.11 Process Logging & Cost Capture (`OSTee`)
+#### Zero-Touch Infrastructure & KV-Cache Matrix
+
+| Feature | What it gives you (Layman's Terms) | Configure in (YAML / Env) | Default | Implemented by |
+| :--- | :--- | :--- | :--- | :--- |
+| **Zero-Touch Onboarding** | Run `aider-factory` anywhere; it just works. No need to manually edit your `$PATH` or install dependencies. | Automatic | On | `cli.py` (`ensure_aider_installed`, PATH injection) |
+| **Cluster Auto-Discovery** | Adapts to any environment (VPN, Bare-Metal, Local) without hardcoded IPs. Auto-prepends `openai/` to models so Aider knows how to route them. | `LITELLM_BASE_URL` | Fallback to `gemini-3.6-flash` | `bootstrap._discover_cluster_config` |
+| **Auto-Target Discovery** | Instantly starts a session with relevant files. Scans the directory for code/docs, or creates a `scratchpad.py` if the folder is empty. | Automatic on first run | `scratchpad.py` | `cli.init_user_project` |
+| **Append-Only KV Caching** | 100% cache hits when chatting with `aider-helper`. Heavy documents (`--expert`, `--master`, `--context`) are appended *once* to the session history. | `aider-helper query` flags | On | `bootstrap.py` (persistent history arrays) |
+| **Seamless `--ask` Toggling** | Brainstorm safely, then edit without waiting for the LLM to re-read your files. `--ask` blocks disk writes but shares the edit system prompt to preserve the cache. | `--ask` flag | Off | `bootstrap.py` (Python-level write gate) |
+| **Safe Initial Defaults** | Prevents the pipeline from running massive, expensive test-fixing loops on your very first run. | `run_job_two`, `iterate_test` | `false` | `default_configs/env.yml` |
+| **Topology-Aware Probes** | Instant health checks without spamming the network. Uses 1x1 pixel base64 images to test OCR vision models efficiently. | `check_services.py` | — | `check_services.py` |
+
+### 7.12 Process Logging & Cost Capture (`OSTee`)
 
 The pipeline captures log output from Python, Aider, Rscript, and subprocesses using an OS-level file descriptor tee (`OSTee` in `run_workflow.py`).
 
@@ -1828,7 +1871,7 @@ The pipeline captures log output from Python, Aider, Rscript, and subprocesses u
 - **Unified Streaming Log:** A background thread pumps output from the pipe to terminal stdout while writing to `.aider_factory/logs/<config>_run_<timestamp>.log`.
 - **Cost Extraction:** `aggregate_costs.py` regex-scans the unified log file for `Tokens: Nk sent, Nk received. Cost: $X message, $Y session` patterns, handling metric suffixes (`k`, `M`) and summing total run costs accurately across all sub-agents.
 
-### 7.12 Entailment-grounded claim verification (the MiniCheck grounding verifier)
+### 7.13 Entailment-grounded claim verification (the MiniCheck grounding verifier)
 
 The region/claim check has two backends. By default it uses **cosine** similarity (bge-small vs
 the paper's LanceDB table) — a _topicality_ signal, annotation-only. Set a **grounding verifier**
@@ -1935,7 +1978,7 @@ curl -s http://192.168.100.1:8090/v1/chat/completions -H 'content-type: applicat
 # -> {... "content":"0.98xx" ...}
 ```
 
-### 7.13 Raw Text Validation (`--claims-only`)
+### 7.14 Raw Text Validation (`--claims-only`)
 
 While the core validation pipeline relies on `[evidence]` tags for exact-substring mathematical proofs, you can also validate **raw, quote-less text** (such as human-written READMEs or external LLM summaries) using the `--claims-only` flag.
 

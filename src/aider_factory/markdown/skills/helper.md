@@ -35,10 +35,21 @@ Inject external files into the helper's prompt (comma-separated). Useful when yo
 aider-helper query -c src/main.py,docs/api.md "Update target_files to include src/main.py and docs/api.md."
 ```
 
-### Conversational / Read-Only Mode (`--ask`)
+### Repository Map (`--repo-map` / `-r`)
+Injects the static repository map (`.aider_factory/static_repo_map.md`) into the helper's context. Useful for answering architectural or file-location questions across the entire codebase. 
+*(Note: Requires manual generation first via Aider).*
+```bash
+# 1. Generate the static repo map
+aider --map-tokens 4096 --show-repo-map > .aider_factory/static_repo_map.md
+
+# 2. Query the helper with repository map context in terminal mode
+aider-helper query -r -t "Which files handle database connections and schema migrations?"
+```
+
+### Conversational / Read-Only Mode (`--ask` / `-a`)
 Forces the helper to *only* answer the question and prevents it from writing or modifying any YAML files on disk.
 ```bash
-aider-helper query --ask "What are the available RAG retrieval modes?"
+aider-helper query -a "What are the available RAG retrieval modes?"
 ```
 
 ### Master Mode (`--master` / `-m`)
@@ -126,7 +137,7 @@ unset AIDER_HELPER_MODEL AIDER_HELPER_API_BASE
 ## Agent Best Practices
 
 1. **Do not guess YAML syntax:** If you need to modify the pipeline configuration but aren't sure of the exact YAML keys, use `aider-helper query "instruction"` and let the helper do the YAML writing. It knows the schema perfectly.
-2. **Combine flags for precision:** You can combine flags freely. Example: `aider-helper query -m -f custom.yml -c script.py "..."`.
+2. **Combine flags for precision (POSIX Short Flags):** You can combine short boolean flags into a single string. For example, instead of `-m -t -a`, you can write `-mta`. Note: If you include `-c` (context), it must be the last letter in the cluster because it takes an argument (e.g., `-atc src/main.py`).
 3. **Clear stale context:** If you are starting a completely new task, run `aider-helper --clear` first to ensure previous configuration discussions don't hallucinate into your new request.
 
 ---

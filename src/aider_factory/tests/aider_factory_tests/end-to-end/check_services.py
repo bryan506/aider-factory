@@ -65,10 +65,27 @@ def probe_get(name, url, expected_key, timeout=10):
 chat_model = "qwen3.6-27B-90k-udq4kxl:LATEST"
 node2_chat_model = "qwen3.6-27b-90k:LATEST"
 embed_model = "qwen3-embedding-8b-8k:LATEST"
-router_model = "qwen3.6-27b-90k:LATEST"
+ocr_model = "glm-ocr-f16:LATEST"
 minicheck_model = "openai/minicheck-flan-t5-large"
 
-# 1. Node 1 (192.168.100.1:8080)
+# Tiny 1x1 transparent PNG in base64 to test vision capabilities efficiently
+tiny_image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+def get_vision_payload(model_name):
+    return {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "ping"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{tiny_image_b64}"}}
+                ]
+            }
+        ],
+        "max_tokens": 5
+    }
+
+# 1. Node 1 (192.168.100.1:8080) - All Models
 probe_post(
     "Node 1 (Embedding)", 
     "http://192.168.100.1:8080/v1/embeddings", 
@@ -81,14 +98,14 @@ probe_post(
     {"model": chat_model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5}, 
     "choices"
 )
-
-# 2. Node 2 (192.168.100.2:8080)
 probe_post(
-    "Node 2 (Embedding)", 
-    "http://192.168.100.2:8080/v1/embeddings", 
-    {"model": embed_model, "input": ["dimension probe"]}, 
-    "data"
+    "Node 1 (OCR)", 
+    "http://192.168.100.1:8080/v1/chat/completions", 
+    get_vision_payload(ocr_model), 
+    "choices"
 )
+
+# 2. Node 2 (192.168.100.2:8080) - Chat Only
 probe_post(
     "Node 2 (Chat)", 
     "http://192.168.100.2:8080/v1/chat/completions", 
@@ -96,11 +113,17 @@ probe_post(
     "choices"
 )
 
-# 3. Node 2 Router/OCR (192.168.100.2:8081)
+# 3. Router (192.168.100.2:8081) - Embed & OCR Only
 probe_post(
-    "Node 2 Router/OCR", 
+    "Router (Embedding)", 
+    "http://192.168.100.2:8081/v1/embeddings", 
+    {"model": embed_model, "input": ["dimension probe"]}, 
+    "data"
+)
+probe_post(
+    "Router (OCR)", 
     "http://192.168.100.2:8081/v1/chat/completions", 
-    {"model": router_model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5}, 
+    get_vision_payload(ocr_model), 
     "choices"
 )
 

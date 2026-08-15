@@ -345,7 +345,7 @@ def run_bootstrap(target_dir):
         print("If you plan to use cloud models, remember to export your key (e.g., export GEMINI_API_KEY=\"...\")")
         print("and add it to your ~/.bashrc or ~/.zshrc.")
 
-def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=False, master_mode=False, expert_mode=False):
+def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=False, master_mode=False, expert_mode=False, repo_map=False):
     """Query configuration or run general terminal assistant using direct litellm session persistence."""
     key_name, _ = detect_api_key()
     if not key_name:
@@ -367,20 +367,24 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
             elif os.path.exists(repo_path):
                 file_path = repo_path
             else:
-                file_path = std_path
-                pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                master_env_path = os.path.join(pkg_dir, "default_configs", "env.yml")
-                os.makedirs(".aider_factory", exist_ok=True)
-                sensible_name = f"{repo_name.replace('_', ' ').replace('-', ' ').title()} Pipeline"
-                cwd = os.getcwd()
-                with open(master_env_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                content = content.replace('name: "My Project"', f'name: "{sensible_name}"')
-                content = content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(content)
-                print(f"ℹ️ Created configuration file from template: {file_path}")
-        elif not os.path.exists(file_path):
+                if ask_mode:
+                    # In ask mode, do not create files on disk. Use template in memory.
+                    file_path = None
+                else:
+                    file_path = std_path
+                    pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    master_env_path = os.path.join(pkg_dir, "default_configs", "env.yml")
+                    os.makedirs(".aider_factory", exist_ok=True)
+                    sensible_name = f"{repo_name.replace('_', ' ').replace('-', ' ').title()} Pipeline"
+                    cwd = os.getcwd()
+                    with open(master_env_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    content = content.replace('name: "My Project"', f'name: "{sensible_name}"')
+                    content = content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    print(f"ℹ️ Created configuration file from template: {file_path}")
+        elif file_path and not os.path.exists(file_path):
             print(f"❌ Error: Configuration file not found: {file_path}", file=sys.stderr)
             sys.exit(1)
 
@@ -396,51 +400,60 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         except Exception:
             pass
 
-    is_new_session = not messages
+    if not messages:
+        system_prompt = TERMINAL_PERSONA_PROMPT if terminal_mode else PERSONA_PROMPT
+        messages.append({"role": "system", "content": system_prompt})
 
-    if is_new_session:
-        if terminal_mode:
-            messages.append({"role": "system", "content": TERMINAL_PERSONA_PROMPT})
-            messages.append({"role": "assistant", "content": "Terminal agent initialized. Ready to assist with your workspace tasks."})
-        else:
-            pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            yaml_docs_path = os.path.join(pkg_dir, "markdown", "yaml_docs_sample.md")
+    history_text = "".join([m.get("content", "") for m in messages])
+    persistent_additions = ""
+    pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    
+    if not terminal_mode and "YAML DOCUMENTATION:" not in history_text:
+        yaml_docs_path = os.path.join(pkg_dir, "markdown", "yaml_docs_sample.md")
+        try:
             with open(yaml_docs_path, "r", encoding="utf-8") as f:
                 yaml_docs = f.read()
-            with open(file_path, "r", encoding="utf-8") as f:
-                active_config = f.read()
-                
-            user_content = f"YAML DOCUMENTATION:\n{yaml_docs[:15000]}\n\nACTIVE CONFIGURATION:\n{active_config}"
-            ack_msg = "Acknowledged. I have loaded the pipeline documentation and your active configuration."
-                
-            if master_mode or expert_mode:
-                skills_dir = os.path.join(pkg_dir, "markdown", "skills")
-                skills_content = ""
-                if os.path.exists(skills_dir) and os.path.isdir(skills_dir):
-                    for skill_file in sorted(os.listdir(skills_dir)):
-                        if skill_file.endswith(".md"):
-                            with open(os.path.join(skills_dir, skill_file), "r", encoding="utf-8") as f:
-                                skills_content += f"\n### {skill_file}\n{f.read()}\n"
-                if skills_content:
-                    user_content += f"\n\nSKILLS REFERENCE:\n{skills_content}"
-                    ack_msg = "Acknowledged. I have loaded the pipeline documentation, your active configuration, and the skills reference."
+            if file_path and os.path.exists(file_path):
+                with open(file_path, "r", encoding="utf-8") as f:
+                    active_config = f.read()
+            else:
+                master_env_path = os.path.join(pkg_dir, "default_configs", "env.yml")
+                with open(master_env_path, "r", encoding="utf-8") as f:
+                    active_config = f.read()
+            persistent_additions += f"YAML DOCUMENTATION:\n{yaml_docs[:15000]}\n\nACTIVE CONFIGURATION:\n{active_config}\n\n"
+        except Exception:
+            pass
 
-            if expert_mode:
-                manual_path = os.path.join(pkg_dir, "markdown", "factory_service_manual.md")
-                if os.path.exists(manual_path):
-                    with open(manual_path, "r", encoding="utf-8") as f:
-                        manual_docs = f.read()
-                    user_content += f"\n\nFACTORY SERVICE MANUAL:\n{manual_docs}"
-                    ack_msg = "Acknowledged. I have loaded the pipeline documentation, your active configuration, the skills reference, and the full Factory Service Manual."
-                
-            ack_msg += " How can I help you modify or understand your pipeline today?"
+    if (master_mode or expert_mode) and "SKILLS REFERENCE:" not in history_text:
+        skills_dir = os.path.join(pkg_dir, "markdown", "skills")
+        skills_content = ""
+        if os.path.exists(skills_dir) and os.path.isdir(skills_dir):
+            for skill_file in sorted(os.listdir(skills_dir)):
+                if skill_file.endswith(".md"):
+                    with open(os.path.join(skills_dir, skill_file), "r", encoding="utf-8") as f:
+                        skills_content += f"\n### {skill_file}\n{f.read()}\n"
+        if skills_content:
+            persistent_additions += f"SKILLS REFERENCE:\n{skills_content}\n\n"
 
-            messages.append({"role": "system", "content": PERSONA_PROMPT})
-            messages.append({"role": "user", "content": user_content})
-            messages.append({"role": "assistant", "content": ack_msg})
+    if expert_mode and "FACTORY SERVICE MANUAL:" not in history_text:
+        manual_path = os.path.join(pkg_dir, "markdown", "factory_service_manual.md")
+        if os.path.exists(manual_path):
+            with open(manual_path, "r", encoding="utf-8") as f:
+                manual_docs = f.read()
+            persistent_additions += f"FACTORY SERVICE MANUAL:\n{manual_docs}\n\n"
 
-    # Append user context files if specified
-    user_context = ""
+    if repo_map and "REPOSITORY MAP:" not in history_text:
+        repo_map_path = os.path.join(".aider_factory", "static_repo_map.md")
+        if os.path.exists(repo_map_path):
+            try:
+                with open(repo_map_path, "r", encoding="utf-8") as f:
+                    repo_map_content = f.read()
+                persistent_additions += f"REPOSITORY MAP:\n{repo_map_content}\n\n"
+            except Exception:
+                pass
+        else:
+            print("⚠️ [aider-helper] Warning: --repo-map requested, but '.aider_factory/static_repo_map.md' not found. Generate it via: aider --map-tokens 4096 --show-repo-map > .aider_factory/static_repo_map.md", file=sys.stderr)
+
     if context_paths:
         ctx_blocks = []
         for path in context_paths.split(","):
@@ -452,23 +465,17 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
                 except Exception:
                     pass
         if ctx_blocks:
-            user_context = "\n\nEXTRA CONTEXT FILES:\n" + "\n\n".join(ctx_blocks)
+            persistent_additions += "EXTRA CONTEXT FILES:\n" + "\n\n".join(ctx_blocks) + "\n\n"
 
-    # Inject current config state on follow-up turns to prevent split-brain overwrites
-    config_context = ""
-    if not terminal_mode and not is_new_session and file_path and os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                config_context = f"\n\nCURRENT CONFIGURATION STATE:\n```yaml\n{f.read()}\n```"
-        except Exception:
-            pass
-
-    messages.append({"role": "user", "content": f"{instruction}{config_context}{user_context}"})
+    user_msg_content = f"{persistent_additions}QUESTION:\n{instruction}" if persistent_additions else instruction
+    messages.append({"role": "user", "content": user_msg_content.strip()})
+    
+    llm_messages = list(messages)
 
     # Call litellm with streaming
     import litellm
     model_map = {
-        "GEMINI_API_KEY": "gemini/gemini-2.5-flash",
+        "GEMINI_API_KEY": "gemini/gemini-3.6-flash",
         "ANTHROPIC_API_KEY": "anthropic/claude-3-5-sonnet-20241022",
         "OPENROUTER_API_KEY": "openrouter/auto",
         "GROQ_API_KEY": "groq/llama-3.3-70b-versatile",
@@ -482,7 +489,7 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
     try:
         kwargs = {
             "model": model,
-            "messages": messages,
+            "messages": llm_messages,
             "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID},
             "stream": True,
             "stream_options": {"include_usage": True}
@@ -535,15 +542,10 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
             if final_usage:
                 sent = getattr(final_usage, "prompt_tokens", 0)
                 recv = getattr(final_usage, "completion_tokens", 0)
-                # Compute approx cost using litellm cost calculator if needed, or fallback.
-                # LiteLLM cost calculator needs a completion response.
-                class MockResp:
-                    def __init__(self, usage, model):
-                        self.usage = usage
-                        self.model = model
                 
                 try:
-                    msg_cost = float(litellm.completion_cost(completion_response=MockResp(final_usage, model)) or 0.0)
+                    cost_tuple = litellm.cost_calculator.cost_per_token(model=model, prompt_tokens=sent, completion_tokens=recv)
+                    msg_cost = float(cost_tuple[0] + cost_tuple[1]) if isinstance(cost_tuple, tuple) else float(cost_tuple)
                 except Exception:
                     msg_cost = 0.0
                     

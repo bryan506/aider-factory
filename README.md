@@ -139,6 +139,9 @@ aider-helper query --terminal "Explain compound indexing in SQLite"
 # Pass workspace context files to the terminal assistant
 aider-helper query -t --context src/main.py "Review this file for potential memory leaks"
 
+# Combine POSIX short flags (Terminal + Ask + Repo-Map) for fast architectural queries
+aider-helper query -tar "Which files handle the database connection?"
+
 # Clear the interactive terminal assistant session history
 aider-helper -t --clear
 ```

@@ -59,14 +59,15 @@ try:
          bootstrap.run_query("instruction", tmp_yaml.name, "context_a.py", ask_mode=True)
          with open(tmp_session.name, "r") as f:
              sess_data_1 = json.load(f)
-         assert len(sess_data_1) == 5, "Should initialize system + warm-up + turn 1 prompt/response"
+         assert len(sess_data_1) == 3, "Should initialize system + turn 1 prompt/response"
+         assert "YAML DOCUMENTATION:" in sess_data_1[1]["content"], "YAML must be persistently appended on Turn 1"
 
          # Turn 2 (Should append to stable message history list directly)
          bootstrap.run_query("instruction 2", tmp_yaml.name, "context_a.py", ask_mode=True)
          with open(tmp_session.name, "r") as f:
              sess_data_2 = json.load(f)
-         assert len(sess_data_2) == 7, "Session must accumulate messages directly without hashing reset"
-         assert "CURRENT CONFIGURATION STATE:" in sess_data_2[-2]["content"], "Must inject fresh YAML state on follow-up turns to prevent split-brain"
+         assert len(sess_data_2) == 5, "Session must accumulate messages directly without hashing reset"
+         assert "YAML DOCUMENTATION:" not in sess_data_2[3]["content"], "YAML must NOT be appended again on Turn 2 to prevent bloat"
 
          # Test session clearing
          bootstrap.clear_helper_session()
@@ -132,14 +133,14 @@ try:
         bootstrap.run_query("explain git", None, "file1.txt", ask_mode=True, terminal_mode=True)
         with open(tmp_term_session.name, "r") as f:
             term_data_1 = json.load(f)
-        assert len(term_data_1) == 4, "Terminal session should contain system + assistant greeting + user prompt + assistant response (4 messages)"
+        assert len(term_data_1) == 3, "Terminal session should contain system + turn 1 prompt/response (3 messages)"
         assert term_data_1[0]["content"] == bootstrap.TERMINAL_PERSONA_PROMPT, "Terminal mode must use TERMINAL_PERSONA_PROMPT"
 
         # Turn 2 in terminal mode
         bootstrap.run_query("follow up question", None, "", ask_mode=True, terminal_mode=True)
         with open(tmp_term_session.name, "r") as f:
             term_data_2 = json.load(f)
-        assert len(term_data_2) == 6, "Terminal session must accumulate messages across turns (6 messages)"
+        assert len(term_data_2) == 5, "Terminal session must accumulate messages across turns (5 messages)"
 
         # Test terminal session clearing
         bootstrap.clear_helper_session(terminal_mode=True)
@@ -164,18 +165,27 @@ tmp_master_yaml.close()
 
 try:
     with patch("bootstrap.get_helper_session_file", return_value=tmp_master_session.name), \
-         patch("litellm.completion", return_value=mock_response), \
+         patch("litellm.completion", return_value=mock_response) as mock_litellm, \
          patch("os.environ", {"GEMINI_API_KEY": "test-key"}):
 
+        # Turn 1: Master Mode
         bootstrap.run_query("explain skills", tmp_master_yaml.name, "", ask_mode=True, master_mode=True)
         
         with open(tmp_master_session.name, "r") as f:
             master_data = json.load(f)
         
-        assert len(master_data) == 5, "Master session should contain system + warm-up + turn 1 prompt/response"
-        assert "SKILLS REFERENCE:" in master_data[1]["content"], "Master mode must inject the skills reference"
+        assert len(master_data) == 3, "Master session should contain system + turn 1 prompt/response"
+        assert "SKILLS REFERENCE:" in master_data[1]["content"], "Master mode must append skills persistently"
         assert "FACTORY SERVICE MANUAL:" not in master_data[1]["content"], "Master mode must NOT inject the Factory Service Manual"
-        assert "and the skills reference" in master_data[2]["content"], "Master mode must update the acknowledgment message"
+
+        # Turn 2: Follow-up without Master Mode
+        bootstrap.run_query("follow up", tmp_master_yaml.name, "", ask_mode=True, master_mode=False)
+        with open(tmp_master_session.name, "r") as f:
+            master_data_2 = json.load(f)
+            
+        assert len(master_data_2) == 5, "Session must accumulate messages"
+        assert "SKILLS REFERENCE:" in master_data_2[1]["content"], "Skills reference must survive in Turn 1 history"
+        assert "SKILLS REFERENCE:" not in master_data_2[3]["content"], "Skills reference must NOT be duplicated in Turn 2"
 
     print("✅ Master Mode Logic PASS")
 finally:
@@ -197,18 +207,27 @@ tmp_expert_yaml.close()
 
 try:
     with patch("bootstrap.get_helper_session_file", return_value=tmp_expert_session.name), \
-         patch("litellm.completion", return_value=mock_response), \
+         patch("litellm.completion", return_value=mock_response) as mock_litellm, \
          patch("os.environ", {"GEMINI_API_KEY": "test-key"}):
 
+        # Turn 1: Expert Mode
         bootstrap.run_query("explain architecture", tmp_expert_yaml.name, "", ask_mode=True, expert_mode=True)
         
         with open(tmp_expert_session.name, "r") as f:
             expert_data = json.load(f)
         
-        assert len(expert_data) == 5, "Expert session should contain system + warm-up + turn 1 prompt/response"
-        assert "SKILLS REFERENCE:" in expert_data[1]["content"], "Expert mode must inject the skills reference"
-        assert "FACTORY SERVICE MANUAL:" in expert_data[1]["content"], "Expert mode must inject the Factory Service Manual"
-        assert "the skills reference, and the full Factory Service Manual" in expert_data[2]["content"], "Expert mode must update the acknowledgment message"
+        assert len(expert_data) == 3, "Expert session should contain system + turn 1 prompt/response"
+        assert "SKILLS REFERENCE:" in expert_data[1]["content"], "Expert mode must append skills persistently"
+        assert "FACTORY SERVICE MANUAL:" in expert_data[1]["content"], "Expert mode must append manual persistently"
+
+        # Turn 2: Follow-up without Expert Mode
+        bootstrap.run_query("follow up", tmp_expert_yaml.name, "", ask_mode=True, expert_mode=False)
+        with open(tmp_expert_session.name, "r") as f:
+            expert_data_2 = json.load(f)
+            
+        assert len(expert_data_2) == 5, "Session must accumulate messages"
+        assert "FACTORY SERVICE MANUAL:" in expert_data_2[1]["content"], "Manual must survive in Turn 1 history"
+        assert "FACTORY SERVICE MANUAL:" not in expert_data_2[3]["content"], "Manual must NOT be duplicated in Turn 2"
 
     print("✅ Expert Mode Logic PASS")
 finally:
@@ -219,7 +238,54 @@ finally:
             except OSError:
                 pass
 
-# 8. Test Cluster Config Discovery
+# 8. Test Repo Map Logic
+print("Starting Repo Map Logic Unit Tests...")
+tmp_repo_map_session = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+tmp_repo_map_session.close()
+
+tmp_repo_map_yaml = tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False)
+tmp_repo_map_yaml.write("name: repo_map_test")
+tmp_repo_map_yaml.close()
+
+os.makedirs(".aider_factory", exist_ok=True)
+dummy_repo_map_path = os.path.join(".aider_factory", "static_repo_map.md")
+with open(dummy_repo_map_path, "w", encoding="utf-8") as f:
+    f.write("src/main.py\n  def main()\n")
+
+try:
+    with patch("bootstrap.get_helper_session_file", return_value=tmp_repo_map_session.name), \
+         patch("litellm.completion", return_value=mock_response), \
+         patch("os.environ", {"GEMINI_API_KEY": "test-key"}):
+
+        # Turn 1: Repo Map Mode
+        bootstrap.run_query("explain repo", tmp_repo_map_yaml.name, "", ask_mode=True, repo_map=True)
+        
+        with open(tmp_repo_map_session.name, "r") as f:
+            repo_map_data = json.load(f)
+        
+        assert len(repo_map_data) == 3, "Repo map session should contain system + turn 1 prompt/response"
+        assert "REPOSITORY MAP:" in repo_map_data[1]["content"], "Repo map mode must append repository map persistently"
+        assert "src/main.py" in repo_map_data[1]["content"], "Dummy repo map content must be present"
+
+        # Turn 2: Follow-up without Repo Map Mode
+        bootstrap.run_query("follow up", tmp_repo_map_yaml.name, "", ask_mode=True, repo_map=False)
+        with open(tmp_repo_map_session.name, "r") as f:
+            repo_map_data_2 = json.load(f)
+            
+        assert len(repo_map_data_2) == 5, "Session must accumulate messages"
+        assert "REPOSITORY MAP:" in repo_map_data_2[1]["content"], "Repo map must survive in Turn 1 history"
+        assert "REPOSITORY MAP:" not in repo_map_data_2[3]["content"], "Repo map must NOT be duplicated in Turn 2"
+
+    print("✅ Repo Map Logic PASS")
+finally:
+    for f in [tmp_repo_map_session.name, tmp_repo_map_yaml.name, dummy_repo_map_path]:
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+# 9. Test Cluster Config Discovery
 print("Starting Cluster Config Discovery Tests...")
 with patch("requests.get") as mock_get:
     with patch.dict("os.environ", {"LITELLM_BASE_URL": "http://mock-cluster:8080/v1", "LITELLM_API_KEY": "mock-key"}):
@@ -232,8 +298,8 @@ with patch("requests.get") as mock_get:
 
         assert config is not None, "Config should not be None"
         assert config["architect_api_base"] == "http://mock-cluster:8080/v1", "Should set API base"
-        assert config["available_models"] == ["mock-model-1", "mock-model-2"], "Should extract models"
-        assert config["architect_agent"] == "mock-model-1", "Should set architect agent"
+        assert config["available_models"] == ["openai/mock-model-1", "openai/mock-model-2"], "Should extract models with openai/ prefix"
+        assert config["architect_agent"] == "openai/mock-model-1", "Should set architect agent with openai/ prefix"
 print("✅ Cluster Config Discovery PASS")
 
 # 9. Test Session ID Injection

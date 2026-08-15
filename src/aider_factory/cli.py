@@ -444,11 +444,12 @@ Environment Variables for Custom Models:
     query_parser.add_argument("instruction", nargs="?", help="The instruction or question for the helper.")
     query_parser.add_argument("--file", "-f", default=None, help="Target configuration YAML file.")
     query_parser.add_argument("--context", "-c", default="", help="Comma-separated extra context files.")
-    query_parser.add_argument("--ask", action="store_true", help="Conversational mode (no file writing).")
+    query_parser.add_argument("--ask", "-a", action="store_true", help="Conversational mode (no file writing).")
     query_parser.add_argument("--terminal", "-t", action="store_true", help="Terminal agent mode (strips YAML config context).")
     query_parser.add_argument("--clear", action="store_true", help="Wipe the active helper session history.")
     query_parser.add_argument("--master", "-m", action="store_true", help="Master mode: loads the skills reference documents into context.")
     query_parser.add_argument("--expert", "-e", action="store_true", help="Expert mode: loads both the skills reference and the full Factory Service Manual into context.")
+    query_parser.add_argument("--repo-map", "-r", action="store_true", help="Repository Map mode: loads the static repository map (.aider_factory/static_repo_map.md) into context.")
     
     # Parse args
     args, unknown = parser.parse_known_args()
@@ -466,6 +467,7 @@ Environment Variables for Custom Models:
         clear_val = getattr(args, "clear", False) or ("--clear" in sys.argv)
         master_val = getattr(args, "master", False) or ("--master" in sys.argv or "-m" in sys.argv)
         expert_val = getattr(args, "expert", False) or ("--expert" in sys.argv or "-e" in sys.argv)
+        repo_map_val = getattr(args, "repo_map", False) or ("--repo-map" in sys.argv or "-r" in sys.argv)
 
         if clear_val:
             clear_helper_session(terminal_mode=terminal_val)
@@ -476,16 +478,16 @@ Environment Variables for Custom Models:
         if getattr(args, "instruction", None):
             instruction_parts.append(args.instruction)
         if unknown:
-            instruction_parts.extend([u for u in unknown if u not in ("--terminal", "-t", "--ask", "--clear", "--master", "-m", "--expert", "-e")])
+            instruction_parts.extend([u for u in unknown if u not in ("--terminal", "-t", "--ask", "-a", "--clear", "--master", "-m", "--expert", "-e", "--repo-map", "-r")])
         instruction = " ".join(instruction_parts)
         
         file_val = getattr(args, "file", None)
         context_val = getattr(args, "context", "")
-        ask_val = getattr(args, "ask", False)
+        ask_val = getattr(args, "ask", False) or ("--ask" in sys.argv or "-a" in sys.argv)
         
         if not instruction:
             parser.print_help()
             sys.exit(0)
             
-        run_query(instruction, file_val, context_val, ask_val, terminal_mode=terminal_val, master_mode=master_val, expert_mode=expert_val)
+        run_query(instruction, file_val, context_val, ask_val, terminal_mode=terminal_val, master_mode=master_val, expert_mode=expert_val, repo_map=repo_map_val)
 

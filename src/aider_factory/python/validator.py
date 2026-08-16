@@ -265,8 +265,9 @@ def _region(block, db_dir, collection, k):
 # for a raw MiniCheck gguf you may prefer its native (document, claim) template — kept as a
 # single constant so it's a one-line change.
 _ENTAIL_PROMPT = (
-    "DOCUMENT:\n{document}\n\nCLAIM:\n{claim}\n\n"
-    "Is the CLAIM fully supported by the DOCUMENT? "
+    "<evidence_passages>\n{document}\n</evidence_passages>\n\n"
+    "<claim_to_verify>\n{claim}\n</claim_to_verify>\n\n"
+    "Is the CLAIM fully supported by the provided evidence passages? "
     "Answer only 'SUPPORTED' or 'UNSUPPORTED'."
 )
 
@@ -894,10 +895,10 @@ def main():
     # Auto-discover collection from YAML if missing
     if not a.collection:
         import yaml
-        for yaml_name in [".env_auto_ocr.yml", ".env.yml"]:
-            yaml_path = os.path.join(os.getcwd(), ".aider_factory", yaml_name)
-            if not os.path.exists(yaml_path):
-                yaml_path = os.path.join(os.getcwd(), yaml_name)
+        for yaml_path in [
+            os.path.join(os.getcwd(), ".aider_factory", ".env.yml"),
+            os.path.join(os.getcwd(), ".env.yml"),
+        ]:
             if os.path.exists(yaml_path):
                 try:
                     with open(yaml_path, "r") as f:

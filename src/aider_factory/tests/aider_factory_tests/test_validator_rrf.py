@@ -69,3 +69,7 @@ class TestValidatorRRF(unittest.TestCase):
         
         # Assert the similarity score is derived from the top-ranked chunk (1.0 - 0.2 = 0.8)
         self.assertAlmostEqual(sim, 0.8)
+
+
+if __name__ == "__main__":
+    unittest.main()

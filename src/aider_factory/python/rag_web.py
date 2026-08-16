@@ -5,8 +5,11 @@
 import os
 import sys
 import requests
-import trafilatura
 from urllib.parse import urlparse
+try:
+    import trafilatura
+except ImportError:
+    trafilatura = None
 import rag_manager
 
 
@@ -153,7 +156,7 @@ def fetch_and_convert_url(url, job_dir):
     # Step C: Trafilatura HTML Extraction
     try:
         r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code == 200:
+        if r.status_code == 200 and trafilatura is not None:
             extracted = trafilatura.extract(
                 r.text,
                 output_format="markdown",
@@ -199,7 +202,7 @@ def fetch_and_convert_url(url, job_dir):
 
             extracted = trafilatura.extract(
                 html_content, output_format="markdown", include_tables=True
-            )
+            ) if trafilatura is not None else None
             if extracted and len(extracted.strip()) > 50:
                 out_path = os.path.join(job_dir, f"{base_stem}.md")
                 with open(out_path, "w", encoding="utf-8") as f:

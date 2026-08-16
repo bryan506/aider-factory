@@ -43,6 +43,48 @@ def test_no_rag_absolute_override():
     print("  ✅ --no-rag acts as an absolute override over --mode.")
 
 
+def test_explicit_collection_overrides_leaked_db_dir():
+    for k in ["ORACLE_COLLECTION", "ORACLE_RAG_DB_DIR", "ORACLE_EXPLICIT_COLLECTION"]:
+        os.environ.pop(k, None)
+
+    # Simulate a leaked environment variable from a previous run
+    os.environ["ORACLE_RAG_DB_DIR"] = "/some/leaked/path/Aider_Factory_DB/lancedb"
+
+    args = ["--collection", "Docling_DB", "query"]
+    oracle_agent._extract_overrides(args)
+
+    assert os.environ.get("ORACLE_RAG_DB_DIR") != "/some/leaked/path/Aider_Factory_DB/lancedb"
+    assert "Docling_DB" in os.environ.get("ORACLE_RAG_DB_DIR")
+    print("  ✅ --collection explicitly overrides leaked ORACLE_RAG_DB_DIR.")
+
+
+def test_explicit_collection_override_preserves_rag_db_dir():
+    for k in ["ORACLE_COLLECTION", "ORACLE_RAG_DB_DIR", "ORACLE_EXPLICIT_COLLECTION"]:
+        os.environ.pop(k, None)
+
+    args = ["--collection", "Custom_DB", "What is the leverage formula?"]
+    out, do_list, did_clear, _, _ = _extract_overrides(args)
+
+    assert os.environ.get("ORACLE_EXPLICIT_COLLECTION") == "1"
+    assert os.environ.get("ORACLE_COLLECTION") == "Custom_DB"
+    expected_db = os.path.join(os.getcwd(), ".aider_factory", "markdown", "lanceDB", "Custom_DB", "lancedb")
+    assert os.environ.get("ORACLE_RAG_DB_DIR") == expected_db
+
+    fake_yaml = {
+        "phases": [
+            {"enabled": True, "rag": {"collection_name": "Default_YAML_DB"}}
+        ]
+    }
+    with patch("os.path.exists", return_value=True), \
+         patch("builtins.open"), \
+         patch("yaml.safe_load", return_value=fake_yaml):
+        oracle_agent._ensure_oracle_config()
+
+    assert os.environ.get("ORACLE_COLLECTION") == "Custom_DB", "Explicit collection was overwritten by YAML default!"
+    assert os.environ.get("ORACLE_RAG_DB_DIR") == expected_db, "Explicit DB path was overwritten by YAML default!"
+    print("  ✅ explicit --collection override is preserved across _ensure_oracle_config.")
+
+
 def test_standard_mode():
     if "ORACLE_RETRIEVE_MODE" in os.environ:
         del os.environ["ORACLE_RETRIEVE_MODE"]
@@ -54,6 +96,47 @@ def test_standard_mode():
     assert os.environ.get("ORACLE_RETRIEVE_MODE") == "full_document"
     assert do_list is False
     print("  ✅ standard --mode parsing still works.")
+
+
+def test_oracle_xml_prompt_formatting():
+    for k in ["ORACLE_SESSION_FILE", "ORACLE_CONTEXT_FILES", "ORACLE_AGENT_MODEL", "ORACLE_RETRIEVE_MODE"]:
+        os.environ.pop(k, None)
+
+    # Isolate session to prevent reading leaked user sessions
+    os.environ["ORACLE_SESSION_FILE"] = os.path.join(tempfile.gettempdir(), "isolated_test_session_xml.json")
+
+    ctx_file = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False)
+    ctx_file.write("System instructions")
+    ctx_file.close()
+
+    os.environ["ORACLE_CONTEXT_FILES"] = ctx_file.name
+    os.environ["ORACLE_AGENT_MODEL"] = "mock-model"
+    os.environ["ORACLE_RETRIEVE_MODE"] = "top_k"
+
+    captured_kwargs = []
+    def mock_completion(**kwargs):
+        captured_kwargs.append(kwargs)
+        return {"choices": [{"message": {"content": "Mock answer"}}], "usage": {}}
+
+    try:
+        with patch.object(sys, "argv", ["oracle", "What is docling?"]), \
+             patch("litellm.completion", side_effect=mock_completion), \
+             patch("oracle_agent._retrieve", return_value="[source: doc | docling.md]\nDocling is a parser."):
+            oracle_agent.main()
+
+        user_msg = captured_kwargs[0]["messages"][1]["content"]
+        assert "<project_files>" in user_msg
+        assert "<knowledge_base>" in user_msg
+        assert "<question>" in user_msg
+        assert "System instructions" in user_msg
+        assert "Docling is a parser." in user_msg
+        print("  ✅ Oracle correctly formats prompts with XML tags.")
+    finally:
+        os.remove(ctx_file.name)
+        if os.path.exists(os.environ["ORACLE_SESSION_FILE"]):
+            os.remove(os.environ["ORACLE_SESSION_FILE"])
+        for k in ["ORACLE_SESSION_FILE", "ORACLE_CONTEXT_FILES", "ORACLE_AGENT_MODEL", "ORACLE_RETRIEVE_MODE"]:
+            os.environ.pop(k, None)
 
 
 def test_oracle_session_context_not_duplicated():
@@ -101,7 +184,7 @@ def test_oracle_session_context_not_duplicated():
 
         # Turn 1 message includes CONTEXT block with retrieved chunk 1 and static context file
         t1_user_msg = captured_kwargs[0]["messages"][1]["content"]
-        assert "CONTEXT:" in t1_user_msg
+        assert "<knowledge_base>" in t1_user_msg
         assert "Important context file content" in t1_user_msg
         assert "Retrieved DB chunk 1" in t1_user_msg
 
@@ -121,6 +204,37 @@ def test_oracle_session_context_not_duplicated():
                 except OSError:
                     pass
         for k in ["ORACLE_SESSION_FILE", "ORACLE_CONTEXT_FILES", "ORACLE_AGENT_MODEL"]:
+            os.environ.pop(k, None)
+
+
+def test_oracle_prints_source_files_to_stderr():
+    for k in ["ORACLE_SESSION_FILE", "ORACLE_AGENT_MODEL", "ORACLE_RETRIEVE_MODE"]:
+        os.environ.pop(k, None)
+        
+    os.environ["ORACLE_SESSION_FILE"] = os.path.join(tempfile.gettempdir(), "isolated_test_session_stderr.json")
+    os.environ["ORACLE_AGENT_MODEL"] = "mock-model"
+    os.environ["ORACLE_RETRIEVE_MODE"] = "top_k"
+
+    def mock_completion(**kwargs):
+        return {"choices": [{"message": {"content": "Mock answer"}}], "usage": {}}
+
+    import io
+    captured_stderr = io.StringIO()
+
+    try:
+        with patch.object(sys, "argv", ["oracle", "query"]), \
+             patch("litellm.completion", side_effect=mock_completion), \
+             patch("oracle_agent._retrieve", return_value="[source: doc | docling_api.md]\nAPI details"), \
+             patch("sys.stderr", captured_stderr):
+            oracle_agent.main()
+
+        output = captured_stderr.getvalue()
+        assert "1 source chunk(s) from 1 file(s): docling_api.md" in output
+        print("  ✅ Oracle prints unique source filenames to stderr.")
+    finally:
+        if os.path.exists(os.environ["ORACLE_SESSION_FILE"]):
+            os.remove(os.environ["ORACLE_SESSION_FILE"])
+        for k in ["ORACLE_SESSION_FILE", "ORACLE_AGENT_MODEL", "ORACLE_RETRIEVE_MODE"]:
             os.environ.pop(k, None)
 
 
@@ -151,8 +265,12 @@ def test_oracle_passes_session_id():
 
 if __name__ == "__main__":
     test_no_rag_flag()
+    test_explicit_collection_overrides_leaked_db_dir()
+    test_explicit_collection_override_preserves_rag_db_dir()
     test_no_rag_absolute_override()
     test_standard_mode()
+    test_oracle_xml_prompt_formatting()
+    test_oracle_prints_source_files_to_stderr()
     test_oracle_session_context_not_duplicated()
     test_oracle_passes_session_id()
     print("\n🎉 All CLI Oracle Tests Passed!")

@@ -128,7 +128,11 @@ def _retrieve(query, k):
     prefix = os.environ.get("ORACLE_QUERY_PREFIX", "")
     type_filter = os.environ.get("ORACLE_TYPE_FILTER", "")
 
-    if not db_dir or not os.path.isdir(db_dir):
+    if not db_dir:
+        print("[oracle] WARNING: ORACLE_RAG_DB_DIR is not set. Cannot retrieve chunks.", file=sys.stderr)
+        return ""
+    if not os.path.isdir(db_dir):
+        print(f"[oracle] WARNING: RAG database directory does not exist: {db_dir}", file=sys.stderr)
         return ""
 
     if backend == "openai" and api_base:
@@ -136,7 +140,7 @@ def _retrieve(query, k):
         import requests
 
         try:
-            requests.get(f"{api_base}/models", timeout=2).raise_for_status()
+            requests.get(f"{api_base}/models", timeout=10).raise_for_status()
         except Exception as e:
             print(
                 f"[embed] endpoint unreachable at {api_base}: {e}; aborting.",
@@ -153,15 +157,11 @@ def _retrieve(query, k):
     except Exception:
         return ""
 
-    # Choose tables: a concrete collection -> single table; '*'/unset -> fuse all,
-    # optionally narrowed to one corpus by --type (deterministic name suffix).
+    # Choose tables: concrete collection -> single table/fused prefix; '*'/unset -> fuse all
     if collection and collection != "*":
         if collection in all_tables:
-            # Exact table name match (batch=false, literary review per-document tables).
             tables = [collection]
         else:
-            # batch=true: tables are named {collection}_{repo}_{type}.
-            # Prefix-match and fuse all tables belonging to this collection via RRF.
             tables = [t for t in all_tables if t.startswith(collection + "_")]
             if type_filter == "code":
                 tables = [t for t in tables if t.endswith("_code")]
@@ -367,7 +367,7 @@ def _run_auto():
             else _retrieve(instructions, k)
         )
 
-        # Zero-RAG fallback: append explicitly requested file contents if present
+        prompt = ""
         rf_str = os.environ.get("ORACLE_JOB_READ_FILES")
         if rf_str:
             _ctx = []
@@ -375,26 +375,26 @@ def _run_auto():
                 if os.path.isfile(rf):
                     try:
                         with open(rf, encoding="utf-8") as fh:
-                            _ctx.append(f"## {rf}\n```\n{fh.read()}\n```")
+                            _ctx.append(f"File: {rf}\n```\n{fh.read()}\n```")
                     except Exception:
                         pass
             if _ctx:
-                context = (context + "\n\n" if context else "") + "\n\n".join(_ctx)
+                prompt += "<project_files>\n" + "\n\n".join(_ctx) + "\n</project_files>\n\n"
 
-        if not context:
+        if context:
+            prompt += f"<knowledge_base>\n{context}\n</knowledge_base>\n\n"
+        else:
             print(
                 f"[oracle-job] WARNING: no context for collection '{collection}' "
                 f"(db: {db_dir}); answering from instructions only.",
                 file=sys.stderr,
             )
+
+        prompt += f"<instructions>\n{instructions}\n</instructions>"
+
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": f"CONTEXT:\n{context}\n\nINSTRUCTIONS:\n{instructions}"
-                if context
-                else instructions,
-            },
+            {"role": "user", "content": prompt},
         ]
         try:
             import litellm
@@ -697,9 +697,12 @@ def _extract_overrides(argv):
     if no_rag_forced:
         os.environ["ORACLE_RETRIEVE_MODE"] = "no_retrieve"
 
-    # Auto-derive DB from collection if not explicitly provided
+    # Auto-derive DB from collection. If the user passed --collection explicitly,
+    # it MUST override any leaked ORACLE_RAG_DB_DIR from the environment.
     coll = os.environ.get("ORACLE_COLLECTION")
-    if coll and not os.environ.get("ORACLE_RAG_DB_DIR"):
+    explicit_coll = os.environ.get("ORACLE_EXPLICIT_COLLECTION") == "1"
+    
+    if coll and (explicit_coll or not os.environ.get("ORACLE_RAG_DB_DIR")):
         # If the collection contains a slash, treat it as a global path
         if "/" in coll or "\\" in coll:
             abs_coll = os.path.abspath(os.path.normpath(coll))
@@ -758,17 +761,12 @@ def _list_files():
         print(f"[oracle] cannot connect to database: {e}", file=sys.stderr)
         return 1
 
-    has_prefix_tables = (
-        any(t.startswith(collection + "_") for t in all_tables)
-        if collection and collection != "*"
-        else False
-    )
-    if has_prefix_tables:
+    if collection and collection != "*":
         tables = [
             t for t in all_tables if t == collection or t.startswith(collection + "_")
         ]
     else:
-        tables = all_tables
+        tables = list(all_tables)
 
     if not tables:
         print(
@@ -846,17 +844,12 @@ def _remove_file(filename):
         print(f"[oracle] failed to connect to database: {e}", file=sys.stderr)
         return 1
 
-    has_prefix_tables = (
-        any(t.startswith(collection + "_") for t in all_tables)
-        if collection and collection != "*"
-        else False
-    )
-    if has_prefix_tables:
+    if collection and collection != "*":
         tables = [
             t for t in all_tables if t == collection or t.startswith(collection + "_")
         ]
     else:
-        tables = all_tables
+        tables = list(all_tables)
 
     total_deleted = 0
     print(
@@ -979,8 +972,8 @@ def _add_maintenance(action, paths):
     context_root = os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB")
 
     # 2. Resolve active configuration path automatically on disk
-    config_path = os.path.join(project_dir, ".aider_factory", ".env_auto_ocr.yml")
-    if not os.path.exists(config_path):
+    config_path = os.environ.get("ORACLE_CONFIG_FILE")
+    if not config_path or not os.path.exists(config_path):
         config_path = os.path.join(project_dir, ".aider_factory", ".env.yml")
     if not os.path.exists(config_path):
         config_path = os.path.join(project_dir, ".env.yml")
@@ -996,6 +989,9 @@ def _add_maintenance(action, paths):
     except Exception as e:
         print(f"[oracle] failed to load config: {e}", file=sys.stderr)
         return 1
+
+    project_dir = str(cfg.get("working_directory", project_dir))
+    context_root = os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB")
 
     endpoints = cfg.get("endpoints", {}) or {}
     
@@ -1098,16 +1094,18 @@ def _add_maintenance(action, paths):
         or global_rag.get("embed_model")
         or phase_models.get("embed_model", "BAAI/bge-m3")
     )
-    embed_backend = (
-        phase_rag.get("embed_backend")
-        or global_rag.get("embed_backend")
-        or ("openai" if "embedding" in embed_model.lower() else "sentence-transformers")
-    )
     embed_api_base = (
         phase_rag.get("embed_api_base")
         or global_rag.get("embed_api_base")
         or endpoints.get("embed_api_base")
     )
+    embed_backend = (
+        phase_rag.get("embed_backend")
+        or global_rag.get("embed_backend")
+        or ("openai" if "embedding" in embed_model.lower() else "sentence-transformers")
+    )
+    if embed_api_base and embed_backend == "sentence-transformers":
+        embed_backend = "openai"
 
     ocr_only_mode = os.environ.get("ORACLE_NO_RAG_INGEST") == "1"
     if ocr_only_mode:
@@ -1164,8 +1162,8 @@ def _add_web_maintenance(urls):
     project_dir = os.getcwd()
     context_root = os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB")
 
-    config_path = os.path.join(project_dir, ".aider_factory", ".env_auto_ocr.yml")
-    if not os.path.exists(config_path):
+    config_path = os.environ.get("ORACLE_CONFIG_FILE")
+    if not config_path or not os.path.exists(config_path):
         config_path = os.path.join(project_dir, ".aider_factory", ".env.yml")
     if not os.path.exists(config_path):
         config_path = os.path.join(project_dir, ".env.yml")
@@ -1180,6 +1178,9 @@ def _add_web_maintenance(urls):
     except Exception as e:
         print(f"[oracle] failed to load config: {e}", file=sys.stderr)
         return 1
+
+    project_dir = str(cfg.get("working_directory", project_dir))
+    context_root = os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB")
 
     endpoints = cfg.get("endpoints", {}) or {}
     phases = cfg.get("phases", []) or []
@@ -1278,16 +1279,18 @@ def _add_web_maintenance(urls):
         or global_rag.get("embed_model")
         or phase_models.get("embed_model", "BAAI/bge-m3")
     )
-    embed_backend = (
-        phase_rag.get("embed_backend")
-        or global_rag.get("embed_backend")
-        or ("openai" if "embedding" in embed_model.lower() else "sentence-transformers")
-    )
     embed_api_base = (
         phase_rag.get("embed_api_base")
         or global_rag.get("embed_api_base")
         or endpoints.get("embed_api_base")
     )
+    embed_backend = (
+        phase_rag.get("embed_backend")
+        or global_rag.get("embed_backend")
+        or ("openai" if "embedding" in embed_model.lower() else "sentence-transformers")
+    )
+    if embed_api_base and embed_backend == "sentence-transformers":
+        embed_backend = "openai"
 
     print(
         f"[oracle] Incremental LanceDB ingestion for collection '{collection}' (model={embed_model}, backend={embed_backend})...",
@@ -1362,10 +1365,6 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
     # 2. Automatically load active phase files + toggles from YAML
     yaml_path = os.environ.get("ORACLE_CONFIG_FILE")
     if not yaml_path or not os.path.exists(yaml_path):
-        yaml_path = os.path.join(project_dir, ".aider_factory", ".env_ocr_rag.yml")
-    if not os.path.exists(yaml_path):
-        yaml_path = os.path.join(project_dir, ".aider_factory", ".env_auto_ocr.yml")
-    if not os.path.exists(yaml_path):
         yaml_path = os.path.join(project_dir, ".aider_factory", ".env.yml")
     if not os.path.exists(yaml_path):
         yaml_path = os.path.join(project_dir, ".env.yml")
@@ -1552,16 +1551,16 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
             cli_file_text = ("\n\n".join(_file_ctx)) if _file_ctx else ""
 
             orc_seed = ""
-            if context:
-                orc_seed += f"CONTEXT:\n{context}\n\n"
             if cli_file_text:
-                orc_seed += f"FILE:\n```\n{cli_file_text}\n```\n\n"
-            orc_seed += f"QUESTION: {question}"
+                orc_seed += f"<project_files>\n{cli_file_text}\n</project_files>\n\n"
+            if context:
+                orc_seed += f"<knowledge_base>\n{context}\n</knowledge_base>\n\n"
+            orc_seed += f"<question>\n{question}\n</question>"
         else:
             orc_seed = ""
             if context:
-                orc_seed += f"CONTEXT:\n{context}\n\n"
-            orc_seed += f"NEW QUESTION: {question}"
+                orc_seed += f"<knowledge_base>\n{context}\n</knowledge_base>\n\n"
+            orc_seed += f"<new_question>\n{question}\n</new_question>"
 
         oracle_messages.append({"role": "user", "content": orc_seed})
 
@@ -1687,17 +1686,17 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
             if turn == 0:
                 orc_msg = ""
                 if loop_context:
-                    orc_msg += f"ADDITIONAL CONTEXT FOR PROPOSAL:\n{loop_context}\n\n"
+                    orc_msg += f"<additional_knowledge_base>\n{loop_context}\n</additional_knowledge_base>\n\n"
                 orc_msg += (
                     "Review the Architect's proposal against the context and "
                     "files provided above.\n\n"
-                    f"ARCHITECT PROPOSAL:\n{arch_text}"
+                    f"<architect_proposal>\n{arch_text}\n</architect_proposal>"
                 )
             else:
                 orc_msg = ""
                 if loop_context:
-                    orc_msg += f"ADDITIONAL CONTEXT FOR REVISED PROPOSAL:\n{loop_context}\n\n"
-                orc_msg += f"ARCHITECT PROPOSAL (revised):\n{arch_text}"
+                    orc_msg += f"<additional_knowledge_base>\n{loop_context}\n</additional_knowledge_base>\n\n"
+                orc_msg += f"<revised_architect_proposal>\n{arch_text}\n</revised_architect_proposal>"
             oracle_messages.append({"role": "user", "content": orc_msg})
 
             try:
@@ -1771,16 +1770,9 @@ def _ensure_oracle_config():
     if os.environ.get("LITELLM_API_KEY"):
         os.environ.setdefault("ORACLE_AGENT_API_KEY", os.environ["LITELLM_API_KEY"])
 
-    if os.environ.get("ORACLE_AGENT_MODEL") and os.environ.get("ORACLE_EMBED_BACKEND"):
-        return
-
     project_dir = os.getcwd()
     yaml_path = os.environ.get("ORACLE_CONFIG_FILE")
     if not yaml_path or not os.path.exists(yaml_path):
-        yaml_path = os.path.join(project_dir, ".aider_factory", ".env_ocr_rag.yml")
-    if not os.path.exists(yaml_path):
-        yaml_path = os.path.join(project_dir, ".aider_factory", ".env_auto_ocr.yml")
-    if not os.path.exists(yaml_path):
         yaml_path = os.path.join(project_dir, ".aider_factory", ".env.yml")
     if not os.path.exists(yaml_path):
         yaml_path = os.path.join(project_dir, ".env.yml")
@@ -1793,6 +1785,7 @@ def _ensure_oracle_config():
         with open(yaml_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
 
+        project_dir = str(config.get("working_directory", project_dir))
         endpoints = config.get("endpoints", {}) or {}
         global_rag = config.get("rag", {}) or {}
         phases = config.get("phases", []) or []
@@ -1816,15 +1809,47 @@ def _ensure_oracle_config():
         if not active_phase and phases:
             active_phase = next((p for p in phases if p.get("enabled", True)), phases[0])
 
+        explicit_coll = os.environ.get("ORACLE_EXPLICIT_COLLECTION") == "1"
+        if not explicit_coll:
+            yaml_coll = (active_phase.get("rag") or {}).get("collection_name") if active_phase else None
+            if yaml_coll:
+                os.environ["ORACLE_COLLECTION"] = yaml_coll
+                os.environ["ORACLE_RAG_DB_DIR"] = os.path.join(
+                    project_dir, ".aider_factory", "markdown", "lanceDB", yaml_coll, "lancedb"
+                )
+        else:
+            # If explicit collection is a local name (no slashes), ensure it respects the YAML working_directory
+            coll = os.environ.get("ORACLE_COLLECTION")
+            if coll and "/" not in coll and "\\" not in coll:
+                os.environ["ORACLE_RAG_DB_DIR"] = os.path.join(
+                    project_dir, ".aider_factory", "markdown", "lanceDB", coll, "lancedb"
+                )
+
         phase_models = (active_phase.get("models") or {}) if active_phase else {}
         phase_rag = (active_phase.get("rag") or {}) if active_phase else {}
 
         rag_agent = phase_models.get("rag_agent") or config.get("models", {}).get("rag_agent", "gemini/gemini-3.6-flash")
         arch_agent = phase_models.get("architect_agent") or config.get("models", {}).get("architect_agent", rag_agent)
 
-        embed_model = phase_rag.get("embed_model") or global_rag.get("embed_model", "qwen3-embedding-8b-8k:LATEST")
-        embed_backend = phase_rag.get("embed_backend") or global_rag.get("embed_backend", "openai")
-        embed_api_base = phase_rag.get("embed_api_base") or global_rag.get("embed_api_base") or endpoints.get("embed_api_base")
+        embed_model = (
+            phase_models.get("embed_model")
+            or phase_rag.get("embed_model")
+            or global_rag.get("embed_model")
+            or config.get("models", {}).get("embed_model", "qwen3-embedding-8b-8k:LATEST")
+        )
+        embed_api_base = (
+            phase_rag.get("embed_api_base")
+            or global_rag.get("embed_api_base")
+            or endpoints.get("embed_api_base")
+        )
+        embed_backend = (
+            phase_rag.get("embed_backend")
+            or global_rag.get("embed_backend")
+            or phase_models.get("embed_backend")
+            or ("openai" if embed_api_base else "sentence-transformers")
+        )
+        if embed_api_base and embed_backend == "sentence-transformers":
+            embed_backend = "openai"
 
         os.environ["ORACLE_AGENT_MODEL"] = rag_agent
         os.environ["ORACLE_ARCHITECT_MODEL"] = arch_agent
@@ -1833,9 +1858,9 @@ def _ensure_oracle_config():
         if embed_api_base:
             os.environ["ORACLE_EMBED_API_BASE"] = embed_api_base
         if "gemini/" not in rag_agent and endpoints.get("rag_agent_api"):
-            os.environ.setdefault("ORACLE_AGENT_API_BASE", endpoints.get("rag_agent_api"))
+            os.environ["ORACLE_AGENT_API_BASE"] = endpoints.get("rag_agent_api")
         if "gemini/" not in arch_agent and endpoints.get("architect_api_base"):
-            os.environ.setdefault("ORACLE_ARCHITECT_API_BASE", endpoints.get("architect_api_base"))
+            os.environ["ORACLE_ARCHITECT_API_BASE"] = endpoints.get("architect_api_base")
     except Exception:
         pass
 
@@ -1949,6 +1974,7 @@ def main():
             context = _retrieve(question, k)
 
         # 2. Gate ONLY static context file injection to Turn 1 (prevents token inflation)
+        prompt = ""
         if not _session_loaded:
             rf_str = os.environ.get("ORACLE_JOB_READ_FILES") or os.environ.get(
                 "ORACLE_CONTEXT_FILES"
@@ -1959,20 +1985,18 @@ def main():
                     if rf and os.path.isfile(rf):
                         try:
                             with open(rf, encoding="utf-8") as fh:
-                                _ctx.append(f"## {rf}\n```\n{fh.read()}\n```")
+                                _ctx.append(f"File: {rf}\n```\n{fh.read()}\n```")
                         except Exception:
                             pass
                 if _ctx:
-                    context = (context + "\n\n" if context else "") + "\n\n".join(_ctx)
+                    prompt += "<project_files>\n" + "\n\n".join(_ctx) + "\n</project_files>\n\n"
 
-        messages.append(
-            {
-                "role": "user",
-                "content": f"CONTEXT:\n{context}\n\nQUESTION:\n{question}"
-                if context
-                else question,
-            }
-        )
+        if context:
+            prompt += f"<knowledge_base>\n{context}\n</knowledge_base>\n\n"
+
+        prompt += f"<question>\n{question}\n</question>"
+
+        messages.append({"role": "user", "content": prompt})
         try:
             import litellm
 
@@ -2007,8 +2031,15 @@ def main():
 
     # Status -> stderr; answer -> stdout (folds cleanly into the aider chat).
     nchunks = context.count("[source:") if context else 0
+    if context:
+        import re
+        sources = set(re.findall(r"\[source: (?:.*? \| )?(.*?)(?::\d+-\d+)?\]", context))
+        src_str = f" from {len(sources)} file(s): {', '.join(sorted(sources)[:5])}" + ("..." if len(sources) > 5 else "") if sources else ""
+    else:
+        src_str = ""
+
     print(
-        f"[oracle] {nchunks} source chunk(s) · mode={mode} · model={model}",
+        f"[oracle] {nchunks} source chunk(s){src_str} · mode={mode} · model={model}",
         file=sys.stderr,
     )
     if sys.stdout.isatty() or os.environ.get("FORCE_COLOR"):

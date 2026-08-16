@@ -56,3 +56,7 @@ class TestE2EClaimsOnly(unittest.TestCase):
         self.assertIn("all claims grounded", result.stderr)
         # TRUE E2E ASSERTION: Stdout must contain the summary
         self.assertIn("all claims grounded", result.stdout, "Stdout should contain the summary when --no-print is omitted")
+
+
+if __name__ == "__main__":
+    unittest.main()

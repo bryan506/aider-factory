@@ -65,3 +65,7 @@ class TestOracleClaimsValidation(unittest.TestCase):
         
         # Validator should not be called
         self.assertFalse(mock_run.called)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -251,6 +251,9 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         retrieval_mode: top_k # no_retrieve, top_k, or full_document
         run_ocr_rag: false # can turn off/on to skip OCR step
         vectordb_overwrite: false # rewrite all documents to lanceDB
+        use_docling: true # fast-path digital document extraction (PDF, DOCX, PPTX, XLSX, HTML)
+        docling_do_ocr: true # internal OCR for hybrid/image pages in Docling
+        docling_timeout: null # Timeout in seconds for Docling conversion (null = unlimited)
         ocr_prompt: "Extract text, tables, math, code, and documentation into clean Markdown. Preserve all structural integrity."
         query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\nQuery: " # prefix prepended to embedding query
         chunk_size_chars: 800 # Max characters per text chunk
@@ -338,6 +341,10 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
 #   true = shared corpus table (coll_repo_code). false = isolated per-doc table.
 #   Use batch:true for codebase/library search; batch:false for per-paper reviews.
 #
+# rag.use_docling / rag.docling_do_ocr / rag.docling_timeout
+#   use_docling: true enables isolated high-fidelity Docling extraction for digital PDFs, DOCX, PPTX, XLSX, HTML, and AsciiDoc documents.
+#   docling_do_ocr: true enables internal OCR for hybrid/scanned pages. docling_timeout specifies max runtime per document.
+
 # rag.code_chunk_size
 #   Character limit for Tree-Sitter AST code chunks (default: 2000).
 #
@@ -374,6 +381,9 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
 # --- Cloud / API Models (require API keys set as environment variables) ---
 # gemini/gemini-3.1-pro-preview           High capability, long context (GEMINI_API_KEY)
 # gemini/gemini-3.5-flash                 Fast iteration and test edits (GEMINI_API_KEY)
+# gemini/gemini-3.7-flash                 High capability with reasoning_effort support (GEMINI_API_KEY)
+# lm_studio/qwen3.8-27B-90k-think:LATEST  Local high-capacity model with 8192 thinking tokens
+# lm_studio/qwen3.8-27B-90k-q5think:LATEST Local quantized model with 8192 thinking tokens
 # github_copilot/gpt-5.4                  GitHub Copilot (Copilot auth)
 # vertex_ai/claude-3-7-sonnet@20250219    GCP Vertex AI Claude 3.7 (GCP Auth)
 

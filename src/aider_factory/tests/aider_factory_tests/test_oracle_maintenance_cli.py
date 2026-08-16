@@ -134,17 +134,21 @@ def test_lancedb_operations():
     assert rows[0]["source_file"] == "R/aac.R"
     print("  [Integration] Surgical file delete (exact match) verified.")
 
+    def _current_tables(database):
+        _names = database.list_tables() if hasattr(database, "list_tables") else database.table_names()
+        return list(getattr(_names, "tables", _names))
+
     # 3. Test surgical file delete (suffix match)
     rc = _remove_file("aac.R")
     assert rc == 0
     # Since tbl1 became empty, it should have been dropped
-    assert t1_name not in db.table_names()
+    assert t1_name not in _current_tables(db)
     print(
         "  [Integration] Surgical file delete (suffix match) and empty table drop verified."
     )
 
     # Verify tbl3 (other_col_code) was NOT touched because it belongs to 'other_col'
-    assert t3_name in db.table_names()
+    assert t3_name in _current_tables(db)
     tbl3_opened = db.open_table(t3_name)
     assert tbl3_opened.count_rows() == 1
     print(
@@ -154,7 +158,7 @@ def test_lancedb_operations():
     # 4. Test removing a specific table
     rc = _remove_table(t2_name)
     assert rc == 0
-    assert t2_name not in db.table_names()
+    assert t2_name not in _current_tables(db)
     print("  [Integration] Table drop verified.")
 
     # 5. Test removing the entire database

@@ -41,3 +41,7 @@ class TestRagManagerNoRag(unittest.TestCase):
         
         # embed_texts should NEVER be called because pending.extend is skipped
         mock_embed.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

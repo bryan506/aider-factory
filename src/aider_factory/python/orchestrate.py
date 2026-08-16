@@ -304,27 +304,25 @@ class AiderFactory:
 
         # Resolve config paths: prioritize .aider_factory/ then fall back to root
         local_aider_factory_conf = os.path.join(root, ".aider_factory", ".aider.conf.yml")
+        root_aider_conf = os.path.join(root, ".aider.conf.yml")
         aider_conf = (
             local_aider_factory_conf
             if os.path.exists(local_aider_factory_conf)
-            else os.path.join(root, ".aider.conf.yml")
+            else (root_aider_conf if os.path.exists(root_aider_conf) else None)
         )
 
         local_aider_factory_settings = os.path.join(
             root, ".aider_factory", ".aider.model.settings.yml"
         )
+        root_aider_settings = os.path.join(root, ".aider.model.settings.yml")
         aider_settings = (
             local_aider_factory_settings
             if os.path.exists(local_aider_factory_settings)
-            else os.path.join(root, ".aider.model.settings.yml")
+            else (root_aider_settings if os.path.exists(root_aider_settings) else None)
         )
 
         cmd = [
             "aider",
-            "--config",
-            aider_conf,
-            "--model-settings-file",
-            aider_settings,
             "--no-check-model-accepts-settings",
             "--no-show-model-warnings",
             "--model",
@@ -348,6 +346,10 @@ class AiderFactory:
             "--message",
             message,
         ]
+        if aider_conf:
+            cmd.extend(["--config", aider_conf])
+        if aider_settings:
+            cmd.extend(["--model-settings-file", aider_settings])
         if history_file:
             cmd.extend(["--restore-chat-history", "--chat-history-file", history_file])
 
@@ -455,12 +457,9 @@ class AiderFactory:
             prompt = pre_assess_prompt
             # Code mode: append the full file contents to the pre-assessment
             # prompt so the oracle sees the same source files the architect
-            # reads via --read.  Without this, the pre_assess_prompt branch
-            # short-circuits the code-mode elif below, where file injection
-            # normally lives (gated by `if not turn`).  Regression was
-            # introduced when the generalized pre_assess_prompt parameter
-            # was added above the code-mode branch.
+            # reads via --read.
             if d.get("mode") == "code" and not turn:
+                _files = []
                 for _rf in d.get("read_files") or []:
                     _full = (
                         _rf
@@ -470,20 +469,21 @@ class AiderFactory:
                     if os.path.isfile(_full):
                         try:
                             with open(_full, encoding="utf-8") as _fh:
-                                prompt += (
-                                    "\n\n## " + _rf + "\n```\n" + _fh.read() + "\n```"
-                                )
+                                _files.append(f"File: {_rf}\n```\n{_fh.read()}\n```")
                         except Exception:
                             pass
+                if _files:
+                    prompt += "\n\n<project_files>\n" + "\n\n".join(_files) + "\n</project_files>"
         elif d.get("mode") == "code":
             # Build code context block: failure log + full file contents.
             _ctx = []
             _fl = d.get("failure_log")
             if _fl:
-                _ctx.append("## Failing test output\n```\n" + _fl[-4000:] + "\n```")
+                _ctx.append("<failing_test_output>\n```\n" + _fl[-4000:] + "\n```\n</failing_test_output>")
 
             # Pass the full file contents ONLY on Turn 1 to warm up Oracle's KV cache.
             if not turn:
+                _files = []
                 for _rf in d.get("read_files") or []:
                     _full = (
                         _rf
@@ -493,9 +493,11 @@ class AiderFactory:
                     if os.path.isfile(_full):
                         try:
                             with open(_full, encoding="utf-8") as _fh:
-                                _ctx.append(f"## {_rf}\n```\n{_fh.read()}\n```")
+                                _files.append(f"File: {_rf}\n```\n{_fh.read()}\n```")
                         except Exception:
                             pass
+                if _files:
+                    _ctx.append("<project_files>\n" + "\n\n".join(_files) + "\n</project_files>")
             _ctx_block = ("\n\n" + "\n\n".join(_ctx)) if _ctx else ""
 
             prompt = (
@@ -508,8 +510,9 @@ class AiderFactory:
                 "is sound and grounded, or 'VERDICT: OBJECT - <specific reason>' "
                 "if not."
                 + _ctx_block
-                + "\n\n## Architect's analysis and PROPOSAL\n"
+                + "\n\n<architect_proposal>\n"
                 + (arch_text or "")
+                + "\n</architect_proposal>"
             )
         else:
             _file_ctx = []
@@ -523,10 +526,10 @@ class AiderFactory:
                     if os.path.isfile(_full):
                         try:
                             with open(_full, encoding="utf-8") as _fh:
-                                _file_ctx.append(f"## {_rf}\n```\n{_fh.read()}\n```")
+                                _file_ctx.append(f"File: {_rf}\n```\n{_fh.read()}\n```")
                         except Exception:
                             pass
-            _file_block = ("\n\n" + "\n\n".join(_file_ctx)) if _file_ctx else ""
+            _file_block = ("\n\n<project_files>\n" + "\n\n".join(_file_ctx) + "\n</project_files>") if _file_ctx else ""
 
             prompt = (
                 "You are the Knowledge Oracle reviewing the Architect's analysis "
@@ -536,8 +539,9 @@ class AiderFactory:
                 "End with EXACTLY one line: 'VERDICT: AGREE' if you concur, "
                 "or 'VERDICT: OBJECT - <specific reason>' if not."
                 + _file_block
-                + "\n\n"
+                + "\n\n<architect_proposal>\n"
                 + (arch_text or "")
+                + "\n</architect_proposal>"
             )
 
         # Write prompt to a temp file instead of passing as a CLI arg to avoid
@@ -1051,29 +1055,27 @@ class AiderFactory:
 
             # Resolve config paths: prioritize .aider_factory/ then fall back to root
             local_aider_factory_conf = os.path.join(root, ".aider_factory", ".aider.conf.yml")
+            root_aider_conf = os.path.join(root, ".aider.conf.yml")
             aider_conf = (
                 local_aider_factory_conf
                 if os.path.exists(local_aider_factory_conf)
-                else os.path.join(root, ".aider.conf.yml")
+                else (root_aider_conf if os.path.exists(root_aider_conf) else None)
             )
 
             local_aider_factory_settings = os.path.join(
                 root, ".aider_factory", ".aider.model.settings.yml"
             )
+            root_aider_settings = os.path.join(root, ".aider.model.settings.yml")
             aider_settings = (
                 local_aider_factory_settings
                 if os.path.exists(local_aider_factory_settings)
-                else os.path.join(root, ".aider.model.settings.yml")
+                else (root_aider_settings if os.path.exists(root_aider_settings) else None)
             )
 
             cmd = [
                 "aider",
-                "--config",
-                aider_conf,
                 "--no-check-model-accepts-settings",
                 "--no-show-model-warnings",
-                "--model-settings-file",
-                aider_settings,
                 "--model",
                 task.model,
                 "--editor-model",
@@ -1082,6 +1084,10 @@ class AiderFactory:
                 if (attempt > 0 and task.fallback_editor_model)
                 else task.editor_model,
             ]
+            if aider_conf:
+                cmd.extend(["--config", aider_conf])
+            if aider_settings:
+                cmd.extend(["--model-settings-file", aider_settings])
 
             # Determine if we should use the message file or check test failures.
             # We use the plan (message_file) only on the first attempt.

@@ -24,10 +24,13 @@ PERSONA_PROMPT = (
     "Your sole purpose is to assist the user in bootstrapping, configuring, and optimizing their "
     "multi-phase DAG pipeline execution configurations (.env.yml files), Aider templates, and active "
     "environment variables.\n\n"
-    "You communicate with absolute precision, objectivity, and technical clarity. You prioritize "
-    "deterministic, minimal-delta edits to configurations, preserving all inline comments and "
-    "inactive blocks unless explicitly instructed to change them. When asked to modify a configuration, "
-    "return ONLY the complete, updated YAML content inside a markdown code block."
+    "You have access to the user's active .env.yml pipeline configuration inside the <active_configuration> "
+    "block. When answering questions about the active pipeline, phases, agents, models, or target files, "
+    "inspect the <active_configuration> block. You communicate with absolute precision, objectivity, and "
+    "technical clarity. You prioritize deterministic, minimal-delta edits to configurations, preserving all "
+    "inline comments and inactive blocks unless explicitly instructed to change them. When asked to modify "
+    "a configuration, apply the requested changes to <active_configuration> and return ONLY the complete, "
+    "updated YAML content inside a markdown code block."
 )
 
 TERMINAL_PERSONA_PROMPT = (
@@ -63,8 +66,9 @@ def _discover_cluster_config():
             model_ids = [m["id"] if "/" in m["id"] else f"openai/{m['id']}" for m in models]
             config["available_models"] = model_ids
             if model_ids:
-                config["architect_agent"] = model_ids[0]
-                config["editor_agent"] = model_ids[0]
+                chosen = next((m for m in model_ids if "27b" in m.lower()), model_ids[0])
+                config["architect_agent"] = chosen
+                config["editor_agent"] = chosen
     except Exception as e:
         print(f"[bootstrap] Warning: Could not query /models: {e}", file=sys.stderr)
 
@@ -404,51 +408,46 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         system_prompt = TERMINAL_PERSONA_PROMPT if terminal_mode else PERSONA_PROMPT
         messages.append({"role": "system", "content": system_prompt})
 
-    history_text = "".join([m.get("content", "") for m in messages])
+    history_text = "".join([m.get("content", "") for m in messages if m.get("role") != "system"])
     persistent_additions = ""
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
-    if not terminal_mode and "YAML DOCUMENTATION:" not in history_text:
+    if not terminal_mode and "<yaml_documentation>" not in history_text:
         yaml_docs_path = os.path.join(pkg_dir, "markdown", "yaml_docs_sample.md")
-        try:
-            with open(yaml_docs_path, "r", encoding="utf-8") as f:
-                yaml_docs = f.read()
-            if file_path and os.path.exists(file_path):
-                with open(file_path, "r", encoding="utf-8") as f:
-                    active_config = f.read()
-            else:
-                master_env_path = os.path.join(pkg_dir, "default_configs", "env.yml")
-                with open(master_env_path, "r", encoding="utf-8") as f:
-                    active_config = f.read()
-            persistent_additions += f"YAML DOCUMENTATION:\n{yaml_docs[:15000]}\n\nACTIVE CONFIGURATION:\n{active_config}\n\n"
-        except Exception:
-            pass
+        yaml_docs = ""
+        if os.path.exists(yaml_docs_path):
+            try:
+                with open(yaml_docs_path, "r", encoding="utf-8") as f:
+                    yaml_docs = f.read()
+            except Exception:
+                pass
+        persistent_additions += f"<yaml_documentation>\n{yaml_docs[:15000]}\n</yaml_documentation>\n\n"
 
-    if (master_mode or expert_mode) and "SKILLS REFERENCE:" not in history_text:
+    if (master_mode or expert_mode) and "<skills_reference>" not in history_text:
         skills_dir = os.path.join(pkg_dir, "markdown", "skills")
         skills_content = ""
         if os.path.exists(skills_dir) and os.path.isdir(skills_dir):
             for skill_file in sorted(os.listdir(skills_dir)):
                 if skill_file.endswith(".md"):
                     with open(os.path.join(skills_dir, skill_file), "r", encoding="utf-8") as f:
-                        skills_content += f"\n### {skill_file}\n{f.read()}\n"
+                        skills_content += f"\nFile: {skill_file}\n```\n{f.read()}\n```\n"
         if skills_content:
-            persistent_additions += f"SKILLS REFERENCE:\n{skills_content}\n\n"
+            persistent_additions += f"<skills_reference>\n{skills_content.strip()}\n</skills_reference>\n\n"
 
-    if expert_mode and "FACTORY SERVICE MANUAL:" not in history_text:
+    if expert_mode and "<factory_service_manual>" not in history_text:
         manual_path = os.path.join(pkg_dir, "markdown", "factory_service_manual.md")
         if os.path.exists(manual_path):
             with open(manual_path, "r", encoding="utf-8") as f:
                 manual_docs = f.read()
-            persistent_additions += f"FACTORY SERVICE MANUAL:\n{manual_docs}\n\n"
+            persistent_additions += f"<factory_service_manual>\n{manual_docs}\n</factory_service_manual>\n\n"
 
-    if repo_map and "REPOSITORY MAP:" not in history_text:
+    if repo_map and "<repository_map>" not in history_text:
         repo_map_path = os.path.join(".aider_factory", "static_repo_map.md")
         if os.path.exists(repo_map_path):
             try:
                 with open(repo_map_path, "r", encoding="utf-8") as f:
                     repo_map_content = f.read()
-                persistent_additions += f"REPOSITORY MAP:\n{repo_map_content}\n\n"
+                persistent_additions += f"<repository_map>\n{repo_map_content}\n</repository_map>\n\n"
             except Exception:
                 pass
         else:
@@ -461,13 +460,32 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
             if os.path.exists(path):
                 try:
                     with open(path, "r", encoding="utf-8") as f:
-                        ctx_blocks.append(f"### File: {path}\n```\n{f.read()}\n```")
+                        ctx_blocks.append(f"File: {path}\n```\n{f.read()}\n```")
                 except Exception:
                     pass
         if ctx_blocks:
-            persistent_additions += "EXTRA CONTEXT FILES:\n" + "\n\n".join(ctx_blocks) + "\n\n"
+            persistent_additions += "<extra_context_files>\n" + "\n\n".join(ctx_blocks) + "\n</extra_context_files>\n\n"
 
-    user_msg_content = f"{persistent_additions}QUESTION:\n{instruction}" if persistent_additions else instruction
+    if not terminal_mode and "<active_configuration>" not in history_text:
+        active_config = ""
+        if file_path and os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    active_config = f.read()
+            except Exception:
+                pass
+        if not active_config:
+            master_env_path = os.path.join(pkg_dir, "default_configs", "env.yml")
+            if os.path.exists(master_env_path):
+                try:
+                    with open(master_env_path, "r", encoding="utf-8") as f:
+                        active_config = f.read()
+                except Exception:
+                    pass
+        if active_config:
+            persistent_additions += f"<active_configuration>\n{active_config}\n</active_configuration>\n\n"
+
+    user_msg_content = f"{persistent_additions}<question>\n{instruction}\n</question>" if persistent_additions else f"<question>\n{instruction}\n</question>"
     messages.append({"role": "user", "content": user_msg_content.strip()})
     
     llm_messages = list(messages)
@@ -482,8 +500,29 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         "OPENCODE_API_KEY": "openai/opencode",
         "OPENAI_API_KEY": "openai/gpt-4o"
     }
-    model = os.environ.get("AIDER_HELPER_MODEL") or model_map.get(key_name, "openai/gpt-4o")
+    model = os.environ.get("AIDER_HELPER_MODEL")
     api_base = os.environ.get("AIDER_HELPER_API_BASE")
+    
+    if api_base:
+        if not model or any(model.startswith(p) for p in ("gemini/", "anthropic/", "groq/", "openrouter/")):
+            try:
+                import requests
+                r = requests.get(f"{api_base.rstrip('/')}/models", headers={"Authorization": "Bearer sk-dummy"}, timeout=2)
+                if r.status_code == 200:
+                    m_list = r.json().get("data", [])
+                    m_ids = [m["id"] for m in m_list if "id" in m]
+                    favored = [m for m in m_ids if "27b" in m.lower()]
+                    m_id = favored[0] if favored else (m_ids[0] if m_ids else None)
+                    if m_id:
+                        model = m_id if "/" in m_id else f"openai/{m_id}"
+            except Exception:
+                pass
+            if not model or any(model.startswith(p) for p in ("gemini/", "anthropic/", "groq/", "openrouter/")):
+                model = "openai/qwen3.6-27b-90k:LATEST"
+        elif "/" not in model:
+            model = f"openai/{model}"
+    else:
+        model = model or model_map.get(key_name, "openai/gpt-4o")
     
     print(f"{_HELPER_COLOR}[aider-helper] Asking {model}...{_RESET}\n")
     try:
@@ -565,9 +604,15 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         messages.append({"role": "assistant", "content": reply_text})
         
         # Save session history directly
-        os.makedirs(os.path.dirname(session_file), exist_ok=True)
-        with open(session_file, "w", encoding="utf-8") as f:
-            json.dump(messages, f, ensure_ascii=False, indent=2)
+        session_dir = os.path.dirname(session_file)
+        if session_dir and os.path.exists(session_dir):
+            with open(session_file, "w", encoding="utf-8") as f:
+                json.dump(messages, f, ensure_ascii=False, indent=2)
+        elif not ask_mode:
+            if session_dir:
+                os.makedirs(session_dir, exist_ok=True)
+            with open(session_file, "w", encoding="utf-8") as f:
+                json.dump(messages, f, ensure_ascii=False, indent=2)
 
         # Hardcoded deterministic check: write back ONLY if ask_mode is False
         if not ask_mode:

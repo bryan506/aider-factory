@@ -21,6 +21,7 @@ If you want a simple, lightweight, and repeatable way to automate Aider without 
 
 - Fully customizable options through a simple `.env.yml` file to cater to your specific pipeline or workflow needs.
 - Easily define phase-based tasks, manage target/editable files, and run test-driven self-healing loops.
+- **Native Docling Multi-Format Ingestion**: High-fidelity extraction for digital PDFs, Office documents (`.docx`, `.pptx`, `.xlsx`), HTML, and AsciiDoc with structural metadata extraction, table structure preservation, and automatic Vision OCR fallback.
 
 ### 2. Modular, Standalone CLI Clients
 

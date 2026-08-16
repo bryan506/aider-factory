@@ -42,6 +42,19 @@ class TestSmartPathResolution(unittest.TestCase):
         expected_db = os.path.join(os.getcwd(), ".aider_factory", "markdown", "lanceDB", "local_coll", "lancedb")
         self.assertEqual(os.environ.get("ORACLE_RAG_DB_DIR"), expected_db)
 
+    def test_explicit_cli_collection_resolution_priority(self):
+        """Test that explicit CLI collection override takes priority over YAML config."""
+        args = ["--collection", "Explicit_DB"]
+        oracle_agent._extract_overrides(args)
+        
+        fake_cfg = {
+            "phases": [
+                {"enabled": True, "rag": {"collection_name": "YAML_Default_DB"}}
+            ]
+        }
+        resolved = oracle_agent._resolve_active_collection(fake_cfg)
+        self.assertEqual(resolved, "Explicit_DB")
+
     @patch("validator._run_claims_only")
     def test_validator_global_path_resolution(self, mock_run):
         """Test that Validator extracts the collection name and DB path from a global path."""
@@ -88,3 +101,7 @@ class TestSmartPathResolution(unittest.TestCase):
         self.assertEqual(val_args.collection, "yaml_coll")
         expected_db = os.path.join(os.getcwd(), ".aider_factory", "markdown", "lanceDB", "yaml_coll", "lancedb")
         self.assertEqual(val_args.db, expected_db)
+
+
+if __name__ == "__main__":
+    unittest.main()

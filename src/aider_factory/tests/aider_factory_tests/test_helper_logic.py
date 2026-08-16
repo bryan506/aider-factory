@@ -60,14 +60,14 @@ try:
          with open(tmp_session.name, "r") as f:
              sess_data_1 = json.load(f)
          assert len(sess_data_1) == 3, "Should initialize system + turn 1 prompt/response"
-         assert "YAML DOCUMENTATION:" in sess_data_1[1]["content"], "YAML must be persistently appended on Turn 1"
+         assert "<yaml_documentation>" in sess_data_1[1]["content"], "YAML must be persistently appended on Turn 1"
 
          # Turn 2 (Should append to stable message history list directly)
          bootstrap.run_query("instruction 2", tmp_yaml.name, "context_a.py", ask_mode=True)
          with open(tmp_session.name, "r") as f:
              sess_data_2 = json.load(f)
          assert len(sess_data_2) == 5, "Session must accumulate messages directly without hashing reset"
-         assert "YAML DOCUMENTATION:" not in sess_data_2[3]["content"], "YAML must NOT be appended again on Turn 2 to prevent bloat"
+         assert "<yaml_documentation>" not in sess_data_2[3]["content"], "YAML must NOT be appended again on Turn 2 to prevent bloat"
 
          # Test session clearing
          bootstrap.clear_helper_session()
@@ -175,8 +175,8 @@ try:
             master_data = json.load(f)
         
         assert len(master_data) == 3, "Master session should contain system + turn 1 prompt/response"
-        assert "SKILLS REFERENCE:" in master_data[1]["content"], "Master mode must append skills persistently"
-        assert "FACTORY SERVICE MANUAL:" not in master_data[1]["content"], "Master mode must NOT inject the Factory Service Manual"
+        assert "<skills_reference>" in master_data[1]["content"], "Master mode must append skills persistently"
+        assert "<factory_service_manual>" not in master_data[1]["content"], "Master mode must NOT inject the Factory Service Manual"
 
         # Turn 2: Follow-up without Master Mode
         bootstrap.run_query("follow up", tmp_master_yaml.name, "", ask_mode=True, master_mode=False)
@@ -184,8 +184,8 @@ try:
             master_data_2 = json.load(f)
             
         assert len(master_data_2) == 5, "Session must accumulate messages"
-        assert "SKILLS REFERENCE:" in master_data_2[1]["content"], "Skills reference must survive in Turn 1 history"
-        assert "SKILLS REFERENCE:" not in master_data_2[3]["content"], "Skills reference must NOT be duplicated in Turn 2"
+        assert "<skills_reference>" in master_data_2[1]["content"], "Skills reference must survive in Turn 1 history"
+        assert "<skills_reference>" not in master_data_2[3]["content"], "Skills reference must NOT be duplicated in Turn 2"
 
     print("✅ Master Mode Logic PASS")
 finally:
@@ -217,8 +217,8 @@ try:
             expert_data = json.load(f)
         
         assert len(expert_data) == 3, "Expert session should contain system + turn 1 prompt/response"
-        assert "SKILLS REFERENCE:" in expert_data[1]["content"], "Expert mode must append skills persistently"
-        assert "FACTORY SERVICE MANUAL:" in expert_data[1]["content"], "Expert mode must append manual persistently"
+        assert "<skills_reference>" in expert_data[1]["content"], "Expert mode must append skills persistently"
+        assert "<factory_service_manual>" in expert_data[1]["content"], "Expert mode must append manual persistently"
 
         # Turn 2: Follow-up without Expert Mode
         bootstrap.run_query("follow up", tmp_expert_yaml.name, "", ask_mode=True, expert_mode=False)
@@ -226,8 +226,8 @@ try:
             expert_data_2 = json.load(f)
             
         assert len(expert_data_2) == 5, "Session must accumulate messages"
-        assert "FACTORY SERVICE MANUAL:" in expert_data_2[1]["content"], "Manual must survive in Turn 1 history"
-        assert "FACTORY SERVICE MANUAL:" not in expert_data_2[3]["content"], "Manual must NOT be duplicated in Turn 2"
+        assert "<factory_service_manual>" in expert_data_2[1]["content"], "Manual must survive in Turn 1 history"
+        assert "<factory_service_manual>" not in expert_data_2[3]["content"], "Manual must NOT be duplicated in Turn 2"
 
     print("✅ Expert Mode Logic PASS")
 finally:
@@ -264,7 +264,7 @@ try:
             repo_map_data = json.load(f)
         
         assert len(repo_map_data) == 3, "Repo map session should contain system + turn 1 prompt/response"
-        assert "REPOSITORY MAP:" in repo_map_data[1]["content"], "Repo map mode must append repository map persistently"
+        assert "<repository_map>" in repo_map_data[1]["content"], "Repo map mode must append repository map persistently"
         assert "src/main.py" in repo_map_data[1]["content"], "Dummy repo map content must be present"
 
         # Turn 2: Follow-up without Repo Map Mode
@@ -273,8 +273,8 @@ try:
             repo_map_data_2 = json.load(f)
             
         assert len(repo_map_data_2) == 5, "Session must accumulate messages"
-        assert "REPOSITORY MAP:" in repo_map_data_2[1]["content"], "Repo map must survive in Turn 1 history"
-        assert "REPOSITORY MAP:" not in repo_map_data_2[3]["content"], "Repo map must NOT be duplicated in Turn 2"
+        assert "<repository_map>" in repo_map_data_2[1]["content"], "Repo map must survive in Turn 1 history"
+        assert "<repository_map>" not in repo_map_data_2[3]["content"], "Repo map must NOT be duplicated in Turn 2"
 
     print("✅ Repo Map Logic PASS")
 finally:
@@ -318,5 +318,26 @@ with patch("litellm.completion") as mock_completion, \
     assert "x-litellm-session-id" in kwargs["custom_headers"], "Session ID must be in headers"
     assert kwargs["custom_headers"]["x-litellm-session-id"] == bootstrap._PIPELINE_SESSION_ID, "Session ID must match pipeline ID"
 print("✅ Session ID Injection PASS")
+
+# 10. Test Ask & Terminal Mode Zero .aider_factory Directory Creation Invariant
+print("Starting Ask & Terminal Mode Zero Directory Creation Tests...")
+test_modes = [
+    ("ask_mode", {"ask_mode": True, "terminal_mode": False}),
+    ("terminal_mode", {"ask_mode": True, "terminal_mode": True}),
+    ("master_mode", {"ask_mode": True, "master_mode": True}),
+    ("expert_mode", {"ask_mode": True, "expert_mode": True}),
+]
+for name, kwargs in test_modes:
+    with tempfile.TemporaryDirectory() as tmp_clean_dir:
+        old_cwd = os.getcwd()
+        os.chdir(tmp_clean_dir)
+        try:
+            with patch("litellm.completion", return_value=mock_response), \
+                 patch("os.environ", {"GEMINI_API_KEY": "test-key"}):
+                bootstrap.run_query("Explain concepts", None, "", **kwargs)
+                assert not os.path.exists(".aider_factory"), f"{name} must NEVER create .aider_factory directory"
+        finally:
+            os.chdir(old_cwd)
+print("✅ Ask & Terminal Mode Zero Directory Creation PASS")
 
 print("\n🎉 All helper logic unit tests passed!")

@@ -117,3 +117,7 @@ class TestValidatorClaimsOnly(unittest.TestCase):
         self.assertTrue(args.claims_only)
         self.assertTrue(args.report.endswith("dummy_claims_report.md"))
         self.assertIn(".aider_factory", args.report)
+
+
+if __name__ == "__main__":
+    unittest.main()

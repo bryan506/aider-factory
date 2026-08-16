@@ -113,8 +113,9 @@ global_rag_agent_api = endpoints.get("rag_agent_api")
 global_grounding_api = endpoints.get("grounding_agent_api")
 
 # Find the first enabled phase to extract default RAG models if present
+global_models = config.get("models", {}) or {}
 first_enabled_phase = next((p for p in config.get("phases", []) if p.get("enabled", True)), {})
-phase_models = first_enabled_phase.get("models", {})
+phase_models = {**global_models, **(first_enabled_phase.get("models", {}) or {})}
 
 # --- RAG / Oracle globals: infrastructure + DEFAULTS ---
 DEFAULT_OCR_PROMPT = (
@@ -300,7 +301,9 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
         print(f"Phase '{phase_name}': All toggles False. Skipping.")
         continue
 
-    models = phase.get("models", {})
+    global_models = config.get("models", {}) or {}
+    phase_models = phase.get("models", {}) or {}
+    models = {**global_models, **phase_models}
     ARCHITECT_AGENT = models.get("architect_agent", "")
     EDITOR_AGENT = models.get("editor_agent", "")
     # RAG-only phases need not define a test editor; fall back to the main editor.
@@ -503,6 +506,9 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
             "ocr_parallel": int(rag_phase_cfg.get("ocr_parallel", rag_ocr_parallel)),
             "ocr_max_tokens": int(rag_phase_cfg.get("ocr_max_tokens", rag_ocr_max_tokens)),
             "batch": phase_batch,
+            "use_docling": bool(rag_phase_cfg.get("use_docling", True)),
+            "docling_do_ocr": bool(rag_phase_cfg.get("docling_do_ocr", True)),
+            "docling_timeout": rag_phase_cfg.get("docling_timeout") or global_rag.get("docling_timeout", None),
         }
 
     plans = phase.get("plans", {})

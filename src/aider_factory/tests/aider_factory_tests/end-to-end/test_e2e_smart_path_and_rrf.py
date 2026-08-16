@@ -66,3 +66,7 @@ class TestE2ESmartPathAndRRF(unittest.TestCase):
         self.assertEqual(chunks[0][0], "src/main.py")
         self.assertEqual(chunks[1][0], "docs/readme.md")
         self.assertAlmostEqual(sim, 0.9)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -139,7 +139,22 @@ def _calculate_cer(reference: str, hypothesis: str) -> float:
 
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp", ".gif"}
-DOC_EXTS = {".pdf", ".xps", ".oxps", ".epub", ".mobi", ".fb2", ".cbz", ".svg", ".txt"}
+DOC_EXTS = {
+    ".pdf",
+    ".xps",
+    ".oxps",
+    ".epub",
+    ".mobi",
+    ".fb2",
+    ".cbz",
+    ".svg",
+    ".txt",
+    ".docx",
+    ".pptx",
+    ".xlsx",
+    ".html",
+    ".asciidoc",
+}
 
 CODE_EXTS_DEFAULT = {
     ".r",
@@ -520,7 +535,8 @@ def _chunk(markdown_text, chunk_size_chars=800, chunk_overlap_chars=100):
     )
 
     sections = MarkdownHeaderTextSplitter(
-        headers_to_split_on=[("#", "H1"), ("##", "H2"), ("###", "H3")]
+        headers_to_split_on=[("#", "H1"), ("##", "H2"), ("###", "H3")],
+        strip_headers=False,
     ).split_text(markdown_text)
     sizer = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size_chars, chunk_overlap=chunk_overlap_chars
@@ -626,6 +642,9 @@ def ingest(
     ocr_parallel=1,
     batch=True,
     ocr_only=False,
+    use_docling=True,
+    docling_do_ocr=True,
+    docling_timeout=None,
     **kwargs,
 ):
     import lancedb
@@ -696,6 +715,9 @@ def ingest(
         ocr_max_tokens=ocr_max_tokens,
         _dim=_dim,
         ocr_only=ocr_only,
+        use_docling=use_docling,
+        docling_do_ocr=docling_do_ocr,
+        docling_timeout=docling_timeout,
     )
 
     def _ocr_to_markdown(
@@ -708,6 +730,9 @@ def ingest(
         ocr_max_retries,
         ocr_parallel=1,
         ocr_max_tokens=2048,
+        use_docling=True,
+        docling_do_ocr=True,
+        docling_timeout=None,
     ):
         md_path = os.path.join(
             os.path.dirname(doc_path),
@@ -719,6 +744,56 @@ def ingest(
             )
             with open(md_path, "r", encoding="utf-8") as f:
                 return f.read()
+
+        ext = os.path.splitext(doc_path)[1].lower()
+        
+        # Smart Routing: Skip raw images. Try Docling for digital PDFs and other docs when use_docling is True.
+        if use_docling and ext not in IMAGE_EXTS:
+            should_try_docling = True
+            
+            # Deterministic check for PDFs: only bypass Docling for scans if native OCR is disabled
+            if ext == ".pdf" and not docling_do_ocr:
+                should_try_docling = False
+                try:
+                    import fitz
+                    doc = fitz.open(doc_path)
+                    text_length = 0
+                    for page in doc:
+                        text_length += len(page.get_text("text").strip())
+                        if text_length > 100:
+                            should_try_docling = True
+                            break
+                except Exception:
+                    pass
+
+            if should_try_docling:
+                sys.stderr.write(f"       [Docling] Attempting isolated fast-path parse for {os.path.basename(doc_path)}...\n")
+                sys.stderr.flush()
+
+                runner_script = os.path.abspath(
+                    os.path.join(os.path.dirname(__file__), "docling_runner.py")
+                )
+                import subprocess
+                try:
+                    do_ocr_arg = "true" if docling_do_ocr else "false"
+                    result = subprocess.run(
+                        ["uv", "run", "--isolated", "--with", "docling>=2.0.0", "python", runner_script, doc_path, md_path, do_ocr_arg],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=docling_timeout,
+                    )
+                    if result.returncode == 0:
+                        sys.stderr.write("       [Docling] Success! Extracted natively via isolated env.\n")
+                        sys.stderr.flush()
+                        with open(md_path, "r", encoding="utf-8") as f:
+                            return f.read()
+                    else:
+                        sys.stderr.write(f"       [Docling] Isolated parse failed (code {result.returncode}). Falling back to Vision OCR.\n")
+                        sys.stderr.flush()
+                except Exception as e:
+                    sys.stderr.write(f"       [Docling] Subprocess failed: {e}. Falling back to Vision OCR.\n")
+                    sys.stderr.flush()
 
         pages = _rasterize(doc_path, img_dir)
         if not pages:
@@ -840,6 +915,9 @@ def ingest(
                 cfg["ocr_max_retries"],
                 cfg["ocr_parallel"],
                 cfg["ocr_max_tokens"],
+                use_docling=cfg.get("use_docling", True),
+                docling_do_ocr=cfg.get("docling_do_ocr", True),
+                docling_timeout=cfg.get("docling_timeout"),
             )
             chunks = _chunk(md, cfg["chunk_size_chars"], cfg["chunk_overlap_chars"])
 
@@ -1033,16 +1111,31 @@ def _from_config(yaml_path):
     active_phase = next((ph for ph in phases if ph.get("enabled")), {}) if phases else {}
     phase_models = active_phase.get("models", {}) or {}
     phase_rag = active_phase.get("rag", {}) or {}
-    collection_name = phase_rag.get("collection_name") or "knowledge"
-    embed_model = phase_models.get("embed_model") or "BAAI/bge-m3"
-    embed_backend = "openai" if "embedding" in embed_model.lower() else "sentence-transformers"
+    global_rag = cfg.get("rag", {}) or {}
+    collection_name = phase_rag.get("collection_name") or global_rag.get("collection_name") or "knowledge"
+    embed_model = (
+        phase_models.get("embed_model")
+        or phase_rag.get("embed_model")
+        or global_rag.get("embed_model")
+        or "BAAI/bge-m3"
+    )
+    embed_api_base = endpoints.get("embed_api_base")
+    embed_backend = (
+        phase_rag.get("embed_backend")
+        or global_rag.get("embed_backend")
+        or phase_models.get("embed_backend")
+        or "sentence-transformers"
+    )
+    
+    if embed_api_base and embed_backend == "sentence-transformers":
+        embed_backend = "openai"
     
     return ingest(
         context_root=os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB"),
         collection_name=collection_name,
         embed_model=embed_model,
         embed_backend=embed_backend,
-        embed_api_base=endpoints.get("embed_api_base"),
+        embed_api_base=embed_api_base,
         ocr_api_base=endpoints.get("ocr_api_base"),
         ocr_agent=phase_models.get("ocr_agent", ""),
         ocr_prompt=DEFAULT_OCR_PROMPT,
@@ -1051,6 +1144,9 @@ def _from_config(yaml_path):
         ocr_max_retries=2,
         ocr_parallel=1,
         batch=True,
+        use_docling=phase_rag.get("use_docling", True),
+        docling_do_ocr=phase_rag.get("docling_do_ocr", True),
+        docling_timeout=phase_rag.get("docling_timeout") or global_rag.get("docling_timeout", None),
     )
 
 

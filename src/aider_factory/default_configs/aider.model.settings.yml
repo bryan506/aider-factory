@@ -157,10 +157,31 @@
   extra_params:
       think: true
       thinking_tokens: 4096
-      temperature: 1.0 # NEW: Ensures determinism
+      temperature: 0.6 # NEW: Ensures determinism
       top_k: 0
       top_p: 1.0
-      min_p: 0.08
+      min_p: 0.07
+      repetition_penalty: 1.08
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: true
+  accepts_settings:
+      - thinking_tokens
+
+- name: lm_studio/qwen3.8-27B-90k-think:LATEST
+  edit_format: ask
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true # NEW: Locks down examples into system block
+  reminder: sys # NEW: Forces structural reminders to the top
+  caches_by_default: false # NEW: Explicitly instructs Aider to cache prefixes
+  extra_params:
+      think: true
+      thinking_tokens: 8192
+      temperature: 0.7 # NEW: Ensures determinism
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.06
       repetition_penalty: 1.08
       extra_body:
           chat_template_kwargs:
@@ -291,6 +312,27 @@
   extra_params:
       # temperature: 0.0
       #
+
+- name: lm_studio/qwen3.8-27B-90k-q5think:LATEST
+  edit_format: ask
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true # NEW: Locks down examples into system block
+  reminder: sys # NEW: Forces structural reminders to the top
+  caches_by_default: false # NEW: Explicitly instructs Aider to cache prefixes
+  extra_params:
+      think: true
+      thinking_tokens: 8192
+      temperature: 0.7 # NEW: Ensures determinism
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.06
+      repetition_penalty: 1.08
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: true
+  accepts_settings:
+      - thinking_tokens
 
 - name: openai/qwen3.6-27b-90k:latest
   edit_format: ask
@@ -444,6 +486,49 @@
   caches_by_default: true
   extra_params:
       temperature: 0.6
+      reasoning_effort: "medium" # Sets reasoning depth (Options: minimal, low, medium, high)
+  accepts_settings:
+      - reasoning_effort # Exposes /reasoning-effort command in Aider
+
+- name: gemini/gemini-3.7-flash
+  edit_format: ask
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      temperature: 0.7
+      reasoning_effort: "medium" # Sets reasoning depth (Options: minimal, low, medium, high)
+  accepts_settings:
+      - reasoning_effort # Exposes /reasoning-effort command in Aider
+
+- name: lm_studio/qwen3.8-27B-90k-think:LATEST
+  edit_format: ask
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: false
+  extra_params:
+      think: true
+      thinking_tokens: 8192
+      temperature: 0.7
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.06
+      repetition_penalty: 1.08
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: true
+  accepts_settings:
+      - thinking_tokens
+  edit_format: ask
+  use_repo_map: true
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
+  extra_params:
+      temperature: 0.7
       reasoning_effort: "medium" # Sets reasoning depth (Options: minimal, low, medium, high)
   accepts_settings:
       - reasoning_effort # Exposes /reasoning-effort command in Aider

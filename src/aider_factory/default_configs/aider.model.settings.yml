@@ -479,49 +479,18 @@
       - reasoning_effort # Exposes /reasoning-effort command in Aider
 
 - name: gemini/gemini-3.6-flash
-  edit_format: ask
+  edit_format: editor-diff
   use_repo_map: true
   examples_as_sys_msg: true
   reminder: sys
   caches_by_default: true
   extra_params:
-      temperature: 0.6
-      reasoning_effort: "medium" # Sets reasoning depth (Options: minimal, low, medium, high)
+      temperature: 0.2
+      reasoning_effort: "minimal" # Sets reasoning depth (Options: minimal, low, medium, high)
   accepts_settings:
       - reasoning_effort # Exposes /reasoning-effort command in Aider
 
 - name: gemini/gemini-3.7-flash
-  edit_format: ask
-  use_repo_map: true
-  examples_as_sys_msg: true
-  reminder: sys
-  caches_by_default: true
-  extra_params:
-      temperature: 0.7
-      reasoning_effort: "medium" # Sets reasoning depth (Options: minimal, low, medium, high)
-  accepts_settings:
-      - reasoning_effort # Exposes /reasoning-effort command in Aider
-
-- name: lm_studio/qwen3.8-27B-90k-think:LATEST
-  edit_format: ask
-  use_repo_map: true
-  reasoning_tag: think
-  examples_as_sys_msg: true
-  reminder: sys
-  caches_by_default: false
-  extra_params:
-      think: true
-      thinking_tokens: 8192
-      temperature: 0.7
-      top_k: 0
-      top_p: 1.0
-      min_p: 0.06
-      repetition_penalty: 1.08
-      extra_body:
-          chat_template_kwargs:
-              enable_thinking: true
-  accepts_settings:
-      - thinking_tokens
   edit_format: ask
   use_repo_map: true
   examples_as_sys_msg: true

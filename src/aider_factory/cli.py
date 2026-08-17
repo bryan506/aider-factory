@@ -350,10 +350,99 @@ def ensure_aider_installed():
             print(f"⚠️ [aider-factory] Could not auto-install aider-chat: {e}", file=sys.stderr)
 
 
+def _list_sessions(cwd):
+    sess_root = os.path.join(cwd, ".aider_factory", "sessions")
+    if not os.path.exists(sess_root) or not os.listdir(sess_root):
+        print("No active sessions found.")
+        return []
+    print("Active Sessions:")
+    found = []
+    for item in sorted(os.listdir(sess_root)):
+        sess_dir = os.path.join(sess_root, item)
+        if os.path.isdir(sess_dir):
+            found.append(item)
+            mtime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(sess_dir)))
+            chat_file = os.path.join(sess_dir, ".aider.chat.history.md")
+            size_str = f"{os.path.getsize(chat_file) // 1024} KB" if os.path.exists(chat_file) else "empty"
+            yml_file = os.path.join(sess_dir, "session.yml")
+            yml_status = "paired" if os.path.exists(yml_file) else "no config"
+            print(f"  - {item:<26} (Active: {mtime}, History: {size_str}, Config: {yml_status})")
+    return found
+
+
+def _clear_session(cwd, name):
+    import re
+    slug = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', name.strip())
+    sess_dir = os.path.join(cwd, ".aider_factory", "sessions", slug)
+    if os.path.exists(sess_dir):
+        shutil.rmtree(sess_dir, ignore_errors=True)
+        print(f"Session '{slug}' cleared.")
+    else:
+        print(f"Session '{slug}' not found.")
+
+
+def _clear_all_sessions(cwd):
+    sess_root = os.path.join(cwd, ".aider_factory", "sessions")
+    if os.path.exists(sess_root):
+        shutil.rmtree(sess_root, ignore_errors=True)
+        print("All session archives cleared.")
+    else:
+        print("No session directory found.")
+
+
 def main():
     """Global 'aider-factory' CLI entry point."""
     ensure_aider_installed()
     init_user_project()
+
+    cwd = os.getcwd()
+    args = sys.argv[1:]
+
+    # Parse session management flags
+    if "--list-sessions" in args:
+        _list_sessions(cwd)
+        sys.exit(0)
+
+    if "--clear-all" in args:
+        _clear_all_sessions(cwd)
+        sys.exit(0)
+
+    if "--clear-session" in args:
+        try:
+            idx = args.index("--clear-session")
+            name = args[idx + 1]
+            _clear_session(cwd, name)
+            sys.exit(0)
+        except (IndexError, ValueError):
+            print("Error: --clear-session requires a session name.", file=sys.stderr)
+            sys.exit(1)
+
+    # Extract session name or config file from positional arguments
+    session_name = None
+    config_file = None
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("--session", "-s") and i + 1 < len(args):
+            session_name = args[i + 1]
+            i += 2
+            continue
+        elif arg.startswith("--session="):
+            session_name = arg.split("=", 1)[1]
+            i += 1
+            continue
+
+        if arg.endswith(".yml") or arg.endswith(".yaml") or os.path.isfile(os.path.join(cwd, arg)):
+            config_file = arg
+        elif not arg.startswith("-"):
+            session_name = arg
+        i += 1
+
+    if session_name:
+        os.environ["AI_FACTORY_SESSION"] = session_name
+    if config_file:
+        os.environ["AI_FACTORY_CONFIG"] = config_file
 
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, os.path.join(pkg_dir, "python"))
@@ -490,4 +579,8 @@ Environment Variables for Custom Models:
             sys.exit(0)
             
         run_query(instruction, file_val, context_val, ask_val, terminal_mode=terminal_val, master_mode=master_val, expert_mode=expert_val, repo_map=repo_map_val)
+
+
+if __name__ == "__main__":
+    main()
 

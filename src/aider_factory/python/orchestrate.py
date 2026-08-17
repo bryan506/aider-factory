@@ -39,11 +39,11 @@ class Task:
     depends_on: list[str] = field(default_factory=list)
 
     # Model Routing
-    model: str = "openai/minimax-179b-80k:latest"
-    editor_model: str = "ollama/qwen3-coder-64k:latest"
+    model: str = "gemini/gemini-3.6-flash"
+    editor_model: str = "gemini/gemini-2.5-flash"
     fallback_editor_model: Optional[str] = None  # Escalation model for attempt > 0
-    architect_api_base: Optional[str] = "http://localhost:11435/v1"
-    editor_api_base: Optional[str] = "http://localhost:11434"
+    architect_api_base: Optional[str] = None
+    editor_api_base: Optional[str] = None
 
     status: TaskStatus = TaskStatus.PENDING
     test_cmd: Optional[str] = None
@@ -73,10 +73,27 @@ class Task:
     soft_fail: bool = False  # Apply node: loop exhaustion is a soft success (a downstream finalize is the authority)
     final_check: bool = False  # Code apply: after the iterate loop, re-run test_cmd ONCE and return its true pass/fail (the loop never verifies its own last edit; code mode has no finalize authority)
 
+    # Aider Runtime & KV-Cache Flags
+    map_tokens: Optional[int] = None
+    map_refresh: Optional[str] = None
+    map_multiplier_no_files: Optional[float] = None
+    max_chat_history_tokens: Optional[int] = None
+    yes_always: Optional[bool] = None
+    auto_accept_architect: Optional[bool] = None
+    auto_commits: Optional[bool] = None
+    suggest_shell_commands: Optional[bool] = None
+    detect_urls: Optional[bool] = None
+    disable_playwright: Optional[bool] = None
+
+    status: TaskStatus = TaskStatus.PENDING
+
 
 class AiderFactory:
-    def __init__(self, project_dir: str):
+    def __init__(self, project_dir: str, session_name: Optional[str] = None, session_dir: Optional[str] = None):
         self.project_dir = Path(project_dir)
+        self.session_name = session_name or "default"
+        self.session_dir = Path(session_dir) if session_dir else self.project_dir / ".aider_factory" / "sessions" / self.session_name
+        self.session_dir.mkdir(parents=True, exist_ok=True)
         self.tasks: dict[str, Task] = {}
         self.last_test_result: dict[str, bool] = {}
 
@@ -321,6 +338,10 @@ class AiderFactory:
             else (root_aider_settings if os.path.exists(root_aider_settings) else None)
         )
 
+        chat_hist = os.path.join(str(self.session_dir), ".aider.chat.history.md")
+        input_hist = os.path.join(str(self.session_dir), ".aider.input.history")
+        llm_hist = os.path.join(str(self.session_dir), ".aider.llm.history")
+
         cmd = [
             "aider",
             "--no-check-model-accepts-settings",
@@ -343,6 +364,13 @@ class AiderFactory:
             "0",
             "--max-chat-history-tokens",
             "1000000",
+            "--restore-chat-history",
+            "--chat-history-file",
+            chat_hist,
+            "--input-history-file",
+            input_hist,
+            "--llm-history-file",
+            llm_hist,
             "--message",
             message,
         ]
@@ -776,13 +804,13 @@ class AiderFactory:
         # Debate-specific session file: separate from the main .oracle_session.json
         # so the apply phase's cleanup does not destroy cross-round oracle context.
         oracle_debate_session = os.path.join(
-            self.project_dir, ".aider_factory", ".oracle_debate_session.json"
+            str(self.session_dir), ".oracle_debate_session.json"
         )
         d["oracle_session_file"] = oracle_debate_session
         oracle_debate_cost_sidecar = oracle_debate_session + ".costs.json"
 
         debate_aider_history = os.path.join(
-            self.project_dir, ".aider_factory", ".debate_aider_history.md"
+            str(self.session_dir), ".debate_aider_history.md"
         )
 
         # Clear debate context: always on round 1 (fresh sequence), or every round
@@ -1013,34 +1041,35 @@ class AiderFactory:
             max_outer_loops = 1
 
         for attempt in range(max_outer_loops):
-            # Wipe Aider's history files to ensure a 100% clean directory between loops
             chat_hist = os.path.join(
-                self.project_dir, ".aider_factory", ".aider.chat.history.md"
+                str(self.session_dir), ".aider.chat.history.md"
             )
             input_hist = os.path.join(
-                self.project_dir, ".aider_factory", ".aider.input.history"
+                str(self.session_dir), ".aider.input.history"
+            )
+            llm_hist = os.path.join(
+                str(self.session_dir), ".aider.llm.history"
             )
             oracle_session = os.path.join(
-                self.project_dir, ".aider_factory", ".oracle_session.json"
+                str(self.session_dir), ".oracle_session.json"
             )
             oracle_cost_sidecar = os.path.join(
-                self.project_dir, ".aider_factory", ".oracle_session.json.costs.json"
+                str(self.session_dir), ".oracle_session.json.costs.json"
             )
             oracle_debate_session = os.path.join(
-                self.project_dir, ".aider_factory", ".oracle_debate_session.json"
+                str(self.session_dir), ".oracle_debate_session.json"
             )
             debate_aider_history = os.path.join(
-                self.project_dir, ".aider_factory", ".debate_aider_history.md"
+                str(self.session_dir), ".debate_aider_history.md"
             )
             oracle_transcript = os.path.join(
-                self.project_dir, ".aider_factory", ".oracle_chat.history.md"
+                str(self.session_dir), ".oracle_chat.history.md"
             )
             _pair_capture = os.path.join(
-                self.project_dir, ".aider_factory", ".pair_capture.log"
+                str(self.session_dir), ".pair_capture.log"
             )
+            # Retain chat history and input history across attempts, clear transient sidecars
             for f in [
-                chat_hist,
-                input_hist,
                 oracle_session,
                 oracle_cost_sidecar,
                 oracle_debate_session,
@@ -1083,11 +1112,42 @@ class AiderFactory:
                 task.fallback_editor_model
                 if (attempt > 0 and task.fallback_editor_model)
                 else task.editor_model,
+                "--restore-chat-history",
+                "--chat-history-file",
+                chat_hist,
+                "--input-history-file",
+                input_hist,
+                "--llm-history-file",
+                llm_hist,
             ]
             if aider_conf:
                 cmd.extend(["--config", aider_conf])
             if aider_settings:
                 cmd.extend(["--model-settings-file", aider_settings])
+
+            # Runtime & KV-cache flags (overrides .aider.conf.yml defaults)
+            if task.map_tokens is not None:
+                cmd.extend(["--map-tokens", str(task.map_tokens)])
+            if task.map_refresh is not None:
+                cmd.extend(["--map-refresh", str(task.map_refresh)])
+            if task.map_multiplier_no_files is not None:
+                cmd.extend(["--map-multiplier-no-files", str(task.map_multiplier_no_files)])
+            if task.max_chat_history_tokens is not None:
+                cmd.extend(["--max-chat-history-tokens", str(task.max_chat_history_tokens)])
+
+            if task.auto_commits is not None:
+                cmd.append("--auto-commits" if task.auto_commits else "--no-auto-commits")
+            if task.auto_accept_architect is not None:
+                cmd.append("--auto-accept-architect" if task.auto_accept_architect else "--no-auto-accept-architect")
+            if task.suggest_shell_commands is not None:
+                cmd.append("--suggest-shell-commands" if task.suggest_shell_commands else "--no-suggest-shell-commands")
+            if task.detect_urls is not None:
+                cmd.append("--detect-urls" if task.detect_urls else "--no-detect-urls")
+
+            if task.yes_always:
+                cmd.append("--yes-always")
+            if task.disable_playwright:
+                cmd.append("--disable-playwright")
 
             # Determine if we should use the message file or check test failures.
             # We use the plan (message_file) only on the first attempt.
@@ -1310,6 +1370,20 @@ class AiderFactory:
                     archive_name = f"{stamp}_{task.id}.md"
                     shutil.copy(chat_hist, os.path.join(history_dir, archive_name))
 
+                # Archive raw LLM history before cleanup
+                if os.path.exists(llm_hist):
+                    import datetime
+                    import shutil
+
+                    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    llm_hist_dir = os.path.join(
+                        self.project_dir, ".aider_factory", "logs", "llm_history"
+                    )
+                    os.makedirs(llm_hist_dir, exist_ok=True)
+
+                    archive_name = f"{stamp}_{task.id}.llm.log"
+                    shutil.copy(llm_hist, os.path.join(llm_hist_dir, archive_name))
+
                 # Archive the Oracle side-agent transcript before cleanup
                 if os.path.exists(oracle_transcript):
                     import datetime
@@ -1328,10 +1402,8 @@ class AiderFactory:
                         os.path.join(rag_hist_dir, f"{stamp}_{task.id}.md"),
                     )
 
-                # Final cleanup
+                # Final cleanup (keep active chat history in session_dir for resumption)
                 for f in [
-                    chat_hist,
-                    input_hist,
                     oracle_session,
                     oracle_cost_sidecar,
                     oracle_debate_session,

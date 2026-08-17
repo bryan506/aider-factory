@@ -64,6 +64,7 @@ def probe_get(name, url, expected_key, timeout=10):
 # Models
 chat_model = "qwen3.6-27B-90k-udq4kxl:LATEST"
 node2_chat_model = "qwen3.6-27b-90k:LATEST"
+node1_embed_model = "qwen3-embedding-8b-8k-gpu:LATEST"
 embed_model = "qwen3-embedding-8b-8k:LATEST"
 ocr_model = "glm-ocr-f16:LATEST"
 minicheck_model = "openai/minicheck-flan-t5-large"
@@ -89,7 +90,7 @@ def get_vision_payload(model_name):
 probe_post(
     "Node 1 (Embedding)", 
     "http://192.168.100.1:8080/v1/embeddings", 
-    {"model": embed_model, "input": ["dimension probe"]}, 
+    {"model": node1_embed_model, "input": ["dimension probe"]}, 
     "data"
 )
 probe_post(

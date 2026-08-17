@@ -280,6 +280,8 @@ def run_bootstrap(target_dir):
     if profile["operating_mode"] == "autonomous":
         content = content.replace('pair_programming: true', 'pair_programming: false')
         content = content.replace('auto_test: false', 'auto_test: true')
+        content = content.replace('yes_always: false', 'yes_always: true')
+        content = content.replace('auto_accept_architect: false', 'auto_accept_architect: true')
 
     # 5. File Lists
     def format_yaml_list(items):
@@ -295,13 +297,13 @@ def run_bootstrap(target_dir):
     if profile["use_rag"]:
         content = content.replace('collection_name: "working_repo_lib"', f'collection_name: "{profile["rag_collection"]}"')
         content = content.replace('run_ocr_rag: false', 'run_ocr_rag: true')
-        content = content.replace('grounding_agent: "openai/minicheck-flan-t5-large"', 'grounding_agent: ""') # Disabled by default
+        content = content.replace('grounding_agent: "gemini/gemini-2.5-flash"', 'grounding_agent: ""') # Disabled by default
         if profile["rag_agent"]:
             content = content.replace('rag_agent: "gemini/gemini-2.5-flash"', f'rag_agent: "{profile["rag_agent"]}"')
         if profile["ocr_agent"]:
-            content = content.replace('ocr_agent: "glm-ocr-f16:LATEST"', f'ocr_agent: "{profile["ocr_agent"]}"')
+            content = content.replace('ocr_agent: "gemini/gemini-2.5-flash"', f'ocr_agent: "{profile["ocr_agent"]}"')
         if profile["embed_model"]:
-            content = content.replace('embed_model: "qwen3-embedding-8b-8k:LATEST"', f'embed_model: "{profile["embed_model"]}"')
+            content = content.replace('embed_model: "gemini/text-embedding-004"', f'embed_model: "{profile["embed_model"]}"')
         if profile["embed_backend"]:
             content = content.replace('embed_backend: "sentence-transformers"', f'embed_backend: "{profile["embed_backend"]}"')
         if profile["query_prefix"]:
@@ -522,7 +524,7 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         elif "/" not in model:
             model = f"openai/{model}"
     else:
-        model = model or model_map.get(key_name, "openai/gpt-4o")
+        model = model or model_map.get(key_name, "gemini/gemini-2.5-flash")
     
     print(f"{_HELPER_COLOR}[aider-helper] Asking {model}...{_RESET}\n")
     try:

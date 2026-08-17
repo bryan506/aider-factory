@@ -145,7 +145,8 @@ At the project root:
 
 Inside the git-ignored `.aider_factory/` subdirectory:
 
-- `.aider_factory/.env.yml` — Your master DAG pipeline configuration file.
+- `.aider_factory/sessions/` — Isolated session directories containing paired `session.yml` configs, chat history, and oracle state.
+- `.aider_factory/.env.yml` — Your master DAG pipeline configuration file (fallback template).
 - `.aider_factory/.aider.conf.yml` — Aider global configuration.
 - `.aider_factory/.aider.model.settings.yml` — Aider per-model parameter and reasoning budget overrides.
 - `.aider_factory/CONVENTIONS.md` — Global Aider instruction guidelines and protocols.
@@ -504,18 +505,75 @@ Because these live in the conf file, you change pipeline behaviour by editing th
 Python. `orchestrate.py` never hardcodes `--architect`/`--yes-always`; it only points Aider at the
 conf.
 
-#### Chat History and Session Persistence
+#### Paired Session Architecture & Multi-Session Sandboxing
 
-The pipeline redirects Aider chat history to the `.aider_factory/` directory:
+Every named session in `aider-factory` is completely self-contained in `.aider_factory/sessions/<slug>/`, pinned to the repository root:
 
-```yaml
-# In .aider.conf.yml
-chat-history-file: .aider_factory/.aider.chat.history.md
-input-history-file: .aider_factory/.aider.input.history
-restore-chat-history: false
+```text
+.aider_factory/
+└── sessions/
+    ├── default/
+    │   ├── session.yml                     # Paired pipeline configuration
+    │   ├── .aider.chat.history.md          # Multi-turn chat history (restored via --restore-chat-history)
+    │   ├── .aider.input.history            # Terminal prompt history (arrow up recall)
+    │   ├── .oracle_session.json            # Knowledge Oracle multi-turn LLM context
+    │   ├── .oracle_session.json.costs.json # Oracle cost accounting ledger
+    │   ├── .oracle_debate_session.json     # Refereed debate context
+    │   └── .debate_aider_history.md        # Architect debate turn history
+    ├── refactor_ohlcv/
+    │   ├── session.yml
+    │   ├── .aider.chat.history.md
+    │   └── ...
+    └── session_20260401_143022/            # Auto-archived unnamed run
+        ├── session.yml
+        └── ...
 ```
 
-Setting `restore-chat-history: false` ensures each pipeline run starts with a fresh session context, preventing stale conversation state from leaking between phases.
+##### 1. Session Invocations & Commands Matrix
+
+| Action | CLI Command | Disk Artifact Path | Behavior & Invariants |
+| :--- | :--- | :--- | :--- |
+| **Start / Resume Session** | `aider-factory refactor_ohlcv`<br>`aider-factory -s refactor_ohlcv` | `.aider_factory/sessions/refactor_ohlcv/` | Creates directory if new; restores prior chat and input history if resuming. Sanitizes raw names into safe slugs (`re.sub(r'[^a-zA-Z0-9_\-\.]', '_', ...)`). |
+| **Start with Explicit Config** | `aider-factory custom.yml my_session`<br>`aider-factory my_session custom.yml` | `.aider_factory/sessions/my_session/session.yml` | Freezes and pairs `custom.yml` to the session directory as `session.yml`. |
+| **Resume Paired Config** | `aider-factory refactor_ohlcv` | `.aider_factory/sessions/refactor_ohlcv/session.yml` | If no YAML is passed, automatically loads and executes the session's existing `session.yml`. |
+| **Auto-Archived Unnamed Run** | `aider-factory`<br>`aider-factory .env.yml` | `.aider_factory/sessions/session_YYYYMMDD_HHMMSS/` | Generates a timestamped session folder, clones active `.env.yml` into it, and saves conversation for future inspection. |
+| **List All Active Sessions** | `aider-factory --list-sessions` | Scans `.aider_factory/sessions/` | Prints all session slugs, last active timestamps, chat history size (KB), and configuration pairing status (`paired` vs `no config`). |
+| **Clear Specific Session** | `aider-factory --clear-session refactor_ohlcv` | Deletes `.aider_factory/sessions/refactor_ohlcv/` | Surgically removes the target session folder. Leaves other sessions untouched. Exits with code `0`. |
+| **Clear All Sessions** | `aider-factory --clear-all` | Deletes `.aider_factory/sessions/` | Wipes the entire sessions root directory. Exits with code `0`. |
+| **Clear Active Oracle Context** | `aider-oracle --clear` | Deletes `.oracle_session.json` & `.oracle_debate_session.json` | Respects `ORACLE_SESSION_FILE` and wipes only the active session's Knowledge Oracle and debate history. |
+
+##### 2. Session Lifecycle & KV-Cache Restoration Flowchart
+
+```
+                       ┌────────────────────────────────────────────────────────┐
+                       │  User runs: aider-factory refactor_ohlcv               │
+                       └───────────────────────────┬────────────────────────────┘
+                                                   │
+                                     Does session directory exist?
+                                     ┌─────────────┴─────────────┐
+                                    YES                          NO
+                                     │                           │
+                   ┌─────────────────┴───────────────┐           │
+                   │ Reads session.yml & chat history│           │
+                   └─────────────────┬───────────────┘           │
+                                     │                           │
+  ┌──────────────────────────────────┴───────────────────────────┴─────────────────────────────────┐
+  │  1. Restores prior conversation via --restore-chat-history                                    │
+  │  2. Restores terminal prompt history via --input-history-file                                 │
+  │  3. Restores Oracle & Debate state via ORACLE_SESSION_FILE                                    │
+  │  4. Re-scans current git working tree & repo map fresh on disk                               │
+  │  5. Hits warm local KV-cache (zero warmup latency) if local LLMs remain in memory             │
+  └────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+##### 3. What is Restored vs. What is Refreshed
+
+| Component | What is Restored (Preserved) | What is Refreshed (Fresh) |
+| :--- | :--- | :--- |
+| **Aider Chat Engine** | • Multi-turn discussion context<br>• Terminal prompt history (Up-Arrow)<br>• LLM KV-cache prefix | • Current git working tree<br>• Active file contents on disk<br>• Repo map AST symbols |
+| **Paired Configuration** | • Prior conversation state maintained seamlessly | • Edits to models, context files, or phase toggles in `session.yml` take immediate effect on resume |
+| **Knowledge Oracle** | • Multi-turn debate context & RAG history | • Vector store queries fresh chunks against latest code |
+| **Task Retry Loops** | • Conversation memory is retained across attempts (no clobbering) | • Fresh test failure logs are passed to the next loop attempt |
 
 #### Generating a Static Repository Map
 
@@ -1035,6 +1093,17 @@ To ensure the Oracle side-agent returns data to the terminal instantly without s
 
 This forces ground-truth answers directly to `stdout`.
 
+#### Oracle Model Configuration
+
+Assign the Oracle model via `rag_agent` in `.env.yml`, and disable reasoning in `.aider.model.settings.yml` for fast, clean CLI returns:
+
+```yaml
+- name: openai/qwen3.6-27b-90k:latest
+  extra_params:
+    think: false
+    thinking_tokens: 0
+```
+
 ### RAG/OCR Context Directory Structure & Code Ingestion
 
 The RAG/OCR pipeline ingests both literature (PDFs, images, loose markdown) and code repositories into LanceDB. It handles code and documents differently:
@@ -1312,10 +1381,6 @@ an `oracle` block.
 
 Each CLI tool has a focused "skill" doc under `.aider_factory/markdown/skills/` (the first is `oracle.md`). A skill teaches the agent the tool's high-value invocations and when to use it. Skills are delivered **per phase** by listing them in `files.context_files_job` for phases that should use the tool (kept out of the always-on `CONVENTIONS.md`, which only carries a one-line pointer). Add one `skills/<feature>.md` per new CLI feature.
 
-#### Oracle Model Configuration
-
-Assign the Oracle model via `rag_agent` in `.env.yml`, and disable reasoning for fast, clean CLI returns:
-
 ---
 
 ### AI Factory Helper & Terminal Agent (`aider-helper`)
@@ -1391,7 +1456,8 @@ The Oracle maintains two separate session files to isolate conversational contex
 - `.oracle_session.json` — Used for regular, interactive `/run oracle "question"` queries.
 - `.oracle_debate_session.json` — Used for multi-turn debates (both CLI debates and
   autonomous pipeline deliberations).
-- `.helper_session.json` — Used for `aider-helper` CLI sessions.
+- `.helper_session.json` — Used for `aider-helper` configuration CLI sessions.
+- `.helper_terminal_session.json` — Used for `aider-helper --terminal` assistant sessions.
 
 These are kept separate because the apply-phase cleanup wipes the main pipeline
 sessions but must not destroy debate context.
@@ -1416,15 +1482,6 @@ sessions but must not destroy debate context.
 - **Oracle Output**: Displayed in gruvbox pink (`#d3869b`), configurable via `colors.oracle_debate` in the YAML config or the `PIPELINE_COLOR_ORACLE` environment variable. This applies to both single queries and debate turns.
 - **Architect Output**: Displayed in sky blue (`#38bdf8`), configurable via `colors.architect_debate` or the `PIPELINE_COLOR_ARCHITECT` environment variable.
 
-# Corresponding entry in .aider.model.settings.yml
-
-- name: openai/qwen3.6-27b-90k:latest
-  extra_params:
-  think: false
-  thinking_tokens: 0
-
-```
-
 ---
 
 ## 7. The Validation System (Evidence Grounding)
@@ -1443,12 +1500,10 @@ _failing_ quote means more than "fix this quote"; it's a signal that **the surro
 might be hallucinated and needs checking**. The system therefore does two different jobs with two
 different tools, cheapest-and-most-reliable first:
 
-```
-
+```text
 PDF --(OCR: vision model)--> <stem>.md --(chunk+embed)--> LanceDB
 │
 └--(Oracle writes review with [evidence] "quotes")
-
 ```
 
 The jobs run **cheapest-and-most-reliable first** (deterministic-first): code does everything it
@@ -1673,7 +1728,6 @@ strict gate (`apply_evidence.sh`) re-validates after each attempt. Two safeguard
   exhaustion is treated as a _soft success_ that defers the verdict to the finalize step below — it is
   not reported as a hard failure (this removed a class of misleading "TASK FAILED" logs).
 - **Final-check (`Task.final_check`).** In code mode, the iteration loop verifies edit $N-1$ at the start of attempt $N$. After the loop exhausts, `Task.final_check` re-runs `test_cmd` once to evaluate the final edit pass, returning true pass/fail status and eliminating false-positive failure reports.
-- **Final-check (`Task.final_check`).** In code mode, the iteration loop verifies edit $N-1$ at the start of attempt $N$. After the loop exhausts, `final_check: True` re-runs `test_cmd` once to evaluate the final edit pass, returning true pass/fail status and eliminating false-positive failure reports.
 
 A deterministic **finalize** step (`_finalize`) is the terminal authority. It executes two idempotent passes:
 
@@ -1865,13 +1919,85 @@ implementation checklist when wiring a new project:
 | **Safe Initial Defaults** | Prevents the pipeline from running massive, expensive test-fixing loops on your very first run. | `run_job_two`, `iterate_test` | `false` | `default_configs/env.yml` |
 | **Topology-Aware Probes** | Instant health checks without spamming the network. Uses 1x1 pixel base64 images to test OCR vision models efficiently. | `check_services.py` | — | `check_services.py` |
 
-### 7.12 Process Logging & Cost Capture (`OSTee`)
+### 7.12 Comprehensive Observability, Master Logging & Telemetry Engine
 
-The pipeline captures log output from Python, Aider, Rscript, and subprocesses using an OS-level file descriptor tee (`OSTee` in `run_workflow.py`).
+The AI Factory architecture guarantees **100% full-stack visibility** into every agent turn, LanceDB chunking decision, subprocess execution, and financial expenditure. Nothing runs in a black box.
 
-- **OS-Level Duplication:** `OSTee` duplicates file descriptors 1 (stdout) and 2 (stderr) via `os.dup2` into an OS pipe.
-- **Unified Streaming Log:** A background thread pumps output from the pipe to terminal stdout while writing to `.aider_factory/logs/<config>_run_<timestamp>.log`.
-- **Cost Extraction:** `aggregate_costs.py` regex-scans the unified log file for `Tokens: Nk sent, Nk received. Cost: $X message, $Y session` patterns, handling metric suffixes (`k`, `M`) and summing total run costs accurately across all sub-agents.
+```
+                                  AI FACTORY OBSERVABILITY MESH
+ ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+ │                                                                                             │
+ │   1. Orchestrator & Aider Engine ──► OS-Level File Descriptor Interceptor (OSTee)          │
+ │   2. LanceDB & Document RAG     ──► Table Ingestion Traces & Chunk Attribution Logs         │
+ │   3. Knowledge Oracle Agent     ──► Verbatim Retrieval Transcripts & Stderr File Headers    │
+ │   4. Refereed Escalation Debate ──► Markdown Transcripts & Deterministic JSON Ledgers       │
+ │   5. Grounding & MiniCheck      ──► Exact Substring Audit Reports & Entailment Ledgers      │
+ │   6. Subprocess Test Runners    ──► Real-Time stdout/stderr Stream (pytest, Rscript, Docker)│
+ │   7. Financial Cost Accounting  ──► Token-by-Token Sent/Received & USD Aggregation         │
+ │                                                                                             │
+ └──────────────────────────────────────────────┬──────────────────────────────────────────────┘
+                                                │
+                                                ▼
+ ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+ │                               THREE DURABLE OBSERVABILITY TIERS                             │
+ ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
+ │     1. Live Interactive      │     2. Master Replay Log     │    3. Structured Artifacts    │
+ │     Terminal Streaming       │  (.aider_factory/logs/*.log) │ (Sessions, Ledgers, Archives) │
+ └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
+```
+
+#### 1. Kernel-Level Stream Interception (`OSTee`)
+
+Standard Python logging frameworks redirect `sys.stdout` and `sys.stderr` in user-space, which silently drops output from C-extensions, Rust core binaries (such as LanceDB), child subprocesses (Aider, pytest, Rscript, Docker), and PTY terminals.
+
+`run_workflow.py` implements low-level **OS File Descriptor Multiplexing (`OSTee`)**:
+```python
+self.orig_stdout_fd = os.dup(1)
+self.orig_stderr_fd = os.dup(2)
+self.pipe_r, self.pipe_w = os.pipe()
+os.dup2(self.pipe_w, 1)
+os.dup2(self.pipe_w, 2)
+```
+
+A dedicated background thread pumps the pipe directly to standard out while streaming verbatim bytes into `.aider_factory/logs/<config_stem>_run_<timestamp>.log`. This guarantees zero-loss capture of all stack traces, ANSI escape sequences, sub-agent banners, and container outputs.
+
+#### 2. The Three Observability Tiers
+
+Every execution is preserved across three synchronized tiers:
+
+1. **Live Interactive Stream:** Real-time ANSI-colorized streaming on your terminal screen (Teal `#38bdf8` for Architect turns, Pink `#d3869b` for Oracle turns, Gold `#d97706` for human inputs).
+2. **Master Terminal Recording (`.aider_factory/logs/*_run_*.log`):** The complete, byte-for-byte playback of the entire interactive session. Viewable with full colors using `less -R <logfile>`.
+3. **Structured Artifacts & Ledgers:**
+   - **Dialogue History:** `.aider_factory/sessions/<slug>/.aider.chat.history.md`
+   - **Task Snapshots:** `.aider_factory/logs/chat_history/<timestamp>_<task_id>.md`
+   - **RAG Retrieval History:** `.aider_factory/logs/oracle_history/<timestamp>_<task_id>.md`
+   - **Debate Transcripts & State:** `.aider_factory/logs/debates/<stem>.debate.md` and `.debate.json`
+   - **Grounding Audit Reports:** `.aider_factory/logs/validations/<stem>.gate.md` and `.context.md`
+
+#### 3. LanceDB Chunking & Vector Engine Telemetry
+
+During document and codebase ingestion, `rag_manager.py` emits continuous diagnostic traces captured by the master log:
+
+- **AST Symbol Resolution:** Logs Tree-Sitter grammar parsing, function/class structural boundaries, and oversized leaf fallback line splits.
+- **Docling Extraction Traces:** Logs isolated subprocess status (`docling_runner.py`), structural metadata headers (`# Document Metadata`), and table extraction boundaries.
+- **Vector Transformation:** Logs embedding model calls, endpoint URLs (`http://<ip>:8080/v1/embeddings`), batch sizes, and returned vector dimensions (e.g., 1024 or 4096).
+- **Table Construction & Indexing:** Logs table creation (`<coll>_<repo>_code`, `<coll>_<repo>_docs`), row counts, and automatic `IVF_PQ` ANN index builds when crossing 50,000 rows.
+- **Retrieval Attribution:** Oracle queries log exact chunk IDs, cosine similarities, Reciprocal Rank Fusion (RRF) scores, and unique source file headers to `stderr` (`[oracle] 3 source chunk(s) from 2 file(s): doc1.md, doc2.md ...`).
+
+#### 4. Financial Cost & Token Analytics
+
+At the conclusion of every run (or upon user cancellation via `Ctrl+C`), `aggregate_costs.py` regex-scans the master run log and outputs a detailed financial summary:
+
+```text
+======================================================================
+Run Completed. Aggregating Costs...
+======================================================================
+Total Tokens Sent:     184,290
+Total Tokens Received:  14,120
+Total Estimated Cost:  $0.0842 USD
+Task Success Rate:     100% (4/4 tasks passed)
+======================================================================
+```
 
 ### 7.13 Entailment-grounded claim verification (the MiniCheck grounding verifier)
 
@@ -2035,17 +2161,13 @@ The pipeline derives these from each phase's YAML and injects them into the `/ru
 child environment (`orchestrate.py`). They are listed here for reference/debugging only:
 
 ```bash
-PIPELINE_COLOR_HELPER       # Terminal color for aider-helper output (default: sky
-blue)
-```
-
-```bash
+PIPELINE_COLOR_HELPER        # Terminal color for aider-helper output (default: sky blue)
 ORACLE_ARCHITECT_MODEL       # Derived from models.architect_agent; routes CLI debate's Architect turn
 ORACLE_ARCHITECT_API_BASE    # Endpoint for the Architect in a CLI debate
 # Routing / model (from models.rag_agent + endpoints.rag_agent_api)
-ORACLE_AGENT_MODEL          # e.g. "openai/qwen3.6-27b-90k:latest"
-ORACLE_AGENT_API_BASE       # endpoint for the oracle model (omitted for gemini/)
-ORACLE_AGENT_API_KEY        # "sk-dummy" for local servers
+ORACLE_AGENT_MODEL           # e.g. "openai/qwen3.6-27b-90k:latest"
+ORACLE_AGENT_API_BASE        # endpoint for the oracle model (omitted for gemini/)
+ORACLE_AGENT_API_KEY         # "sk-dummy" for local servers
 
 # Retrieval target (from rag.collection_name + rag.top_k + rag.retrieval_mode)
 ORACLE_RAG_DB_DIR           # .../lanceDB/<collection>/lancedb

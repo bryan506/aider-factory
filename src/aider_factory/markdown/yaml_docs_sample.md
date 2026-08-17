@@ -4,14 +4,17 @@
 > documented inline with its behavior, options, and trade-offs. Copy any phase block as a
 > starting template for new projects or tasks.
 >
-> **How to run (use the `factory` launcher):**
+> **How to run (use the `factory` launcher or `aider-factory` CLI):**
 >
 > ```bash
 > # Default config (.aider_factory/.env.yml)
 > .aider_factory/bash/factory
 >
-> # Custom config (pass any .yml file as the first argument)
-> .aider_factory/bash/factory .aider_factory/.env_auto_ocr.yml
+> # Named session with paired configuration
+> aider-factory refactor_ohlcv
+>
+> # Custom config with named session
+> aider-factory .env.yml refactor_ohlcv
 > ```
 >
 > **Cost analysis on archived logs** (re-run the aggregator standalone):

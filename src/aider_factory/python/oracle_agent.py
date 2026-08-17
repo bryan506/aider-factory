@@ -124,7 +124,7 @@ def _retrieve(query, k):
     collection = os.environ.get("ORACLE_COLLECTION", "knowledge")
     backend = os.environ.get("ORACLE_EMBED_BACKEND", "sentence-transformers")
     api_base = os.environ.get("ORACLE_EMBED_API_BASE")
-    model = os.environ.get("ORACLE_EMBED_MODEL", "BAAI/bge-m3")
+    model = os.environ.get("ORACLE_EMBED_MODEL", "gemini/text-embedding-004")
     prefix = os.environ.get("ORACLE_QUERY_PREFIX", "")
     type_filter = os.environ.get("ORACLE_TYPE_FILTER", "")
 
@@ -1092,7 +1092,7 @@ def _add_maintenance(action, paths):
     embed_model = (
         phase_rag.get("embed_model")
         or global_rag.get("embed_model")
-        or phase_models.get("embed_model", "BAAI/bge-m3")
+        or phase_models.get("embed_model", "gemini/text-embedding-004")
     )
     embed_api_base = (
         phase_rag.get("embed_api_base")
@@ -1828,14 +1828,14 @@ def _ensure_oracle_config():
         phase_models = (active_phase.get("models") or {}) if active_phase else {}
         phase_rag = (active_phase.get("rag") or {}) if active_phase else {}
 
-        rag_agent = phase_models.get("rag_agent") or config.get("models", {}).get("rag_agent", "gemini/gemini-3.6-flash")
-        arch_agent = phase_models.get("architect_agent") or config.get("models", {}).get("architect_agent", rag_agent)
+        rag_agent = phase_models.get("rag_agent") or config.get("models", {}).get("rag_agent", "gemini/gemini-2.5-flash")
+        arch_agent = phase_models.get("architect_agent") or config.get("models", {}).get("architect_agent", "gemini/gemini-3.6-flash")
 
         embed_model = (
             phase_models.get("embed_model")
             or phase_rag.get("embed_model")
             or global_rag.get("embed_model")
-            or config.get("models", {}).get("embed_model", "qwen3-embedding-8b-8k:LATEST")
+            or config.get("models", {}).get("embed_model", "gemini/text-embedding-004")
         )
         embed_api_base = (
             phase_rag.get("embed_api_base")
@@ -1846,21 +1846,21 @@ def _ensure_oracle_config():
             phase_rag.get("embed_backend")
             or global_rag.get("embed_backend")
             or phase_models.get("embed_backend")
-            or ("openai" if embed_api_base else "sentence-transformers")
+            or ("openai" if (embed_api_base or "gemini" in embed_model) else "sentence-transformers")
         )
-        if embed_api_base and embed_backend == "sentence-transformers":
+        if (embed_api_base or "gemini" in embed_model) and embed_backend == "sentence-transformers":
             embed_backend = "openai"
 
-        os.environ["ORACLE_AGENT_MODEL"] = rag_agent
-        os.environ["ORACLE_ARCHITECT_MODEL"] = arch_agent
-        os.environ["ORACLE_EMBED_MODEL"] = embed_model
-        os.environ["ORACLE_EMBED_BACKEND"] = embed_backend
+        os.environ.setdefault("ORACLE_AGENT_MODEL", rag_agent)
+        os.environ.setdefault("ORACLE_ARCHITECT_MODEL", arch_agent)
+        os.environ.setdefault("ORACLE_EMBED_MODEL", embed_model)
+        os.environ.setdefault("ORACLE_EMBED_BACKEND", embed_backend)
         if embed_api_base:
-            os.environ["ORACLE_EMBED_API_BASE"] = embed_api_base
+            os.environ.setdefault("ORACLE_EMBED_API_BASE", embed_api_base)
         if "gemini/" not in rag_agent and endpoints.get("rag_agent_api"):
-            os.environ["ORACLE_AGENT_API_BASE"] = endpoints.get("rag_agent_api")
+            os.environ.setdefault("ORACLE_AGENT_API_BASE", endpoints.get("rag_agent_api"))
         if "gemini/" not in arch_agent and endpoints.get("architect_api_base"):
-            os.environ["ORACLE_ARCHITECT_API_BASE"] = endpoints.get("architect_api_base")
+            os.environ.setdefault("ORACLE_ARCHITECT_API_BASE", endpoints.get("architect_api_base"))
     except Exception:
         pass
 

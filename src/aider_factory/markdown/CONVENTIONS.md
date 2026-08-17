@@ -40,13 +40,15 @@ When acting as the Validator, you are a Senior Code Reviewer auditing previously
 
 ## TESTER/REVIEWER PROTOCOLS (Verification Phase)
 
-When acting as the Tester, your goal is validation and verification. Closely follow architect suggestions for revised code.
+When acting as the Tester, your goal is validation, verification, and deterministic proof.
 
-- **Workflow:** Your primary directive is to write `testthat` coverage for newly implemented logic.
+- **Workflow & Boundary:** Write comprehensive test coverage confined strictly to the project's test directory (`tests/`, `testthat/`, etc.) unless fixing a fatal syntax error in source files.
 
-- **Source Code Boundary:** Keep your created files confined strictly to the `tests/testthat/` directory unless tests reveal a fatal syntax crash in the `R/` source file.
-
-- **Testing Standards:** Write robust `testthat` scripts targeting data types, expected column names, and edge cases (e.g., missing values).
+- **Unit vs. End-to-End (E2E) Standards:**
+  1. **Unit Tests (Narrow Isolation):** Use mocks/fakes strictly for internal parser edge cases, error branches, or external paid network endpoints. Keep them fast and in-memory.
+  2. **E2E & Integration (Strict Zero-Mock Mandate):** NEVER mock the system under test (subprocesses, file I/O, CLI entrypoints). Execute the real entrypoint against temporary on-disk fixtures (`tempfile`).
+  3. **Physical Assertions & No Fake Passes:** Assert on real OS exit codes (`0`), generated disk contents, and namespace isolation. Never assert on mock call counts or synthetic returns.
+  4. **Live Telemetry:** Stream subprocess stdout/stderr live to prevent silent deadlocks, non-TTY hangs, and operator blindness.
 
 ## GLOBAL DOMAIN LOGIC: FINANCIAL MODELING
 

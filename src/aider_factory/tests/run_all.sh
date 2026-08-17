@@ -17,7 +17,8 @@ if [ -z "$AIDER_PY" ]; then
 fi
 cd "$(dirname "$0")/../../.." || exit 1          # -> repo root
 fail=0; failed=()
-for f in src/aider_factory/tests/aider_factory_tests/test_*.py; do
+for f in src/aider_factory/tests/aider_factory_tests/test_*.py src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_*.py; do
+    [ -e "$f" ] || continue
     echo "── $f"
     timeout 600 "$AIDER_PY" "$f" || { fail=1; failed+=("$f"); echo "❌ FAILED $f"; }
 done

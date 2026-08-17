@@ -7,7 +7,37 @@ Front-load *understanding and agreement*, gate *implementation* behind an explic
 
 ---
 
-## 1. The contract (establish once, honor always)
+## 1. The Six Pillars of Mission-Critical Engineering
+
+Every agent session, harness extension, or pipeline change must honor these six institutional standards:
+
+1. **Strict Process & State Isolation (Zero Blast Radius)**:
+   - No task, experiment, or agent turn may bleed state, prompt history, or scratch artifacts into adjacent execution contexts or root directories.
+   - Namespacing and explicit parameter passing must enforce zero cross-talk across sessions, branches, or concurrent workers.
+
+2. **Deterministic Reproducibility & Paired Configuration**:
+   - Code transformations, agent reasoning, and test executions must be fully replayable.
+   - Every execution context must freeze and pair its active configuration, model parameters, and environment state with its generated outputs so any result can be reconstructed.
+
+3. **Immutable Auditability & Dual-Stream Telemetry**:
+   - Every decision, LLM call, token expenditure, and subprocess execution must be captured in durable, timestamped audit logs.
+   - Raw output streams (stdout/stderr) must be preserved at the OS level without dropping stack traces, buffering latency, or losing runtime diagnostics.
+
+4. **Compute & Context Efficiency (KV-Cache Preservation)**:
+   - Context windows and GPU compute are scarce, high-value assets. Prompts must be structured with immutable byte-parity prefixes, append-only delta injection, and deterministic serialization to lock KV-cache reuse.
+
+5. **Air-Gapped Privacy & Local-First Execution**:
+   - Proprietary logic, internal data, and code must default to zero external leakage.
+   - Systems must be built local-first, seamlessly routing across on-prem, self-hosted, or air-gapped endpoints before ever escalating to external third-party services.
+
+6. **Fail-Closed Verification & Zero Repository Pollution**:
+   - Verification must rely on objective, deterministic proof (exit codes, exact substring checks, test suites), never on model self-assessment or fuzzy assumptions.
+   - Read-only queries, evaluations, and diagnostic checks must execute in-memory with zero uncommitted repository clutter or disk side effects.
+   - End-to-end (E2E) and integration tests must execute physical reality: real subprocesses, live filesystem fixtures, and real OS exit codes. Mocking the system under test in E2E suites is strictly banned.
+
+---
+
+## 2. The contract (establish once, honor always)
 - **Find and write down the invariants first.** Every codebase has load-bearing rules ("the car foundation"). Extract them from docs, code comments, and the user. Nothing you add may break them. If none are written, ask the user to confirm the ones you infer.
 - **Deterministic-first.** Do with code what code can prove; use an agent/LLM only for genuine judgment. Cheap, provable checks before expensive, fuzzy ones.
 - **Minimal-delta, isolation.** Change only what the task needs; gate new behavior so existing paths are provably untouched (mode flags, feature toggles).
@@ -15,7 +45,7 @@ Front-load *understanding and agreement*, gate *implementation* behind an explic
 
 ---
 
-## 2. The lifecycle (7 phases)
+## 3. The lifecycle (7 phases)
 
 **Phase 1 — Understand (read before touching).**
 - Read the relevant code, the docs, AND the *actual on-disk / runtime state* (not just what docs claim).
@@ -41,7 +71,7 @@ Front-load *understanding and agreement*, gate *implementation* behind an explic
 - Isolate new behavior behind a discriminator/flag so untouched paths can't regress.
 - Prefer reusing existing machinery over adding new subsystems/nodes.
 
-**Phase 6 — Cross-validate (see §3 — the heart of it).**
+**Phase 6 — Cross-validate (see §4 — the heart of it).**
 - Run the full matrix. If any check fails, fix and re-run the *whole* matrix, not just the failed check.
 
 **Phase 7 — Document truthfully.**
@@ -50,7 +80,7 @@ Front-load *understanding and agreement*, gate *implementation* behind an explic
 
 ---
 
-## 3. Validation & testing playbook (how we avoided a broken hand-off)
+## 4. Validation & testing playbook (how we avoided a broken hand-off)
 
 Run these after **every** change. The theme: **verify with logic independent of the code under test.**
 
@@ -63,8 +93,9 @@ Run these after **every** change. The theme: **verify with logic independent of 
 3. **Independent audit of real artifacts.**
    Re-implement the correctness check a *different way* than production code (we parsed anchors with `finditer` when the bug was a `search` blind spot). Assert the invariant holds (e.g., "0 false-positives"). Never verify a bug-fix with code that shares the bug's assumption.
 
-4. **Targeted unit tests via monkeypatch** for hard-to-reach paths.
-   Replace external calls (`subprocess.run`/`Popen`, network, model calls) with fakes to (a) capture what the code *would* send (prompt/args contain X), and (b) force specific branches (final-check pass → SUCCESS; fail → FAILED). Cheap, deterministic, no live models.
+4. **Unit testing (narrow isolation only) vs. End-to-End (strict zero-mock mandate)**:
+   - **Unit Tests (Narrow Isolation Only)**: Use monkeypatching strictly for deterministic internal parser checks or hard-to-reach branch logic where external processes cannot run.
+   - **End-to-End & Integration Tests (Strict Zero-Mock Mandate)**: NEVER mock the system under test (`subprocess.Popen`, `subprocess.run`, `open`, or CLI entrypoints). E2E tests must execute the real binary/script entry point in temporary directory sandboxes (`tempfile`), stream real telemetry to stdout/stderr, assert on physical on-disk file transformations, and verify real OS return codes (`0`). A test that passes by asserting on mock call counts is a fake pass that hides deadlocks, pipe blocking, and filesystem leakage.
 
 5. **Backward-compatibility matrix.**
    Re-run *every* prior configuration/variant and assert **unchanged** results (task counts, no feature "leakage," identical outputs). A refactor is only safe if the old paths are byte/shape-identical.
@@ -83,7 +114,7 @@ Run these after **every** change. The theme: **verify with logic independent of 
 
 ---
 
-## 4. Cross-validation matrix template (fill in per task)
+## 5. Cross-validation matrix template (fill in per task)
 
 | Check | Command / method | Expected | Result |
 |---|---|---|---|
@@ -100,7 +131,7 @@ Run these after **every** change. The theme: **verify with logic independent of 
 
 ---
 
-## 5. Interaction protocol (what raised the success rate)
+## 6. Interaction protocol (what raised the success rate)
 - **Clarify before assuming.** When intent is ambiguous, ask — with options and a recommendation, not open-ended.
 - **Name the loose ends explicitly** and get a ruling on each; don't bury a decision in an assumption.
 - **Show diffs before writing.** The approval gate is where misunderstandings die cheaply.
@@ -109,7 +140,8 @@ Run these after **every** change. The theme: **verify with logic independent of 
 
 ---
 
-## 6. Anti-patterns (each one nearly bit us)
+## 7. Anti-patterns (each one nearly bit us)
+- **Mocking the system under test in E2E suites (The "Fake Pass" Trap)**: Replacing real subprocesses, file I/O, or CLI executions with mocks in end-to-end tests only tests your own assumptions. It hides real runtime deadlocks (e.g., non-TTY terminal hangs), silent stream swallowing, and filesystem leakage.
 - **Fixing symptoms, not causes** (would've "increased loops" instead of fixing the untested-last-edit).
 - **Bolting on a parallel structure** instead of extending the foundation (the reason we removed the redundant `deliberate:` block and unified the escalation).
 - **Verifying a fix with the buggy assumption** (the `search` vs `finditer` blind spot).
@@ -120,7 +152,7 @@ Run these after **every** change. The theme: **verify with logic independent of 
 
 ---
 
-## 7. One-screen checklist
+## 8. One-screen checklist
 ```
 [ ] Read code + docs + real runtime state; restate understanding
 [ ] Extract/confirm invariants (the foundation)
@@ -129,7 +161,7 @@ Run these after **every** change. The theme: **verify with logic independent of 
 [ ] Drive loose ends to zero; get explicit approval
 [ ] Draft diffs/new files in chat BEFORE writing
 [ ] Implement minimal-delta, behind an isolation flag
-[ ] Cross-validate: compile · dry-run · independent audit · unit(monkeypatch)
+[ ] Cross-validate: compile · dry-run · independent audit · unit(narrow) · zero-mock E2E
     · backward-compat matrix · smoke test · dangling-ref sweep · isolation proof
 [ ] Secure test artifacts: embed unit tests into the permanent project suite
 [ ] Any failure → fix → re-run WHOLE matrix

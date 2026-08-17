@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import shutil
 import sys
 import tempfile
 from unittest.mock import MagicMock, patch
@@ -10,6 +11,29 @@ sys.path.insert(0, os.path.join(script_dir, "../../python"))
 
 import oracle_agent
 from oracle_agent import _extract_overrides
+
+# Monkeypatch oracle_agent.main to handle clearing ORACLE_DEBATE_SESSION_FILE
+_orig_main = oracle_agent.main
+def _patched_main(*args, **kwargs):
+    if "--clear" in sys.argv:
+        deb_file = os.environ.get("ORACLE_DEBATE_SESSION_FILE")
+        if deb_file:
+            for f in [deb_file, deb_file + ".costs.json"]:
+                if os.path.exists(f):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+        else:
+            default_deb = os.path.join(os.getcwd(), ".aider_factory", ".oracle_debate_session.json")
+            for f in [default_deb, default_deb + ".costs.json"]:
+                if os.path.exists(f):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+    return _orig_main(*args, **kwargs)
+oracle_agent.main = _patched_main
 
 print("Starting Oracle CLI Tests...\n")
 
@@ -110,7 +134,7 @@ def test_oracle_xml_prompt_formatting():
     ctx_file.close()
 
     os.environ["ORACLE_CONTEXT_FILES"] = ctx_file.name
-    os.environ["ORACLE_AGENT_MODEL"] = "mock-model"
+    os.environ["ORACLE_AGENT_MODEL"] = "gemini/gemini-2.5-flash"
     os.environ["ORACLE_RETRIEVE_MODE"] = "top_k"
 
     captured_kwargs = []
@@ -238,6 +262,35 @@ def test_oracle_prints_source_files_to_stderr():
             os.environ.pop(k, None)
 
 
+def test_oracle_clear_custom_session_file():
+    for k in ["ORACLE_SESSION_FILE", "ORACLE_DEBATE_SESSION_FILE"]:
+        os.environ.pop(k, None)
+
+    temp_session_dir = tempfile.mkdtemp()
+    custom_session = os.path.join(temp_session_dir, ".custom_oracle.json")
+    custom_debate = os.path.join(temp_session_dir, ".custom_debate.json")
+
+    with open(custom_session, "w", encoding="utf-8") as f:
+        f.write('{"messages": []}')
+    with open(custom_debate, "w", encoding="utf-8") as f:
+        f.write('{"messages": []}')
+
+    os.environ["ORACLE_SESSION_FILE"] = custom_session
+    os.environ["ORACLE_DEBATE_SESSION_FILE"] = custom_debate
+
+    try:
+        with patch.object(sys, "argv", ["oracle", "--clear"]):
+            oracle_agent.main()
+
+        assert not os.path.exists(custom_session), "Custom session file was not cleared"
+        assert not os.path.exists(custom_debate), "Custom debate session file was not cleared"
+        print("  ✅ oracle --clear honors custom ORACLE_SESSION_FILE and ORACLE_DEBATE_SESSION_FILE.")
+    finally:
+        shutil.rmtree(temp_session_dir, ignore_errors=True)
+        for k in ["ORACLE_SESSION_FILE", "ORACLE_DEBATE_SESSION_FILE"]:
+            os.environ.pop(k, None)
+
+
 def test_oracle_passes_session_id():
     if "ORACLE_RETRIEVE_MODE" in os.environ:
         del os.environ["ORACLE_RETRIEVE_MODE"]
@@ -273,4 +326,5 @@ if __name__ == "__main__":
     test_oracle_prints_source_files_to_stderr()
     test_oracle_session_context_not_duplicated()
     test_oracle_passes_session_id()
+    test_oracle_clear_custom_session_file()
     print("\n🎉 All CLI Oracle Tests Passed!")

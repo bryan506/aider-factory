@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
+# test_e2e_factory_quickstart.py — Zero-Mock Physical Factory Quickstart & Provisioning Test.
+
 import os
+import stat
 import sys
 import tempfile
-from unittest.mock import patch, MagicMock
+from pathlib import Path
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../../../python")))
@@ -10,42 +13,50 @@ sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../../..")))
 
 import cli
 
-print("==================================================")
-print("Starting E2E Factory Quickstart Smoke Test...")
-print("==================================================")
 
-@patch("cli.ensure_searxng_service")
-@patch("cli.ensure_bash_wrappers")
-@patch("subprocess.run")
-@patch("requests.get")
-def run_e2e_test(mock_get, mock_sub, mock_bash, mock_searxng):
+def run_e2e_test():
+    print("\n==================================================")
+    print("Starting Zero-Mock Factory Quickstart Smoke Test...")
+    print("==================================================")
+
     with tempfile.TemporaryDirectory() as tmp_dir:
-        original_cwd = os.getcwd()
-        os.chdir(tmp_dir)
-        
-        # Mock cluster response to simulate the Lemonade server
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"data": [{"id": "qwen-e2e-model"}]}
-        mock_get.return_value = mock_resp
-        
-        try:
-            with patch.dict("os.environ", {"LITELLM_BASE_URL": "http://e2e-cluster:8080/v1", "LITELLM_API_KEY": "dummy"}):
-                cli.init_user_project(tmp_dir)
-                
-                env_yaml = os.path.join(".aider_factory", ".env.yml")
-                assert os.path.exists(env_yaml), "YAML must be created"
-                
-                with open(env_yaml, "r") as f:
-                    content = f.read()
-                
-                assert 'architect_api_base: "http://e2e-cluster:8080/v1"' in content, "Cluster API must be injected"
-                assert 'architect_agent: "openai/qwen-e2e-model"' in content, "Cluster model must be injected with provider prefix"
-                assert 'target_files:\n        - "scratchpad.py"' in content, "Scratchpad must be injected"
-                
-                print("  ✅ E2E Factory Quickstart Cluster Discovery PASS")
-        finally:
-            os.chdir(original_cwd)
+        tmp_path = Path(tmp_dir)
+
+        # 1. Execute physical project initialization
+        cli.init_user_project(tmp_dir)
+
+        # 2. Assert core configuration files exist on disk
+        factory_dir = tmp_path / ".aider_factory"
+        assert factory_dir.exists(), ".aider_factory directory must be created"
+
+        env_yaml = factory_dir / ".env.yml"
+        assert env_yaml.exists(), ".env.yml must be created"
+        with open(env_yaml, "r", encoding="utf-8") as f:
+            yaml_content = f.read()
+        assert "scratchpad.py" in yaml_content, "Default scratchpad target must be in .env.yml"
+
+        assert (tmp_path / ".aiderignore").exists(), ".aiderignore must be created"
+        assert (factory_dir / ".aider.conf.yml").exists(), ".aider.conf.yml must be created"
+        assert (factory_dir / ".aider.model.settings.yml").exists(), ".aider.model.settings.yml must be created"
+        assert (factory_dir / "CONVENTIONS.md").exists(), "CONVENTIONS.md must be created"
+        assert (tmp_path / "scratchpad.py").exists(), "scratchpad.py must be created"
+
+        # 3. Assert executable bash wrappers are provisioned with executable permissions
+        bash_dir = factory_dir / "bash"
+        for wrapper_name in ["factory", "oracle", "validate", "research"]:
+            wrapper_path = bash_dir / wrapper_name
+            assert wrapper_path.exists(), f"Wrapper script {wrapper_name} must exist"
+            mode = os.stat(wrapper_path).st_mode
+            assert bool(mode & stat.S_IXUSR), f"Wrapper script {wrapper_name} must be executable (+x)"
+
+        # 4. Assert session management operates cleanly on physical directory
+        sessions = cli._list_sessions(tmp_dir)
+        assert isinstance(sessions, list)
+
+        print("  ✅ Zero-Mock Project Initialization PASS")
+        print("  ✅ File Inode & Directory Tree PASS")
+        print("  ✅ Executable Wrappers (+x) PASS")
+
 
 if __name__ == "__main__":
     run_e2e_test()

@@ -69,7 +69,7 @@ Run structured, adversarial debates between the Architect and a specialized, rea
 
 ### 1. 🏭 `aider-factory` (The Orchestrator)
 
-Automates multi-phase development workflows. It manages file context, coordinates the split **Architect/Editor** model pattern, captures test suite failures, and drives iterative self-healing loops.
+Automates multi-phase development workflows. It manages file context, coordinates the split **Architect/Editor** model pattern, captures test suite failures, and drives iterative self-healing loops with native multi-session persistence and paired configurations.
 
 ### 2. 🔮 `aider-oracle` (The Local Knowledge Oracle)
 
@@ -100,9 +100,9 @@ export GEMINI_API_KEY="your-api-key-here"
 
 # 4. Navigate to your project directory and initialize workspace
 cd /path/to/your-project
-aider-factory
+aider-factory refactor_feature
 
-# 5. Bootstrap your pipeline config interactively (or edit .aider_factory/.env.yml directly)
+# 5. Bootstrap your pipeline config interactively (or edit .aider_factory/sessions/refactor_feature/session.yml directly)
 aider-helper bootstrap
 ```
 
@@ -177,6 +177,25 @@ aider-oracle \"What is the rate limit for the API?\"
 
 ```bash
 aider-oracle --debate code \"Should we migrate from SQLite to PostgreSQL?\"
+```
+
+### Multi-Session Management Examples
+
+```bash
+# Start or resume a named session
+aider-factory refactor_ohlcv
+
+# Start a session with a custom configuration file
+aider-factory .env.yml refactor_ohlcv
+
+# List all active sessions
+aider-factory --list-sessions
+
+# Clear a specific session archive
+aider-factory --clear-session refactor_ohlcv
+
+# Clear all session archives
+aider-factory --clear-all
 ```
 
 ### Run Deterministic Quote Validation (CI/CD Ready)

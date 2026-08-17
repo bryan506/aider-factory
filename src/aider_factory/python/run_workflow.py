@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # run_workflow.py
 
+import datetime
 import glob
 import os
+import re
 import shlex
+import shutil
 import sys
 
 import rag_manager  # for table_name_for(): shared per-document table-name sanitizer
@@ -43,63 +46,77 @@ try:
 except Exception as e:
     print(f"⚠️ [run_workflow] Auto-initialization warning: {e}", file=sys.stderr)
 
-# Defaults to .env.yml config file
-if __name__ == "__main__" or (len(sys.argv) > 1 and not sys.argv[0].endswith("unittest") and sys.argv[1] != "discover"):
-    if len(sys.argv) > 1 and sys.argv[1] != "discover":
-        yaml_path = sys.argv[1]
-    else:
-        clean_path = os.path.join(os.getcwd(), ".aider_factory", ".env.yml")
-        root_path = os.path.join(os.getcwd(), ".env.yml")
-        yaml_path = clean_path if os.path.exists(clean_path) else root_path
-else:
-    clean_path = os.path.join(os.getcwd(), ".aider_factory", ".env.yml")
-    root_path = os.path.join(os.getcwd(), ".env.yml")
-    yaml_path = clean_path if os.path.exists(clean_path) else root_path
+# Determine session name
+session_name = os.environ.get("AI_FACTORY_SESSION")
+if not session_name:
+    # Check sys.argv for a non-flag, non-yml positional argument
+    for arg in sys.argv[1:]:
+        if not arg.startswith("-") and not arg.endswith(".yml") and not arg.endswith(".yaml"):
+            session_name = arg
+            break
 
-if not os.path.exists(yaml_path):
-    if __name__ == "__main__":
-        print(f"Error: Configuration file {yaml_path} not found. Exiting.")
+if session_name:
+    session_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', session_name.strip())
+else:
+    session_name = datetime.datetime.now().strftime("session_%Y%m%d_%H%M%S")
+
+# Determine project dir and session dir
+base_cwd = os.getcwd()
+session_dir = os.path.join(base_cwd, ".aider_factory", "sessions", session_name)
+os.makedirs(session_dir, exist_ok=True)
+
+# Resolve config YAML path (paired session.yml synchronization)
+session_yaml = os.path.join(session_dir, "session.yml")
+yaml_path = session_yaml
+explicit_config = os.environ.get("AI_FACTORY_CONFIG")
+if not explicit_config and len(sys.argv) > 1:
+    for arg in sys.argv[1:]:
+        if arg.endswith(".yml") or arg.endswith(".yaml") or os.path.isfile(os.path.join(base_cwd, arg)):
+            if not arg.startswith("-") and arg != session_name:
+                explicit_config = arg
+                break
+
+if explicit_config and os.path.exists(explicit_config):
+    shutil.copy2(explicit_config, session_yaml)
+elif not os.path.exists(session_yaml):
+    # Locate default config
+    default_config = None
+    local_std = os.path.join(base_cwd, ".aider_factory", ".env.yml")
+    if os.path.exists(local_std):
+        default_config = local_std
+    else:
+        aider_factory_dir = os.path.join(base_cwd, ".aider_factory")
+        if os.path.exists(aider_factory_dir):
+            for f in os.listdir(aider_factory_dir):
+                if f.endswith(".yml") and not f.startswith("."):
+                    default_config = os.path.join(aider_factory_dir, f)
+                    break
+    if default_config and os.path.exists(default_config):
+        shutil.copy2(default_config, session_yaml)
+    else:
+        print("❌ Error: No pipeline configuration file found. Run 'aider-helper bootstrap' or initialize '.aider_factory/.env.yml'.", file=sys.stderr)
         sys.exit(1)
-    else:
-        config = {}
-else:
-    try:
-        with open(yaml_path, "r") as f:
-            config = yaml.safe_load(f) or {}
-    except yaml.YAMLError as exc:
-        if __name__ == "__main__":
-            print(
-                f"\n❌ YAML Parsing Error: The configuration file is malformed.\nDetails: {exc}"
-            )
-            sys.exit(1)
-        else:
-            config = {}
 
-if not isinstance(config, dict):
-    print(
-        "\n❌ YAML Error: Configuration must resolve to a valid dictionary structure."
-    )
-    sys.exit(1)
+with open(session_yaml, "r", encoding="utf-8") as f:
+    config = yaml.safe_load(f)
 
-project_directory = config.get("working_directory")
+project_directory = config.get("working_directory", base_cwd)
+os.chdir(project_directory)
+
+# Export session environment variables for sub-processes
+os.environ["AI_FACTORY_SESSION"] = session_name
+os.environ["ORACLE_SESSION_FILE"] = os.path.join(session_dir, ".oracle_session.json")
+os.environ["ORACLE_DEBATE_SESSION_FILE"] = os.path.join(session_dir, ".oracle_debate_session.json")
+
 test_command_prefix = config.get("test_command_prefix", "").strip()
 global_max_aider_loops = int(config.get("loop_aider_test", 1))
 
-# Language-agnostic test execution. `test_runner` is the command template applied
-# to a test file ({file} is substituted); the default preserves the R behaviour
-# (Rscript runner, now living under .aider_factory/tests/). `test_naming_and_path`
-# is the convention used to auto-generate a per-target test file path when a phase
-# omits files.test_files ({stem} -> the target's basename).
 test_runner = config.get("test_runner", "Rscript .aider_factory/tests/run_tests.R {file}")
 test_file_convention = config.get(
     "test_naming_and_path", "tests/testthat/test-{stem}.R"
 )
 
-if not project_directory:
-    print("Error: working_directory not found in the yaml file. Exiting.")
-    sys.exit(1)
-
-factory: AiderFactory = AiderFactory(project_dir=str(project_directory))
+factory: AiderFactory = AiderFactory(project_dir=str(project_directory), session_name=session_name, session_dir=session_dir)
 file_last_tasks = {}
 completed_files = []
 
@@ -132,12 +149,12 @@ rag_embed_model = (
     phase_models.get("embed_model")
     or phase_rag.get("embed_model")
     or global_rag.get("embed_model")
-    or "BAAI/bge-m3"
+    or "gemini/text-embedding-004"
 )
 rag_embed_backend = (
     phase_rag.get("embed_backend")
     or global_rag.get("embed_backend")
-    or ("openai" if "embedding" in rag_embed_model.lower() or "qwen" in rag_embed_model.lower() else "sentence-transformers")
+    or ("openai" if ("embedding" in rag_embed_model.lower() or "gemini" in rag_embed_model.lower() or "qwen" in rag_embed_model.lower()) else "sentence-transformers")
 )
 rag_embed_api_base = (
     endpoints.get("embed_api_base")
@@ -257,6 +274,31 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
     sticky_context = toggles.get("sticky_context", True)
     auto_test = toggles.get("auto_test", False)
     pair_programming = toggles.get("pair_programming", False)
+
+    # Aider runtime & KV-cache flags
+    map_tokens = toggles.get("map_tokens", 0)
+    map_refresh = toggles.get("map_refresh", "manual")
+    map_multiplier_no_files = toggles.get("map_multiplier_no_files", 0)
+    max_chat_history_tokens = toggles.get("max_chat_history_tokens", 100000)
+    yes_always = toggles.get("yes_always", not pair_programming)
+    auto_accept_architect = toggles.get("auto_accept_architect", not pair_programming)
+    auto_commits = toggles.get("auto_commits", True)
+    suggest_shell_commands = toggles.get("suggest_shell_commands", True)
+    detect_urls = toggles.get("detect_urls", False)
+    disable_playwright = toggles.get("disable_playwright", False)
+
+    task_aider_flags = {
+        "map_tokens": map_tokens,
+        "map_refresh": map_refresh,
+        "map_multiplier_no_files": map_multiplier_no_files,
+        "max_chat_history_tokens": max_chat_history_tokens,
+        "yes_always": yes_always,
+        "auto_accept_architect": auto_accept_architect,
+        "auto_commits": auto_commits,
+        "suggest_shell_commands": suggest_shell_commands,
+        "detect_urls": detect_urls,
+        "disable_playwright": disable_playwright,
+    }
 
     # Phase-level RAG settings
     rag_phase_cfg = phase.get("rag", {}) or {}
@@ -740,6 +782,7 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
                             max_aider_loops=validation_loops,
                             auto_test=auto_test,
                             rag_env=it_env,
+                            **task_aider_flags,
                         )
                     )
                     last_task_for_file = heal_id
@@ -792,6 +835,7 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
                     max_aider_loops=validation_loops,
                     rag_env=_ap_env,
                     soft_fail=True,
+                    **task_aider_flags,
                 )
                 _build_finalize = True
 
@@ -906,6 +950,7 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
                         rag_env=file_rag_env,
                         ocr_ingest=task_ocr_ingest,
                         pair_programming=pair_programming,
+                        **task_aider_flags,
                     )
                 )
                 if task_ocr_ingest is not None:
@@ -1020,6 +1065,7 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
                             pair_programming=pair_programming,
                             rag_env=file_rag_env,
                             ocr_ingest=task_ocr_ingest,
+                            **task_aider_flags,
                         )
                     )
                     if task_ocr_ingest is not None:
@@ -1060,6 +1106,7 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
                             ocr_ingest=task_ocr_ingest,  # Carries ingest if run_job_two was false
                             soft_fail=escalate,
                             final_check=True,
+                            **task_aider_flags,
                         )
                     )
                     if task_ocr_ingest is not None:
@@ -1105,6 +1152,7 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
                     # Code mode has no finalize authority: after the iterate loop, re-run the
                     # test suite ONCE to verify the last edit and report honest pass/fail.
                     final_check=True,
+                    **task_aider_flags,
                 )
                 _build_finalize = False
 

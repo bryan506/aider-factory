@@ -9,6 +9,13 @@ import shlex
 import shutil
 import sys
 
+try:
+    from aider_factory.python.env_utils import load_env_files
+except ImportError:
+    from env_utils import load_env_files
+
+load_env_files()
+
 import rag_manager  # for table_name_for(): shared per-document table-name sanitizer
 import yaml  # type: ignore
 from orchestrate import AiderFactory, Task
@@ -128,6 +135,7 @@ global_editor_api = endpoints.get("editor_ollama_api")
 global_editor_test_api = endpoints.get("editor_test_ollama_api")
 global_rag_agent_api = endpoints.get("rag_agent_api")
 global_grounding_api = endpoints.get("grounding_agent_api")
+global_ranking_api = endpoints.get("ranking_api_base")
 
 # Find the first enabled phase to extract default RAG models if present
 global_models = config.get("models", {}) or {}
@@ -389,9 +397,13 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
         if (GROUNDING_AGENT and "gemini/" in GROUNDING_AGENT)
         else global_grounding_api
     )
-    # Per-phase retrieval strategy, else the global default.
+    # Per-phase retrieval & reranker settings
     phase_retrieval_mode = rag_phase_cfg.get("retrieval_mode", rag_default_retrieval)
     phase_top_k = str(rag_phase_cfg.get("top_k", rag_top_k))
+    ranking_agent = phase_models.get("ranking_agent") or global_models.get("ranking_agent", "")
+    ranking_api_base = endpoints.get("ranking_api_base") or global_ranking_api
+    recall_k = str(rag_phase_cfg.get("recall_k", global_rag.get("recall_k", 30)))
+
     rag_env = {
         "ORACLE_CONFIG_FILE": str(yaml_path),
         "ORACLE_PHASE_INDEX": str(phase_idx),
@@ -399,12 +411,16 @@ for phase_idx, phase in enumerate(config.get("phases", [])):
         "ORACLE_RAG_DB_DIR": phase_db_dir,
         "ORACLE_COLLECTION": phase_collection,
         "ORACLE_TOP_K": phase_top_k,
+        "ORACLE_RECALL_K": recall_k,
         "ORACLE_RETRIEVE_MODE": phase_retrieval_mode,
         "ORACLE_ARCHITECT_MODEL": ARCHITECT_AGENT,
         "ORACLE_EMBED_MODEL": rag_embed_model,
         "ORACLE_EMBED_BACKEND": rag_embed_backend,
         "ORACLE_QUERY_PREFIX": rag_query_prefix,
+        "ORACLE_RANKING_MODEL": ranking_agent,
     }
+    if ranking_api_base:
+        rag_env["ORACLE_RANKING_API_BASE"] = ranking_api_base
     if rag_embed_api_base:
         rag_env["ORACLE_EMBED_API_BASE"] = rag_embed_api_base
     if RAG_AGENT_API_BASE:

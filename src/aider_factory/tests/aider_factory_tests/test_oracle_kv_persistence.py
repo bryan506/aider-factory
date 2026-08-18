@@ -87,6 +87,10 @@ class TestOracleKVPersistence(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.original_cwd = os.getcwd()
         os.chdir(self.temp_dir)
+        self.old_env = dict(os.environ)
+        for k in list(os.environ.keys()):
+            if k.startswith("ORACLE_"):
+                os.environ.pop(k, None)
         os.environ["ORACLE_AGENT_MODEL"] = "openai/test-oracle-model"
         os.environ["ORACLE_AGENT_API_BASE"] = "http://localhost:8080/v1"
         os.environ["OPENAI_API_KEY"] = "sk-dummy"
@@ -96,6 +100,8 @@ class TestOracleKVPersistence(unittest.TestCase):
     def tearDown(self):
         os.chdir(self.original_cwd)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+        os.environ.clear()
+        os.environ.update(self.old_env)
 
     @patch("litellm.completion")
     def test_oracle_interactive_session_prefix_parity(self, mock_completion):

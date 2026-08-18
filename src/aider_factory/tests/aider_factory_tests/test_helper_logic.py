@@ -340,4 +340,16 @@ for name, kwargs in test_modes:
             os.chdir(old_cwd)
 print("✅ Ask & Terminal Mode Zero Directory Creation PASS")
 
+# 11. Test Helper Cloud Model Omits api_key
+print("Starting Helper Cloud Model API Key Tests...")
+with patch("litellm.completion", return_value=mock_response) as mock_comp:
+    for k in ["AIDER_HELPER_API_BASE", "AIDER_HELPER_MODEL"]:
+        os.environ.pop(k, None)
+    os.environ["GEMINI_API_KEY"] = "test-key"
+    bootstrap.run_query("Explain concepts", None, "", ask_mode=True)
+    mock_comp.assert_called()
+    kwargs = mock_comp.call_args[1]
+    assert "api_key" not in kwargs, "Cloud helper queries must not pass explicit api_key in kwargs!"
+print("✅ Helper Cloud Model Omits api_key PASS")
+
 print("\n🎉 All helper logic unit tests passed!")

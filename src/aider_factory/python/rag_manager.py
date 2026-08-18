@@ -43,6 +43,14 @@ DEFAULT_OCR_PROMPT = (
 _ST_CACHE = {}
 
 
+try:
+    from aider_factory.python.env_utils import resolve_api_key
+except ImportError:
+    from env_utils import resolve_api_key
+
+_resolve_api_key = resolve_api_key
+
+
 def embed_texts(texts, backend, model, api_base, batch_size=8):
     """Return list[list[float]] for `texts`. The ONLY embedding entrypoint.
     openai backend with api_base set -> direct HTTP to local llama-server.
@@ -85,8 +93,13 @@ def embed_texts(texts, backend, model, api_base, batch_size=8):
             total_sent = 0
             total_cost = 0.0
 
+            emb_key = _resolve_api_key(model, None)
+
             for i in range(0, len(texts), batch_size):
-                r = litellm.embedding(model=model, input=texts[i : i + batch_size])
+                emb_kwargs = {"model": model, "input": texts[i : i + batch_size]}
+                if emb_key:
+                    emb_kwargs["api_key"] = emb_key
+                r = litellm.embedding(**emb_kwargs)
                 out.extend(d["embedding"] for d in r["data"])
                 
                 try:
@@ -512,6 +525,9 @@ def _ocr_image(png_path, model_id, api_base, prompt_text, max_tokens=2048, timeo
                 kwargs = {"model": model_id, "messages": messages}
                 if max_tokens:
                     kwargs["max_tokens"] = max_tokens
+                ocr_key = _resolve_api_key(model_id, None)
+                if ocr_key:
+                    kwargs["api_key"] = ocr_key
                 r = litellm.completion(**kwargs)
                 
                 cost_line = litellm_cost_line(r, persist_session=False)

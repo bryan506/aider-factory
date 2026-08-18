@@ -21,6 +21,7 @@ open(os.path.join(base_dir, "tests", "global.R"), "w").close()
 print("Starting YAML DAG Routing Tests...\n")
 
 def run_test(test_name, yaml_content, expected_mapping):
+    orig_cwd = os.getcwd()
     yaml_path = os.path.join(base_dir, "test.yml")
     with open(yaml_path, "w") as f:
         yaml.dump(yaml_content, f)
@@ -71,7 +72,9 @@ def run_test(test_name, yaml_content, expected_mapping):
     finally:
         sys.argv = old_argv
         sys.path.pop(0)
+        os.chdir(orig_cwd)
 
+orig_cwd = os.getcwd()
 try:
     # Scenarios
     # 1. Alphabetical Symmetry
@@ -169,5 +172,6 @@ try:
     run_test("4: Out-of-bounds Fallback", config_4, expected_4)
 
 finally:
+    os.chdir(orig_cwd)
     shutil.rmtree(base_dir)
 

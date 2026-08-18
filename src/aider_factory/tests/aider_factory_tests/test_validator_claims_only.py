@@ -118,6 +118,28 @@ class TestValidatorClaimsOnly(unittest.TestCase):
         self.assertTrue(args.report.endswith("dummy_claims_report.md"))
         self.assertIn(".aider_factory", args.report)
 
+    @patch("litellm.completion")
+    def test_grounding_cloud_model_bypasses_dummy_api_key(self, mock_completion):
+        """Verify _entail() omits dummy api_key for cloud models when grounding_api_base is unset."""
+        mock_completion.return_value = {
+            "choices": [{"message": {"content": "SUPPORTED"}}],
+            "usage": {}
+        }
+
+        class MockArgs:
+            grounding_model = "gemini/gemini-2.5-flash"
+            grounding_api_base = None
+            grounding_api_key = "sk-dummy"
+            entail_threshold = 0.5
+
+        chunks = [("doc.md", "Evidence text passage")]
+        score = validator._entail("A specific claim", chunks, MockArgs())
+
+        self.assertEqual(score, 1.0)
+        mock_completion.assert_called_once()
+        kwargs = mock_completion.call_args[1]
+        self.assertNotEqual(kwargs.get("api_key"), "sk-dummy", "Dummy grounding key 'sk-dummy' must not be forwarded to cloud models!")
+
 
 if __name__ == "__main__":
     unittest.main()

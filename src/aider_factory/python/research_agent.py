@@ -180,6 +180,53 @@ def run_sitemap_harvester(target_url, grep_pat=None, grep_ex_pat=None, depth=1, 
     parsed = urlparse(target_url)
     domain = parsed.netloc or parsed.path.split("/")[0]
 
+    # Check for direct llms.txt input
+    if target_url.lower().endswith("llms.txt") or "/llms.txt" in target_url.lower():
+        import rag_web
+        print(f"[sitemap] Harvesting manifest from llms.txt: {target_url}...", file=sys.stderr)
+        discovered_urls = rag_web.fetch_llms_txt_urls(target_url)
+        unique_urls = list(dict.fromkeys(discovered_urls))
+        total_found = len(unique_urls)
+
+        filtered_urls = unique_urls
+        if grep_pat:
+            try:
+                rx = re.compile(grep_pat, re.IGNORECASE)
+                filtered_urls = [u for u in filtered_urls if rx.search(u)]
+            except re.error as e:
+                print(f"Error: Invalid --grep regex pattern '{grep_pat}': {e}", file=sys.stderr)
+                sys.exit(1)
+
+        if grep_ex_pat:
+            try:
+                rx_ex = re.compile(grep_ex_pat, re.IGNORECASE)
+                filtered_urls = [u for u in filtered_urls if not rx_ex.search(u)]
+            except re.error as e:
+                print(f"Error: Invalid --grep-exclude regex pattern '{grep_ex_pat}': {e}", file=sys.stderr)
+                sys.exit(1)
+
+        if not out_path:
+            domain_stem = rag_manager.table_name_for(domain)
+            out_path = os.path.join(".aider_factory", "markdown", "research", f"{domain_stem}_sitemap.txt")
+
+        out_dir = os.path.dirname(os.path.abspath(out_path))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+        with open(out_path, "w", encoding="utf-8") as f:
+            for u in filtered_urls:
+                f.write(u + "\n")
+
+        print(f"\n[sitemap] Discovery Complete for '{domain}':", file=sys.stderr)
+        print(f"          - Total URLs Discovered: {total_found}", file=sys.stderr)
+        print(f"          - URLs Matched Filter:  {len(filtered_urls)}", file=sys.stderr)
+        print(f"          - Output File:          {out_path}\n", file=sys.stderr)
+
+        for u in filtered_urls:
+            print(u)
+
+        return out_path
+
     # Resolve target XML endpoint
     sitemap_url = target_url
     if not target_url.lower().endswith(".xml") and "sitemap" not in target_url.lower():
@@ -206,6 +253,7 @@ def run_sitemap_harvester(target_url, grep_pat=None, grep_ex_pat=None, depth=1, 
         if not xml_bytes and current_depth == 1 and not url.endswith("robots.txt"):
             # Fallback to robots.txt to discover official Sitemap: directives
             robots_url = f"{parsed.scheme}://{domain}/robots.txt"
+            found_sitemap = False
             try:
                 rr = requests.get(robots_url, headers={"User-Agent": "AI-Factory/1.0"}, timeout=10)
                 if rr.status_code == 200:
@@ -213,8 +261,15 @@ def run_sitemap_harvester(target_url, grep_pat=None, grep_ex_pat=None, depth=1, 
                         if line.lower().startswith("sitemap:"):
                             sm_found = line.split(":", 1)[1].strip()
                             _parse_sitemap(sm_found, current_depth)
+                            found_sitemap = True
             except Exception:
                 pass
+            if not found_sitemap:
+                llms_url = f"{parsed.scheme}://{domain}/llms.txt"
+                import rag_web
+                llms_links = rag_web.fetch_llms_txt_urls(llms_url)
+                if llms_links:
+                    discovered_urls.extend(llms_links)
             return
 
         if not xml_bytes:

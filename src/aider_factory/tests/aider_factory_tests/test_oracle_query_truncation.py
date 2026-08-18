@@ -49,17 +49,23 @@ class MChunk(LanceModel):
     line_start: int = 0
     line_end: int = 0
 
-db.create_table("test_table", schema=MChunk).add([
-    {"text": "relevant chunk", "vector": [0.1]*1024, "source_file": "code.py",
-     "source_type": "code", "line_start": 1, "line_end": 10}
-])
-
 from oracle_agent import _retrieve
 
-# Set env for retrieval
-os.environ["ORACLE_COLLECTION"] = "test_table"
-os.environ["ORACLE_TYPE_FILTER"] = ""
-os.environ["ORACLE_QUERY_PREFIX"] = "Instruct: retrieve\nQuery: "
+def setup_function():
+    shutil.rmtree(base_dir, ignore_errors=True)
+    os.makedirs(base_dir, exist_ok=True)
+    os.environ["ORACLE_RAG_DB_DIR"] = os.path.abspath(base_dir)
+    os.environ["ORACLE_COLLECTION"] = "test_table"
+    os.environ["ORACLE_TYPE_FILTER"] = ""
+    os.environ["ORACLE_QUERY_PREFIX"] = "Instruct: retrieve\nQuery: "
+    _captured_inputs.clear()
+    rag_manager.embed_texts = mock_embed
+    global db
+    db = lancedb.connect(base_dir)
+    db.create_table("test_table", schema=MChunk).add([
+        {"text": "relevant chunk", "vector": [0.1]*1024, "source_file": "code.py",
+         "source_type": "code", "line_start": 1, "line_end": 10}
+    ])
 
 
 def test_short_query_unchanged():
@@ -130,10 +136,15 @@ def test_no_prefix_still_truncates():
 
 if __name__ == "__main__":
     print("Starting Oracle Query Truncation Tests...")
+    setup_function()
     test_short_query_unchanged()
+    setup_function()
     test_long_query_truncated()
+    setup_function()
     test_truncated_query_still_retrieves()
+    setup_function()
     test_exact_boundary()
+    setup_function()
     test_no_prefix_still_truncates()
     print("All Oracle Query Truncation Tests Passed!")
     shutil.rmtree(base_dir)

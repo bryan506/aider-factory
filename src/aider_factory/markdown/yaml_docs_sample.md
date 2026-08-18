@@ -200,6 +200,15 @@ loop_aider_test: 3
 
 ## above test_ values resolve to "test_cmd = f"{test_command_prefix} {test_runner.replace('{file}', specific_test_file)}" in the source scripts. Adjust for desired language and test behavior if aider-helper does not get it right.
 
+# --- Python Multi-Suite Recipe (Unit + E2E Simultaneous Execution) ---
+# test_command_prefix: ""
+# test_runner: "uv run --with pytest pytest src/aider_factory/tests/aider_factory_tests/test_validator*.py src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_*.py"
+# test_naming_and_path: ""
+#
+# When test_naming_and_path is "", the full command in test_runner is executed as-is:
+#   1. Bare `/test` runs all unit and E2E test suites simultaneously.
+#   2. The autonomous test-healing loop (`iterate_test: true`) verifies edits against both suites on every cycle.
+
 # 3. GLOBAL API ENDPOINTS (Unified: All network addresses live here)
 endpoints: # set multiple local endpoints, ignored when cloud model chosen
     architect_api_base: "http://192.168.100.2:8080/v1"

@@ -917,9 +917,14 @@ The final command is `{test_command_prefix} {test_runner with {file} substituted
 test_command_prefix: "docker exec -i --user myuser -w /path/to/project my-container"
 test_runner: "Rscript .aider_factory/tests/run_tests.R {file}"
 
-# Python / pytest (native)
+# Python / pytest (single file substitution)
 test_command_prefix: ""
 test_runner: "python -m pytest {file}"
+
+# Python / pytest (combined Unit + End-to-End multi-suite execution)
+test_command_prefix: ""
+test_runner: "uv run --with pytest pytest src/aider_factory/tests/aider_factory_tests/test_validator*.py src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_*.py"
+test_naming_and_path: ""
 
 # Run a script directly (e.g. a validation .sh)
 test_command_prefix: "bash"
@@ -928,7 +933,12 @@ test_runner: "{file}"
 
 A third key, **`test_naming_and_path`** (default `tests/testthat/test-{stem}.R`), only sets the
 auto-generated test path when a phase omits `files.test_files`. The bundled R runner lives at
-`.aider_factory/tests/run_tests.R`; replace it (or `test_runner`) for your language.
+`.aider_factory/tests/run_tests.R`; replace it (or `test_runner`) for your language. Setting `test_naming_and_path: ""` instructs the pipeline to execute the exact command in `test_runner` without substitution.
+
+#### How Combined Unit + E2E Testing Operates
+1. **Interactive `/test` in Chat**: In pair-programming mode (`pair_programming: true`), typing `/test` without arguments executes the full multi-suite command directly, capturing test failures and injecting the error logs back into Aider's context.
+2. **Autonomous Healing Loops (`iterate_test: true`)**: During autonomous runs, the orchestrator executes the combined suite after every edit attempt, ensuring that internal parser checks and physical integration tests both pass before proceeding.
+3. **Ephemeral Dependencies (`uv run --with pytest`)**: Running with `uv run --with pytest` provisions `pytest` on-the-fly in an isolated sandbox, keeping production virtual environments free from testing framework clutter.
 
 ### Interaction Templates (User-Customizable Prompts)
 

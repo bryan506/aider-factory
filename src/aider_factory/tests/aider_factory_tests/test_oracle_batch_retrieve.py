@@ -40,33 +40,41 @@ class MChunk(LanceModel):
     line_start: int = 0
     line_end: int = 0
 
-# Simulate batch=true table naming: {collection}_{repo}_{type}
-db.create_table("MyProject_RepoA_code", schema=MChunk).add([
-    {"text": "RepoA code result", "vector": [0.1]*1024, "source_file": "repoA/main.py",
-     "source_type": "code", "line_start": 1, "line_end": 20}
-])
-db.create_table("MyProject_RepoA_docs", schema=MChunk).add([
-    {"text": "RepoA docs result", "vector": [0.1]*1024, "source_file": "repoA/README.md",
-     "source_type": "doc", "line_start": 0, "line_end": 0}
-])
-db.create_table("MyProject_RepoB_code", schema=MChunk).add([
-    {"text": "RepoB code result", "vector": [0.1]*1024, "source_file": "repoB/lib.py",
-     "source_type": "code", "line_start": 10, "line_end": 30}
-])
-db.create_table("MyProject_docs", schema=MChunk).add([
-    {"text": "OCR docs result", "vector": [0.1]*1024, "source_file": "paper.pdf",
-     "source_type": "doc", "line_start": 0, "line_end": 0}
-])
-# A table that does NOT belong to this collection (should never appear).
-db.create_table("OtherProject_code", schema=MChunk).add([
-    {"text": "Other project code", "vector": [0.1]*1024, "source_file": "other.py",
-     "source_type": "code", "line_start": 0, "line_end": 0}
-])
-# Simulate batch=false: a table whose name IS the collection (exact match).
-db.create_table("SinglePaperTable", schema=MChunk).add([
-    {"text": "Single paper content", "vector": [0.1]*1024, "source_file": "paper.md",
-     "source_type": "doc", "line_start": 0, "line_end": 0}
-])
+def setup_function():
+    shutil.rmtree(base_dir, ignore_errors=True)
+    os.makedirs(base_dir, exist_ok=True)
+    os.environ["ORACLE_RAG_DB_DIR"] = os.path.abspath(base_dir)
+    rag_manager.embed_texts = mock_embed
+    global db
+    db = lancedb.connect(base_dir)
+
+    # Simulate batch=true table naming: {collection}_{repo}_{type}
+    db.create_table("MyProject_RepoA_code", schema=MChunk).add([
+        {"text": "RepoA code result", "vector": [0.1]*1024, "source_file": "repoA/main.py",
+         "source_type": "code", "line_start": 1, "line_end": 20}
+    ])
+    db.create_table("MyProject_RepoA_docs", schema=MChunk).add([
+        {"text": "RepoA docs result", "vector": [0.1]*1024, "source_file": "repoA/README.md",
+         "source_type": "doc", "line_start": 0, "line_end": 0}
+    ])
+    db.create_table("MyProject_RepoB_code", schema=MChunk).add([
+        {"text": "RepoB code result", "vector": [0.1]*1024, "source_file": "repoB/lib.py",
+         "source_type": "code", "line_start": 10, "line_end": 30}
+    ])
+    db.create_table("MyProject_docs", schema=MChunk).add([
+        {"text": "OCR docs result", "vector": [0.1]*1024, "source_file": "paper.pdf",
+         "source_type": "doc", "line_start": 0, "line_end": 0}
+    ])
+    # A table that does NOT belong to this collection (should never appear).
+    db.create_table("OtherProject_code", schema=MChunk).add([
+        {"text": "Other project code", "vector": [0.1]*1024, "source_file": "other.py",
+         "source_type": "code", "line_start": 0, "line_end": 0}
+    ])
+    # Simulate batch=false: a table whose name IS the collection (exact match).
+    db.create_table("SinglePaperTable", schema=MChunk).add([
+        {"text": "Single paper content", "vector": [0.1]*1024, "source_file": "paper.md",
+         "source_type": "doc", "line_start": 0, "line_end": 0}
+    ])
 
 
 def test_prefix_match_fuses_all_tables():
@@ -141,11 +149,17 @@ def test_no_matching_prefix_returns_empty():
 
 if __name__ == "__main__":
     print("Starting Oracle Batch Retrieve Tests...")
+    setup_function()
     test_prefix_match_fuses_all_tables()
+    setup_function()
     test_prefix_match_type_filter_code()
+    setup_function()
     test_prefix_match_type_filter_docs()
+    setup_function()
     test_exact_match_unchanged()
+    setup_function()
     test_wildcard_unchanged()
+    setup_function()
     test_no_matching_prefix_returns_empty()
     print("All Oracle Batch Retrieve Tests Passed!")
     shutil.rmtree(base_dir)

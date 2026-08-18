@@ -3,7 +3,9 @@
 
 import http.server
 import os
+from pathlib import Path
 import shutil
+import subprocess
 import sys
 import threading
 import tempfile
@@ -43,16 +45,40 @@ class LocalhostFixtureHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(html.encode("utf-8"))
         elif self.path == "/llms.txt":
-            self.send_response(404)
+            content = f"# Docs Index\n- [Quickstart](http://127.0.0.1:{self.server.server_address[1]}/quickstart.md): Getting started\n- [Indexing](/indexing.md): Vector index guide\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
+            self.wfile.write(content.encode("utf-8"))
+        elif self.path == "/llms-full.txt":
+            content = "# Full LanceDB Corpus\n\nComplete guide to vector search, IVF-PQ, and hybrid search.\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(content.encode("utf-8"))
+        elif self.path == "/quickstart.md":
+            content = "# Quickstart Guide\n\nRun pip install lancedb and create a table in 3 lines.\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/markdown; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(content.encode("utf-8"))
+        elif self.path == "/indexing.md":
+            content = "# Vector Indexing Guide\n\nLearn how to create IVF-PQ and HNSW indices.\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/markdown; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(content.encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
 
     def do_HEAD(self):
-        if self.path == "/docs/guide.html":
+        if self.path in ("/docs/guide.html", "/quickstart.md", "/indexing.md", "/llms.txt", "/llms-full.txt"):
             self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            if self.path.endswith((".md", ".txt")):
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+            else:
+                self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
         else:
             self.send_response(404)
@@ -77,6 +103,14 @@ class TestE2EResearchWebRAG(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
+        self.old_cwd = os.getcwd()
+        os.chdir(self.temp_dir)
+
+        # Clear leaked environment variables from prior test modules
+        for k in list(os.environ.keys()):
+            if k.startswith("ORACLE_") or k.startswith("AI_FACTORY_"):
+                os.environ.pop(k, None)
+
         self.collection = "e2e_live_web_smoke"
         self.context_root = os.path.join(self.temp_dir, ".aider_factory", "markdown", "lanceDB")
         self.job_dir = os.path.join(self.context_root, self.collection)
@@ -87,10 +121,12 @@ class TestE2EResearchWebRAG(unittest.TestCase):
         os.environ["ORACLE_RAG_DB_DIR"] = os.path.join(self.job_dir, "lancedb")
 
     def tearDown(self):
+        os.chdir(self.old_cwd)
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
-        os.environ.pop("ORACLE_EXPLICIT_COLLECTION", None)
-        os.environ.pop("ORACLE_RAG_DB_DIR", None)
+        for k in list(os.environ.keys()):
+            if k.startswith("ORACLE_") or k.startswith("AI_FACTORY_"):
+                os.environ.pop(k, None)
 
     def test_live_sitemap_harvest_and_localhost_web_ingestion(self):
         """Zero-mock live HTTP test: harvests sitemap over localhost and ingests into LanceDB."""
@@ -140,6 +176,117 @@ class TestE2EResearchWebRAG(unittest.TestCase):
         with open(report_path, "r", encoding="utf-8") as f:
             content = f.read()
         self.assertIn("Vector similarity benchmarks in LanceDB", content)
+
+    def test_e2e_research_sitemap_harvester_llms_txt_cli(self):
+        """Zero-mock E2E CLI smoke test: research_agent harvests llms.txt via subprocess."""
+        out_file = os.path.join(self.temp_dir, "harvested_llms_urls.txt")
+        target_url = f"http://127.0.0.1:{self.port}/llms.txt"
+        research_script = os.path.join(python_module_dir, "research_agent.py")
+
+        cmd = [
+            sys.executable,
+            research_script,
+            "search",
+            target_url,
+            "--sitemap",
+            "--out",
+            out_file,
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, cwd=self.temp_dir)
+        self.assertEqual(res.returncode, 0, f"Process failed: {res.stderr}")
+        self.assertTrue(os.path.exists(out_file))
+
+        with open(out_file, "r", encoding="utf-8") as f:
+            urls = [l.strip() for l in f if l.strip()]
+
+        self.assertIn(f"http://127.0.0.1:{self.port}/quickstart.md", urls)
+        self.assertIn(f"http://127.0.0.1:{self.port}/indexing.md", urls)
+
+    def test_e2e_oracle_add_web_llms_full_txt_direct_download_cli(self):
+        """Zero-mock E2E CLI smoke test: oracle --add-web downloads llms-full.txt directly without hijacking."""
+        target_url = f"http://127.0.0.1:{self.port}/llms-full.txt"
+        oracle_script = os.path.join(python_module_dir, "oracle_agent.py")
+
+        # Set up a sandbox .aider_factory/.env.yml
+        os.makedirs(os.path.join(self.temp_dir, ".aider_factory"), exist_ok=True)
+        sandbox_env_yml = os.path.join(self.temp_dir, ".aider_factory", ".env.yml")
+        with open(sandbox_env_yml, "w", encoding="utf-8") as f:
+            f.write(f"working_directory: \"{self.temp_dir}\"\n")
+
+        env = os.environ.copy()
+        env["ORACLE_CONFIG_FILE"] = sandbox_env_yml
+        env["ORACLE_COLLECTION"] = "e2e_full_docs"
+        env["ORACLE_EXPLICIT_COLLECTION"] = "1"
+        env["ORACLE_RAG_DB_DIR"] = os.path.join(
+            self.temp_dir, ".aider_factory", "markdown", "lanceDB", "e2e_full_docs", "lancedb"
+        )
+
+        cmd = [
+            sys.executable,
+            oracle_script,
+            "--collection",
+            "e2e_full_docs",
+            "--add-web",
+            target_url,
+            "--no-rag",
+        ]
+        res = subprocess.run(cmd, env=env, capture_output=True, text=True, cwd=self.temp_dir)
+        self.assertEqual(res.returncode, 0, f"Process failed: {res.stderr}")
+
+        job_dir = Path(self.temp_dir) / ".aider_factory" / "markdown" / "lanceDB" / "e2e_full_docs"
+        self.assertTrue(job_dir.exists())
+
+        md_files = list(job_dir.glob("*.md"))
+        self.assertEqual(len(md_files), 1)
+
+        saved_file = md_files[0]
+        self.assertNotIn("_llms.md", saved_file.name, "File must not be hijacked to root _llms.md!")
+
+        content = saved_file.read_text(encoding="utf-8")
+        self.assertIn("# Full LanceDB Corpus", content)
+        self.assertIn("Complete guide to vector search, IVF-PQ, and hybrid search.", content)
+
+    def test_e2e_oracle_add_web_batch_llms_txt_expansion_cli(self):
+        """Zero-mock E2E CLI smoke test: oracle --add-web expands llms.txt and batch-downloads child pages."""
+        target_url = f"http://127.0.0.1:{self.port}/llms.txt"
+        oracle_script = os.path.join(python_module_dir, "oracle_agent.py")
+
+        os.makedirs(os.path.join(self.temp_dir, ".aider_factory"), exist_ok=True)
+        sandbox_env_yml = os.path.join(self.temp_dir, ".aider_factory", ".env.yml")
+        with open(sandbox_env_yml, "w", encoding="utf-8") as f:
+            f.write(f"working_directory: \"{self.temp_dir}\"\n")
+
+        env = os.environ.copy()
+        env["ORACLE_CONFIG_FILE"] = sandbox_env_yml
+        env["ORACLE_COLLECTION"] = "e2e_batch_docs"
+        env["ORACLE_EXPLICIT_COLLECTION"] = "1"
+        env["ORACLE_RAG_DB_DIR"] = os.path.join(
+            self.temp_dir, ".aider_factory", "markdown", "lanceDB", "e2e_batch_docs", "lancedb"
+        )
+
+        cmd = [
+            sys.executable,
+            oracle_script,
+            "--collection",
+            "e2e_batch_docs",
+            "--add-web",
+            target_url,
+            "--workers",
+            "2",
+            "--no-rag",
+        ]
+        res = subprocess.run(cmd, env=env, capture_output=True, text=True, cwd=self.temp_dir)
+        self.assertEqual(res.returncode, 0, f"Process failed: {res.stderr}")
+
+        job_dir = Path(self.temp_dir) / ".aider_factory" / "markdown" / "lanceDB" / "e2e_batch_docs"
+        self.assertTrue(job_dir.exists())
+
+        md_files = list(job_dir.glob("*.md"))
+        self.assertEqual(len(md_files), 2)
+
+        combined_text = "\n".join(f.read_text(encoding="utf-8") for f in md_files)
+        self.assertIn("Quickstart Guide", combined_text)
+        self.assertIn("Vector Indexing Guide", combined_text)
 
 
 if __name__ == "__main__":

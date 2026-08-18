@@ -1,3 +1,4 @@
+import json
 import os
 import runpy
 import shutil
@@ -5,6 +6,148 @@ import subprocess
 import sys
 import time
 import urllib.request
+
+
+pkg_dir = os.path.dirname(os.path.abspath(__file__))
+python_dir = os.path.join(pkg_dir, "python")
+if python_dir not in sys.path:
+    sys.path.insert(0, python_dir)
+
+try:
+    from aider_factory.python.env_utils import load_env_files
+except ImportError:
+    from env_utils import load_env_files
+
+_load_env_files = load_env_files
+
+BASELINE_AIDERIGNORE = """# Ignore RAG database, logs, and caches
+.aider_factory/
+#src/aider_factory/tests/**
+#src/aider_factory/python/**
+#src/aider_factory/markdown/**
+#src/aider_factory/default_configs/**
+#R/**
+#bash/**
+
+# Ignore temp folders
+temp/
+
+# Ignore package-level build, documentation, and installation folders
+man/
+inst/
+
+# Ignore any large data, media, or document folders
+docs/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+"""
+
+
+def _ensure_baseline_aiderignore(cwd):
+    """Ensure the root .aiderignore exists and matches the baseline standard."""
+    local_aider_ignore = os.path.join(cwd, ".aiderignore")
+    with open(local_aider_ignore, "w", encoding="utf-8") as f:
+        f.write(BASELINE_AIDERIGNORE)
+
+
+def _build_repomap_ignore_content(cwd, mode="source"):
+    """Construct deterministic ignore content for source mapping vs. test mapping."""
+    base_rules = [
+        ".aider_factory/",
+        "temp/",
+        "man/",
+        "inst/",
+        "docs/",
+        "*.pdf",
+        "*.png",
+        "*.jpg",
+        "*.jpeg",
+        "*.gif",
+    ]
+
+    if mode == "source":
+        # Exclude test files so static_repo_map.md contains only source code
+        test_rules = [
+            "src/aider_factory/tests/**",
+            "tests/**",
+            "testthat/**",
+            "**/tests/**",
+            "**/testthat/**",
+            "**/__tests__/**",
+            "*test*.*",
+            "*_test.*",
+        ]
+        return "\n".join(base_rules + test_rules) + "\n"
+    elif mode == "tests":
+        # Exclude non-test source files so static_repo_map_tests.md contains only test code
+        source_rules = [
+            "src/aider_factory/python/**",
+            "src/aider_factory/markdown/**",
+            "src/aider_factory/default_configs/**",
+            "src/aider_factory/cli.py",
+            "R/**",
+            "bash/**",
+        ]
+        return "\n".join(base_rules + source_rules) + "\n"
+    return BASELINE_AIDERIGNORE
+
+
+def _generate_repo_maps(cwd, map_tokens=4096, target="all", is_global=False):
+    """Generate static repo maps (source and/or tests) using ephemeral ignore files."""
+    ensure_aider_installed()
+    projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
+    if not projects:
+        projects = [os.path.abspath(cwd)]
+
+    for proj in projects:
+        af_dir = os.path.join(proj, ".aider_factory")
+        os.makedirs(af_dir, exist_ok=True)
+        p_name = os.path.basename(proj)
+        if is_global:
+            print(f"\nWorkspace: {p_name} ({proj})")
+
+        targets = []
+        if target in ("source", "all"):
+            targets.append(("source", os.path.join(af_dir, "static_repo_map.md")))
+        if target in ("tests", "all"):
+            targets.append(("tests", os.path.join(af_dir, "static_repo_map_tests.md")))
+
+        ephemeral_files = []
+        try:
+            for mode, out_path in targets:
+                e_ignore = os.path.join(af_dir, f".aiderignore_{mode}")
+                ephemeral_files.append(e_ignore)
+                with open(e_ignore, "w", encoding="utf-8") as f:
+                    f.write(_build_repomap_ignore_content(proj, mode=mode))
+
+                cmd = [
+                    "aider",
+                    "--map-tokens", str(map_tokens),
+                    "--show-repo-map",
+                    "--no-show-model-warnings",
+                    "--aiderignore", e_ignore,
+                ]
+                res = subprocess.run(cmd, cwd=proj, capture_output=True, text=True)
+                if res.returncode == 0 and res.stdout.strip():
+                    with open(out_path, "w", encoding="utf-8") as f:
+                        f.write(res.stdout)
+                    line_count = len(res.stdout.splitlines())
+                    size_kb = max(1, os.path.getsize(out_path) // 1024)
+                    print(f"  Generated {os.path.basename(out_path)} ({line_count} lines, {size_kb} KB)")
+                else:
+                    err = res.stderr.strip() or "No output generated"
+                    print(f"  Warning generating {os.path.basename(out_path)}: {err}", file=sys.stderr)
+        finally:
+            for ef in ephemeral_files:
+                if os.path.exists(ef):
+                    try:
+                        os.remove(ef)
+                    except OSError:
+                        pass
+            _ensure_baseline_aiderignore(proj)
 
 
 def ensure_searxng_service():
@@ -171,10 +314,58 @@ def ensure_bash_wrappers(project_aider_factory_dir):
         os.chmod(target_path, 0o755)
 
 
+def _get_registry_path():
+    """Return the global workspace registry JSON path (~/.config/aider_factory/registry.json)."""
+    config_dir = os.path.expanduser("~/.config/aider_factory")
+    os.makedirs(config_dir, exist_ok=True)
+    return os.path.join(config_dir, "registry.json")
+
+
+def _register_project(cwd):
+    """Auto-register the project root directory in the global registry."""
+    try:
+        reg_file = _get_registry_path()
+        abs_cwd = os.path.abspath(cwd)
+        projects = []
+        if os.path.exists(reg_file):
+            try:
+                with open(reg_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    projects = data.get("projects", []) if isinstance(data, dict) else []
+            except Exception:
+                projects = []
+        if abs_cwd not in projects:
+            projects.append(abs_cwd)
+            with open(reg_file, "w", encoding="utf-8") as f:
+                json.dump({"projects": projects}, f, indent=2)
+    except Exception:
+        pass
+
+
+def _get_registered_projects():
+    """Retrieve all valid, registered project directories, auto-pruning non-existent paths."""
+    reg_file = _get_registry_path()
+    if not os.path.exists(reg_file):
+        return []
+    try:
+        with open(reg_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        raw_list = data.get("projects", []) if isinstance(data, dict) else []
+        valid = [p for p in raw_list if os.path.isdir(p) and os.path.isdir(os.path.join(p, ".aider_factory"))]
+        if len(valid) != len(raw_list):
+            with open(reg_file, "w", encoding="utf-8") as f:
+                json.dump({"projects": valid}, f, indent=2)
+        return sorted(valid)
+    except Exception:
+        return []
+
+
 def init_user_project(cwd=None):
     """Onboarding: Auto-creates default config files in the CWD if they are missing."""
     if cwd is None:
         cwd = os.getcwd()
+    _register_project(cwd)
+    _load_env_files(cwd)
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
     default_configs_dir = os.path.join(pkg_dir, "default_configs")
 
@@ -310,9 +501,7 @@ def init_user_project(cwd=None):
     # 2. Create .aiderignore at root if missing
     if not os.path.exists(local_aider_ignore):
         print(f"📦 Initializing default '.aiderignore' in {cwd}...")
-        shutil.copy(
-            os.path.join(default_configs_dir, "aiderignore"), local_aider_ignore
-        )
+        _ensure_baseline_aiderignore(cwd)
 
     # 3. Create .aider.conf.yml inside .aider_factory/ if missing
     if not os.path.exists(local_aider_conf):
@@ -350,44 +539,357 @@ def ensure_aider_installed():
             print(f"⚠️ [aider-factory] Could not auto-install aider-chat: {e}", file=sys.stderr)
 
 
-def _list_sessions(cwd):
-    sess_root = os.path.join(cwd, ".aider_factory", "sessions")
-    if not os.path.exists(sess_root) or not os.listdir(sess_root):
-        print("No active sessions found.")
-        return []
-    print("Active Sessions:")
-    found = []
-    for item in sorted(os.listdir(sess_root)):
-        sess_dir = os.path.join(sess_root, item)
-        if os.path.isdir(sess_dir):
-            found.append(item)
-            mtime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(sess_dir)))
-            chat_file = os.path.join(sess_dir, ".aider.chat.history.md")
-            size_str = f"{os.path.getsize(chat_file) // 1024} KB" if os.path.exists(chat_file) else "empty"
-            yml_file = os.path.join(sess_dir, "session.yml")
-            yml_status = "paired" if os.path.exists(yml_file) else "no config"
-            print(f"  - {item:<26} (Active: {mtime}, History: {size_str}, Config: {yml_status})")
-    return found
+def _list_sessions(cwd, is_global=False):
+    projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
+    if not projects:
+        projects = [os.path.abspath(cwd)]
+
+    total_found = []
+    for proj in projects:
+        sess_root = os.path.join(proj, ".aider_factory", "sessions")
+        p_name = os.path.basename(proj)
+        if is_global:
+            print(f"\n📂 Project: {p_name} ({proj})")
+
+        if not os.path.exists(sess_root) or not os.listdir(sess_root):
+            if not is_global:
+                print("No active sessions found.")
+            else:
+                print("  (No active sessions)")
+            continue
+
+        if not is_global:
+            print("Active Sessions:")
+
+        for item in sorted(os.listdir(sess_root)):
+            sess_dir = os.path.join(sess_root, item)
+            if os.path.isdir(sess_dir):
+                total_found.append(f"{p_name}/{item}" if is_global else item)
+                mtime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(sess_dir)))
+                chat_file = os.path.join(sess_dir, ".aider.chat.history.md")
+                size_str = f"{os.path.getsize(chat_file) // 1024} KB" if os.path.exists(chat_file) else "empty"
+                yml_file = os.path.join(sess_dir, "session.yml")
+                yml_status = "paired" if os.path.exists(yml_file) else "no config"
+                print(f"  - {item:<26} (Active: {mtime}, History: {size_str}, Config: {yml_status})")
+    return total_found
 
 
-def _clear_session(cwd, name):
+def _clear_session(cwd, name, is_global=False):
     import re
-    slug = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', name.strip())
-    sess_dir = os.path.join(cwd, ".aider_factory", "sessions", slug)
-    if os.path.exists(sess_dir):
-        shutil.rmtree(sess_dir, ignore_errors=True)
-        print(f"Session '{slug}' cleared.")
-    else:
+    target_project = None
+    target_session = name.strip()
+
+    if "/" in target_session:
+        parts = target_session.split("/", 1)
+        target_project, target_session = parts[0], parts[1]
+
+    slug = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', target_session)
+    projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
+    if not projects:
+        projects = [os.path.abspath(cwd)]
+
+    cleared = 0
+    for proj in projects:
+        p_name = os.path.basename(proj)
+        if target_project and p_name != target_project:
+            continue
+        sess_dir = os.path.join(proj, ".aider_factory", "sessions", slug)
+        if os.path.exists(sess_dir):
+            shutil.rmtree(sess_dir, ignore_errors=True)
+            print(f"Session '{slug}' cleared in project '{p_name}'.")
+            cleared += 1
+
+    if cleared == 0:
         print(f"Session '{slug}' not found.")
 
 
-def _clear_all_sessions(cwd):
-    sess_root = os.path.join(cwd, ".aider_factory", "sessions")
-    if os.path.exists(sess_root):
-        shutil.rmtree(sess_root, ignore_errors=True)
-        print("All session archives cleared.")
+def _clear_all_sessions(cwd, is_global=False):
+    projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
+    if not projects:
+        projects = [os.path.abspath(cwd)]
+
+    for proj in projects:
+        p_name = os.path.basename(proj)
+        sess_root = os.path.join(proj, ".aider_factory", "sessions")
+        if os.path.exists(sess_root):
+            shutil.rmtree(sess_root, ignore_errors=True)
+            print(f"All session archives cleared in '{p_name}'.")
+        elif not is_global:
+            print("No session directory found.")
+
+
+def _get_cluster_endpoints(cwd):
+    """Discover active cluster endpoints from environment and .env.yml."""
+    endpoints = set()
+    for env_k in ["LITELLM_BASE_URL", "ARCHITECT_API_BASE", "ORACLE_AGENT_API_BASE", "RANKING_API_BASE"]:
+        val = os.environ.get(env_k)
+        if val and val.startswith("http"):
+            endpoints.add(val.rstrip("/"))
+
+    for yaml_path in [
+        os.path.join(cwd, ".aider_factory", ".env.yml"),
+        os.path.join(cwd, ".env.yml"),
+    ]:
+        if os.path.exists(yaml_path):
+            try:
+                import yaml
+                with open(yaml_path, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                ep_cfg = cfg.get("endpoints", {}) or {}
+                for v in ep_cfg.values():
+                    if isinstance(v, str) and v.startswith("http"):
+                        endpoints.add(v.rstrip("/"))
+            except Exception:
+                pass
+    return sorted(list(endpoints))
+
+
+def _probe_cluster_slots(base_url, timeout=1.0):
+    """Safely query llama-server or cluster /slots endpoint."""
+    clean_base = base_url[:-3] if base_url.endswith("/v1") else base_url
+    slots_url = f"{clean_base}/slots"
+    try:
+        req = urllib.request.Request(
+            slots_url,
+            headers={"User-Agent": "AI-Factory/1.0", "Authorization": "Bearer sk-dummy"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
+                if isinstance(data, list):
+                    active = sum(1 for s in data if isinstance(s, dict) and (s.get("is_processing") or s.get("state") == 1))
+                    return len(data), active, slots_url
+    except Exception:
+        pass
+    return None, None, None
+
+
+def _release_cluster_slots(base_url, timeout=2.0):
+    """Send release request to llama-server /slots to free cached context and GPU VRAM."""
+    clean_base = base_url[:-3] if base_url.endswith("/v1") else base_url
+    released = 0
+    try:
+        req = urllib.request.Request(
+            f"{clean_base}/slots",
+            headers={"User-Agent": "AI-Factory/1.0", "Authorization": "Bearer sk-dummy"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
+                if isinstance(data, list):
+                    for slot in data:
+                        if isinstance(slot, dict) and "id" in slot:
+                            slot_id = slot["id"]
+                            rel_url = f"{clean_base}/slots/{slot_id}?action=release"
+                            try:
+                                post_req = urllib.request.Request(
+                                    rel_url,
+                                    data=b"{}",
+                                    headers={"Content-Type": "application/json", "Authorization": "Bearer sk-dummy"},
+                                    method="POST",
+                                )
+                                with urllib.request.urlopen(post_req, timeout=timeout) as r:
+                                    if r.status == 200:
+                                        released += 1
+                            except Exception:
+                                pass
+    except Exception:
+        pass
+    return released
+
+
+def _get_side_session_artifacts(cwd):
+    """Enumerate all side-agent JSON and Markdown session files."""
+    af_dir = os.path.join(cwd, ".aider_factory")
+    candidates = [
+        ("Helper Config Session", os.path.join(af_dir, ".helper_session.json")),
+        ("Helper Terminal Session", os.path.join(af_dir, ".helper_terminal_session.json")),
+        ("Oracle Session", os.path.join(af_dir, ".oracle_session.json")),
+        ("Oracle Cost Ledger", os.path.join(af_dir, ".oracle_session.json.costs.json")),
+        ("Oracle Debate Session", os.path.join(af_dir, ".oracle_debate_session.json")),
+        ("Debate Aider History", os.path.join(af_dir, ".debate_aider_history.md")),
+    ]
+    sess_root = os.path.join(af_dir, "sessions")
+    if os.path.isdir(sess_root):
+        for s in sorted(os.listdir(sess_root)):
+            s_dir = os.path.join(sess_root, s)
+            if os.path.isdir(s_dir):
+                candidates.append((f"Session '{s}' Oracle", os.path.join(s_dir, ".oracle_session.json")))
+                candidates.append((f"Session '{s}' Debate", os.path.join(s_dir, ".oracle_debate_session.json")))
+
+    found = []
+    for label, p in candidates:
+        if os.path.exists(p):
+            turns = None
+            size_kb = max(1, os.path.getsize(p) // 1024) if os.path.getsize(p) > 0 else 0
+            if p.endswith(".json") and not p.endswith(".costs.json"):
+                try:
+                    with open(p, "r", encoding="utf-8") as fh:
+                        content = json.load(fh)
+                        if isinstance(content, list):
+                            turns = len(content)
+                        elif isinstance(content, dict) and "messages" in content:
+                            turns = len(content["messages"])
+                except Exception:
+                    pass
+            found.append({"label": label, "path": p, "size_kb": size_kb, "turns": turns, "mtime": os.path.getmtime(p)})
+    return found
+
+
+def _clear_side_session_by_name(cwd, target_name, is_global=False):
+    """Surgically delete a specific side-agent session by alias or session name."""
+    projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
+    if not projects:
+        projects = [os.path.abspath(cwd)]
+
+    alias = target_name.strip().lower()
+    total_deleted = 0
+
+    for proj in projects:
+        af_dir = os.path.join(proj, ".aider_factory")
+        targets_to_delete = []
+
+        if alias in ("helper", "config"):
+            targets_to_delete.append(os.path.join(af_dir, ".helper_session.json"))
+        elif alias in ("terminal", "term"):
+            targets_to_delete.append(os.path.join(af_dir, ".helper_terminal_session.json"))
+        elif alias == "oracle":
+            targets_to_delete.extend([
+                os.path.join(af_dir, ".oracle_session.json"),
+                os.path.join(af_dir, ".oracle_session.json.costs.json"),
+            ])
+        elif alias == "debate":
+            targets_to_delete.extend([
+                os.path.join(af_dir, ".oracle_debate_session.json"),
+                os.path.join(af_dir, ".debate_aider_history.md"),
+            ])
+        else:
+            # Check for session-scoped sidecars: sessions/<name>/.oracle_*
+            sess_dir = os.path.join(af_dir, "sessions", target_name.strip())
+            targets_to_delete.extend([
+                os.path.join(sess_dir, ".oracle_session.json"),
+                os.path.join(sess_dir, ".oracle_session.json.costs.json"),
+                os.path.join(sess_dir, ".oracle_debate_session.json"),
+            ])
+
+        for path in targets_to_delete:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                    total_deleted += 1
+                except OSError:
+                    pass
+
+    p_info = " across registered projects" if is_global else ""
+    if total_deleted > 0:
+        print(f"🧹 Successfully cleared {total_deleted} side-agent session file(s) for '{target_name}'{p_info}.")
     else:
-        print("No session directory found.")
+        print(f"No side-agent session artifacts found matching '{target_name}'{p_info}.")
+
+
+def _status(cwd, is_global=False):
+    """Print comprehensive diagnostic status of sessions, side agents, and cluster resources."""
+    projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
+    if not projects:
+        projects = [os.path.abspath(cwd)]
+
+    title_suffix = " (Global - All Registered Workspaces)" if is_global else ""
+    print("==================================================")
+    print(f"AI Factory Session & Cluster Status{title_suffix}")
+    print("==================================================")
+
+    all_endpoints = set()
+
+    for proj in projects:
+        p_name = os.path.basename(proj)
+        if is_global:
+            print(f"\n📂 Workspace: {p_name} ({proj})")
+
+        # 1. Main Aider Sessions
+        print("\n[1] Main Aider Sessions:")
+        sess_root = os.path.join(proj, ".aider_factory", "sessions")
+        sessions = []
+        if os.path.isdir(sess_root):
+            for item in sorted(os.listdir(sess_root)):
+                s_dir = os.path.join(sess_root, item)
+                if os.path.isdir(s_dir):
+                    sessions.append(item)
+                    mtime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(s_dir)))
+                    chat_file = os.path.join(s_dir, ".aider.chat.history.md")
+                    size_str = f"{os.path.getsize(chat_file) // 1024} KB" if os.path.exists(chat_file) else "empty"
+                    yml_file = os.path.join(s_dir, "session.yml")
+                    yml_status = "paired" if os.path.exists(yml_file) else "no config"
+                    print(f"  - {item:<26} (Modified: {mtime}, History: {size_str}, Config: {yml_status})")
+        if not sessions:
+            print("  (None active)")
+
+        # 2. Side-Agent Sessions & KV Caches
+        print("\n[2] Side-Agent Sessions & KV Caches:")
+        side_artifacts = _get_side_session_artifacts(proj)
+        if side_artifacts:
+            for art in side_artifacts:
+                mtime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(art["mtime"]))
+                turn_str = f", {art['turns']} turn(s)" if art["turns"] is not None else ""
+                print(f"  - {art['label']:<26} ({art['size_kb']} KB{turn_str}, Modified: {mtime})")
+        else:
+            print("  (No active side-agent sessions)")
+
+        for ep in _get_cluster_endpoints(proj):
+            all_endpoints.add(ep)
+
+    # 3. Cluster Inference Endpoints & Slots
+    print("\n[3] Remote Inference Cluster & KV Slots:")
+    if all_endpoints:
+        for ep in sorted(list(all_endpoints)):
+            total_slots, active_slots, slots_url = _probe_cluster_slots(ep)
+            if total_slots is not None:
+                print(f"  - {ep:<30} ONLINE ({active_slots}/{total_slots} slots active via {slots_url})")
+            else:
+                try:
+                    req = urllib.request.Request(f"{ep}/models", headers={"Authorization": "Bearer sk-dummy"}, method="GET")
+                    with urllib.request.urlopen(req, timeout=1.0) as r:
+                        status = "ONLINE" if r.status == 200 else f"HTTP {r.status}"
+                except Exception:
+                    status = "OFFLINE / Unreachable"
+                print(f"  - {ep:<30} {status} (slots API not supported)")
+    else:
+        print("  (No remote endpoints configured)")
+    print()
+
+
+def _clear_side_sessions(cwd, is_global=False):
+    """Surgically clear side-agent session files and release cluster slots."""
+    projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
+    if not projects:
+        projects = [os.path.abspath(cwd)]
+
+    deleted_total = 0
+    all_endpoints = set()
+
+    for proj in projects:
+        artifacts = _get_side_session_artifacts(proj)
+        for art in artifacts:
+            try:
+                os.remove(art["path"])
+                deleted_total += 1
+            except OSError:
+                pass
+        for ep in _get_cluster_endpoints(proj):
+            all_endpoints.add(ep)
+
+    scope_str = " across all registered workspaces" if is_global else ""
+    print(f"🧹 Cleared {deleted_total} side-agent session file(s){scope_str}.")
+
+    released_total = 0
+    for ep in all_endpoints:
+        rel = _release_cluster_slots(ep)
+        if rel > 0:
+            print(f"  - Released {rel} slot(s) on {ep}")
+            released_total += rel
+    if released_total > 0:
+        print(f"✅ Released {released_total} remote cluster inference slot(s).")
 
 
 def main():
@@ -398,20 +900,69 @@ def main():
     cwd = os.getcwd()
     args = sys.argv[1:]
 
+    is_global = "--global" in args or "-g" in args
+    _register_project(cwd)
+
+    # Parse repo map options and flags
+    map_tokens = 4096
+    if "--map-tokens" in args:
+        try:
+            idx = args.index("--map-tokens")
+            map_tokens = int(args[idx + 1])
+        except (IndexError, ValueError):
+            pass
+    else:
+        for arg in args:
+            if arg.startswith("--map-tokens="):
+                try:
+                    map_tokens = int(arg.split("=", 1)[1])
+                except ValueError:
+                    pass
+
+    if "--repo-map" in args:
+        _generate_repo_maps(cwd, map_tokens=map_tokens, target="source", is_global=is_global)
+        sys.exit(0)
+
+    if "--repo-map-tests" in args:
+        _generate_repo_maps(cwd, map_tokens=map_tokens, target="tests", is_global=is_global)
+        sys.exit(0)
+
+    if "--repo-map-all" in args:
+        _generate_repo_maps(cwd, map_tokens=map_tokens, target="all", is_global=is_global)
+        sys.exit(0)
+
     # Parse session management flags
+    if "--status" in args:
+        _status(cwd, is_global=is_global)
+        sys.exit(0)
+
+    if "--clear-side-session" in args:
+        try:
+            idx = args.index("--clear-side-session")
+            target = args[idx + 1]
+            _clear_side_session_by_name(cwd, target, is_global=is_global)
+            sys.exit(0)
+        except (IndexError, ValueError):
+            print("Error: --clear-side-session requires a target name (e.g. helper, terminal, oracle, debate, <session_name>).", file=sys.stderr)
+            sys.exit(1)
+
+    if "--clear-side-sessions" in args:
+        _clear_side_sessions(cwd, is_global=is_global)
+        sys.exit(0)
+
     if "--list-sessions" in args:
-        _list_sessions(cwd)
+        _list_sessions(cwd, is_global=is_global)
         sys.exit(0)
 
     if "--clear-all" in args:
-        _clear_all_sessions(cwd)
+        _clear_all_sessions(cwd, is_global=is_global)
         sys.exit(0)
 
     if "--clear-session" in args:
         try:
             idx = args.index("--clear-session")
             name = args[idx + 1]
-            _clear_session(cwd, name)
+            _clear_session(cwd, name, is_global=is_global)
             sys.exit(0)
         except (IndexError, ValueError):
             print("Error: --clear-session requires a session name.", file=sys.stderr)
@@ -458,6 +1009,7 @@ def main():
 def oracle_cli():
     """Global 'aider-oracle' CLI entry point."""
     ensure_aider_installed()
+    _load_env_files()
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, os.path.join(pkg_dir, "python"))
     os.environ["AI_FACTORY_PKG_DIR"] = pkg_dir

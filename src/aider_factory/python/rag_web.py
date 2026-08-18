@@ -45,6 +45,33 @@ def fetch_sitemap_urls(sitemap_url, max_depth=1):
     return list(dict.fromkeys(urls))
 
 
+def fetch_llms_txt_urls(llms_url):
+    """Extract markdown link target URLs from an llms.txt manifest."""
+    import re
+    from urllib.parse import urljoin
+
+    try:
+        r = requests.get(llms_url, headers={"User-Agent": "AI-Factory/1.0"}, timeout=15)
+        if r.status_code != 200:
+            return []
+        text = r.text
+        # Matches markdown link targets: [Title](url)
+        raw_links = re.findall(
+            r'\[.*?\]\((https?://[^\s\)]+|/[^\s\)]+|[^\s\)]+\.md|[^\s\)]+\.html|[^\s\)]+\.txt)\)',
+            text,
+        )
+        extracted = []
+        for link in raw_links:
+            clean_link = link.strip().split("#")[0]  # strip anchor fragments
+            if clean_link:
+                abs_url = urljoin(llms_url, clean_link)
+                extracted.append(abs_url)
+        return list(dict.fromkeys(extracted))
+    except Exception as e:
+        print(f"[rag-web] Failed to fetch llms.txt from {llms_url}: {e}", file=sys.stderr)
+        return []
+
+
 def fetch_urls_batch(urls, job_dir, workers=1):
     """Fetch and convert a batch of URLs concurrently using ThreadPoolExecutor.
     Returns (success_count, skipped_count)."""
@@ -52,11 +79,19 @@ def fetch_urls_batch(urls, job_dir, workers=1):
 
     expanded_urls = []
     for u in urls:
-        if u.lower().endswith(".xml") or "sitemap" in u.lower():
+        u_lower = u.lower().split("?")[0].rstrip("/")
+        if u_lower.endswith(".xml") or "sitemap" in u_lower:
             sm_urls = fetch_sitemap_urls(u)
             if sm_urls:
                 print(f"[rag-web] Expanded sitemap '{u}' -> {len(sm_urls)} URLs", file=sys.stderr)
                 expanded_urls.extend(sm_urls)
+            else:
+                expanded_urls.append(u)
+        elif u_lower.endswith("/llms.txt") or u_lower.endswith("llms.txt"):
+            llms_urls = fetch_llms_txt_urls(u)
+            if llms_urls:
+                print(f"[rag-web] Expanded llms.txt '{u}' -> {len(llms_urls)} URLs", file=sys.stderr)
+                expanded_urls.extend(llms_urls)
             else:
                 expanded_urls.append(u)
         else:
@@ -133,25 +168,25 @@ def fetch_and_convert_url(url, job_dir):
             print(f"[rag-web] Failed to download PDF {url}: {e}", file=sys.stderr)
             return None, None
 
-    # Step B: llms.txt Check
-    if parsed.scheme and parsed.netloc:
-        llms_txt_url = f"{parsed.scheme}://{parsed.netloc}/llms.txt"
-        if not url.endswith("/llms.txt"):
-            try:
-                resp = requests.get(llms_txt_url, headers=headers, timeout=5)
-                if resp.status_code == 200 and len(resp.text.strip()) > 50:
-                    out_path = os.path.join(job_dir, f"{base_stem}_llms.md")
-                    with open(out_path, "w", encoding="utf-8") as f:
-                        f.write(
-                            f"# Source: {url}\n# llms.txt: {llms_txt_url}\n\n{resp.text}"
-                        )
-                    print(
-                        f"[rag-web] Discovered llms.txt: {llms_txt_url} -> {out_path}",
-                        file=sys.stderr,
-                    )
-                    return out_path, "text_doc"
-            except Exception:
-                pass
+    # Step B: Direct Markdown or Plain Text (e.g., llms-full.txt, .md, .txt, .rst, .json)
+    path_lower = parsed.path.lower()
+    if (
+        path_lower.endswith((".md", ".txt", ".rst", ".json", ".csv", ".tsv"))
+        or "text/markdown" in ctype
+        or "text/plain" in ctype
+    ):
+        try:
+            r = requests.get(url, headers=headers, timeout=20)
+            r.raise_for_status()
+            if len(r.text.strip()) > 0:
+                out_path = os.path.join(job_dir, f"{base_stem}.md")
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(f"# Source: {url}\n\n{r.text}")
+                print(f"[rag-web] Direct text/markdown saved: {url} -> {out_path}", file=sys.stderr)
+                return out_path, "text_doc"
+        except Exception as e:
+            print(f"[rag-web] Direct text download failed for {url}: {e}", file=sys.stderr)
+            return None, None
 
     # Step C: Trafilatura HTML Extraction
     try:

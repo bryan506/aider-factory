@@ -107,9 +107,10 @@ class TestE2ERealSessionLifecycle(unittest.TestCase):
         self.assertEqual(toggles["map_refresh"], "manual")
         self.assertEqual(toggles["map_multiplier_no_files"], 0)
         self.assertEqual(toggles["max_chat_history_tokens"], 100000)
-        self.assertTrue(toggles["yes_always"])
-        self.assertTrue(toggles["auto_accept_architect"])
-        self.assertTrue(toggles["auto_commits"])
+        self.assertTrue(toggles["pair_programming"])
+        self.assertFalse(toggles["yes_always"])
+        self.assertFalse(toggles["auto_accept_architect"])
+        self.assertFalse(toggles["auto_commits"])
         self.assertTrue(toggles["suggest_shell_commands"])
         self.assertFalse(toggles["detect_urls"])
         self.assertFalse(toggles["disable_playwright"])
@@ -323,6 +324,165 @@ class TestE2ERealSessionLifecycle(unittest.TestCase):
         self.assertEqual(res_clear_all.returncode, 0)
         sessions_root = os.path.join(self.test_dir, ".aider_factory", "sessions")
         self.assertFalse(os.path.exists(sessions_root), "sessions/ directory must be completely removed")
+
+    def test_real_status_and_clear_side_sessions_lifecycle(self):
+        """6. Test real `aider-factory --status` and `aider-factory --clear-side-sessions`
+        via live subprocess execution in an isolated sandbox.
+        """
+        af_dir = os.path.join(self.test_dir, ".aider_factory")
+        os.makedirs(af_dir, exist_ok=True)
+
+        # 1. Create a real main paired session
+        sess_dir = os.path.join(af_dir, "sessions", "worker_alpha")
+        os.makedirs(sess_dir, exist_ok=True)
+        main_chat = os.path.join(sess_dir, ".aider.chat.history.md")
+        main_yaml = os.path.join(sess_dir, "session.yml")
+        with open(main_chat, "w", encoding="utf-8") as f:
+            f.write("# Conversation Alpha\n" * 20)
+        with open(main_yaml, "w", encoding="utf-8") as f:
+            f.write("name: Worker Alpha\n")
+
+        # 2. Create side-agent session files
+        helper_sess = os.path.join(af_dir, ".helper_session.json")
+        helper_term = os.path.join(af_dir, ".helper_terminal_session.json")
+        oracle_sess = os.path.join(af_dir, ".oracle_session.json")
+        oracle_cost = os.path.join(af_dir, ".oracle_session.json.costs.json")
+        oracle_debate = os.path.join(af_dir, ".oracle_debate_session.json")
+        nested_oracle = os.path.join(sess_dir, ".oracle_session.json")
+
+        with open(helper_sess, "w", encoding="utf-8") as f:
+            json.dump([{"role": "user", "content": "config query"}], f)
+        with open(helper_term, "w", encoding="utf-8") as f:
+            json.dump([{"role": "user", "content": "term query"}], f)
+        with open(oracle_sess, "w", encoding="utf-8") as f:
+            json.dump([{"role": "user", "content": "rag query"}], f)
+        with open(oracle_cost, "w", encoding="utf-8") as f:
+            json.dump({"session_cost": 0.05}, f)
+        with open(oracle_debate, "w", encoding="utf-8") as f:
+            json.dump([{"turn": 1, "proposal": "fix"}], f)
+        with open(nested_oracle, "w", encoding="utf-8") as f:
+            json.dump([{"role": "user", "content": "nested"}], f)
+
+        # 3. Create persistent root configs
+        env_yaml = os.path.join(af_dir, ".env.yml")
+        conventions = os.path.join(af_dir, "CONVENTIONS.md")
+        with open(env_yaml, "w", encoding="utf-8") as f:
+            f.write("name: Root Project\nendpoints:\n  architect_api_base: http://127.0.0.1:9999/v1\n")
+        with open(conventions, "w", encoding="utf-8") as f:
+            f.write("# Conventions\n")
+
+        env = self._get_subprocess_env()
+
+        # 4. Execute `aider-factory --status`
+        res_status = subprocess.run(
+            [sys.executable, CLI_PATH, "--status"],
+            cwd=self.test_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res_status.returncode, 0)
+        self.assertIn("AI Factory Session & Cluster Status", res_status.stdout)
+        self.assertIn("worker_alpha", res_status.stdout)
+        self.assertIn("Helper Config Session", res_status.stdout)
+        self.assertIn("Oracle Session", res_status.stdout)
+        self.assertIn("Remote Inference Cluster", res_status.stdout)
+
+        # 5. Execute `aider-factory --clear-side-sessions`
+        res_clear_side = subprocess.run(
+            [sys.executable, CLI_PATH, "--clear-side-sessions"],
+            cwd=self.test_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res_clear_side.returncode, 0)
+        self.assertIn("Cleared", res_clear_side.stdout)
+
+        # 6. Physical Disk Assertions: Side-agent files MUST be deleted
+        self.assertFalse(os.path.exists(helper_sess), "Helper config session must be deleted")
+        self.assertFalse(os.path.exists(helper_term), "Helper terminal session must be deleted")
+        self.assertFalse(os.path.exists(oracle_sess), "Oracle session must be deleted")
+        self.assertFalse(os.path.exists(oracle_cost), "Oracle cost ledger must be deleted")
+        self.assertFalse(os.path.exists(oracle_debate), "Oracle debate session must be deleted")
+        self.assertFalse(os.path.exists(nested_oracle), "Session-scoped oracle session must be deleted")
+
+        # 7. Physical Disk Assertions: Main sessions and core configs MUST be preserved
+        self.assertTrue(os.path.exists(main_chat), "Main chat history must remain intact")
+        self.assertTrue(os.path.exists(main_yaml), "Main session.yml must remain intact")
+        self.assertTrue(os.path.exists(env_yaml), ".env.yml must remain intact")
+        self.assertTrue(os.path.exists(conventions), "CONVENTIONS.md must remain intact")
+
+        # 8. Verify updated status reflects cleared side sessions
+        res_status_after = subprocess.run(
+            [sys.executable, CLI_PATH, "--status"],
+            cwd=self.test_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res_status_after.returncode, 0)
+        self.assertIn("(No active side-agent sessions)", res_status_after.stdout)
+        self.assertIn("worker_alpha", res_status_after.stdout)
+
+    def test_real_global_and_named_session_management(self):
+        """7. Test real multi-project global registry, --global status/listing/clearing,
+        and surgical named side-session clearing.
+        """
+        proj_a = os.path.join(self.test_dir, "workspace_a")
+        proj_b = os.path.join(self.test_dir, "workspace_b")
+        os.makedirs(proj_a, exist_ok=True)
+        os.makedirs(proj_b, exist_ok=True)
+
+        env = self._get_subprocess_env({"HOME": self.test_dir})
+
+        # Initialize project A and project B
+        subprocess.run([sys.executable, CLI_PATH, "--session", "alpha_core"], cwd=proj_a, env=env, capture_output=True)
+        subprocess.run([sys.executable, CLI_PATH, "--session", "beta_core"], cwd=proj_b, env=env, capture_output=True)
+
+        # Seed side sessions in both
+        with open(os.path.join(proj_a, ".aider_factory", ".oracle_session.json"), "w", encoding="utf-8") as f:
+            json.dump([{"role": "user", "content": "Oracle A"}], f)
+        with open(os.path.join(proj_b, ".aider_factory", ".oracle_session.json"), "w", encoding="utf-8") as f:
+            json.dump([{"role": "user", "content": "Oracle B"}], f)
+
+        # Test 1: Global Status should see BOTH workspaces
+        res_global_status = subprocess.run(
+            [sys.executable, CLI_PATH, "--status", "--global"],
+            cwd=proj_a,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res_global_status.returncode, 0)
+        self.assertIn("workspace_a", res_global_status.stdout)
+        self.assertIn("workspace_b", res_global_status.stdout)
+        self.assertIn("alpha_core", res_global_status.stdout)
+        self.assertIn("beta_core", res_global_status.stdout)
+
+        # Test 2: Surgical Named Side-Session Clear in Project A only
+        res_named_clear = subprocess.run(
+            [sys.executable, CLI_PATH, "--clear-side-session", "oracle"],
+            cwd=proj_a,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res_named_clear.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(proj_a, ".aider_factory", ".oracle_session.json")))
+        self.assertTrue(os.path.exists(os.path.join(proj_b, ".aider_factory", ".oracle_session.json")))
+
+        # Test 3: Clear Main Session Globally by Name
+        res_global_clear = subprocess.run(
+            [sys.executable, CLI_PATH, "--clear-session", "beta_core", "--global"],
+            cwd=proj_a,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res_global_clear.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(proj_b, ".aider_factory", "sessions", "beta_core")))
+        self.assertTrue(os.path.exists(os.path.join(proj_a, ".aider_factory", "sessions", "alpha_core")))
 
 
 if __name__ == "__main__":

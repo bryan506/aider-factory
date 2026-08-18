@@ -32,12 +32,19 @@ class MChunk(LanceModel):
     line_start: int = 0
     line_end: int = 0
 
-db.create_table("my_docs", schema=MChunk).add([
-    {"text": "Docs result", "vector": [0.1]*1024, "source_file": "doc.md", "source_type": "doc", "line_start": 0, "line_end": 0}
-])
-db.create_table("my_code", schema=MChunk).add([
-    {"text": "Code result", "vector": [0.1]*1024, "source_file": "code.py", "source_type": "code", "line_start": 5, "line_end": 10}
-])
+def setup_function():
+    shutil.rmtree(base_dir, ignore_errors=True)
+    os.makedirs(base_dir, exist_ok=True)
+    os.environ["ORACLE_RAG_DB_DIR"] = os.path.abspath(base_dir)
+    rag_manager.embed_texts = mock_embed
+    global db
+    db = lancedb.connect(base_dir)
+    db.create_table("my_docs", schema=MChunk).add([
+        {"text": "Docs result", "vector": [0.1]*1024, "source_file": "doc.md", "source_type": "doc", "line_start": 0, "line_end": 0}
+    ])
+    db.create_table("my_code", schema=MChunk).add([
+        {"text": "Code result", "vector": [0.1]*1024, "source_file": "code.py", "source_type": "code", "line_start": 5, "line_end": 10}
+    ])
 
 def test_fuse_all():
     os.environ["ORACLE_COLLECTION"] = "*"
@@ -57,7 +64,9 @@ def test_type_filter():
 
 if __name__ == "__main__":
     print("Starting Phase 4 RRF Retrieve Tests...")
+    setup_function()
     test_fuse_all()
+    setup_function()
     test_type_filter()
     print("🎉 All Phase 4 Retrieve Tests Passed!")
     shutil.rmtree(base_dir)

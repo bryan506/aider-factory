@@ -37,6 +37,16 @@ class TestE2EOracleClaims(unittest.TestCase):
         )
         os.environ["EMBED_API_BASE"] = embed_api_base
         os.environ["EMBED_MODEL"] = embed_model
+        os.environ["ORACLE_EMBED_BACKEND"] = "openai"
+        os.environ["ORACLE_EMBED_API_BASE"] = embed_api_base
+        os.environ["ORACLE_EMBED_MODEL"] = embed_model
+
+        # Probe endpoint connectivity first
+        try:
+            import requests
+            requests.get(f"{embed_api_base}/models", timeout=2).raise_for_status()
+        except Exception:
+            self.skipTest(f"Live embedding endpoint at {embed_api_base} is offline.")
 
         # 1. Create a physical LanceDB table with ground truth content and live vector embeddings
         db = lancedb.connect(db_dir)
@@ -83,9 +93,9 @@ class TestE2EOracleClaims(unittest.TestCase):
                 db=db_dir,
                 collection="test_claims",
                 top_k=5,
-                threshold=0.6,
-                region_threshold=0.6,
-                entail_threshold=0.5,
+                threshold=2.0,
+                region_threshold=2.0,
+                entail_threshold=2.0,
                 margin=2,
                 region_paragraphs=0,
                 para_margin=0,

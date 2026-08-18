@@ -95,13 +95,22 @@ def clear_helper_session(terminal_mode=False):
         except OSError:
             pass
 
+try:
+    from aider_factory.python.env_utils import is_dummy_key, resolve_api_key, load_env_files
+except ImportError:
+    from env_utils import is_dummy_key, resolve_api_key, load_env_files
+
+load_env_files()
+
+
 def detect_api_key():
     if os.environ.get("AIDER_HELPER_API_BASE"):
         return "CUSTOM_LOCAL", "dummy"
-    keys = ["GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY", "OPENCODE_API_KEY"]
+    keys = ["GEMINI_API_KEY", "GOOGLE_API_KEY", "AIDER_GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY", "OPENCODE_API_KEY"]
     for k in keys:
-        if os.environ.get(k):
-            return k, os.environ.get(k)
+        val = os.environ.get(k)
+        if val and not is_dummy_key(val):
+            return k, val
     return None, None
 
 def print_key_help_and_exit():
@@ -496,6 +505,8 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
     import litellm
     model_map = {
         "GEMINI_API_KEY": "gemini/gemini-3.6-flash",
+        "GOOGLE_API_KEY": "gemini/gemini-3.6-flash",
+        "AIDER_GEMINI_API_KEY": "gemini/gemini-3.6-flash",
         "ANTHROPIC_API_KEY": "anthropic/claude-3-5-sonnet-20241022",
         "OPENROUTER_API_KEY": "openrouter/auto",
         "GROQ_API_KEY": "groq/llama-3.3-70b-versatile",
@@ -536,9 +547,13 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
             "stream_options": {"include_usage": True}
         }
         if api_base:
+            helper_key = resolve_api_key(
+                model=model,
+                api_base=api_base,
+                explicit_key=os.environ.get(key_name) if key_name != "CUSTOM_LOCAL" else None,
+            )
             kwargs["api_base"] = api_base
-            if key_name == "CUSTOM_LOCAL":
-                kwargs["api_key"] = "dummy"
+            kwargs["api_key"] = helper_key or "sk-dummy"
 
         response = litellm.completion(**kwargs)
 

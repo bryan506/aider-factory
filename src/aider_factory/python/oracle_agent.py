@@ -34,6 +34,7 @@ for _n in ("huggingface_hub", "sentence_transformers", "transformers", "LiteLLM"
 _DEFAULT_SESSION_FILE = os.path.join(".aider_factory", ".oracle_session.json")
 TRANSCRIPT_FILE = os.path.join(".aider_factory", ".oracle_chat.history.md")
 _ORACLE_PROCESS_SESSION_COST = 0.0
+_RERANKER_LOCAL_INSTANCE = None
 
 # Terminal color for oracle debate turns. Configurable via PIPELINE_COLOR_ORACLE env var
 # (set by run_workflow.py from the YAML `colors:` block). Default: soft rose #d3869b.
@@ -58,6 +59,15 @@ SYSTEM_PROMPT = (
     "provided CONTEXT from the knowledge base. If the context is insufficient, say so "
     "plainly. Prefer exact formulas, definitions, and cite the source document."
 )
+
+
+try:
+    from aider_factory.python.env_utils import load_env_files, resolve_api_key
+except ImportError:
+    from env_utils import load_env_files, resolve_api_key
+
+load_env_files()
+_resolve_api_key = resolve_api_key
 
 
 def _load_session():
@@ -94,6 +104,99 @@ except ImportError:
         response_content as _response_content,
         litellm_cost_line as _litellm_cost_line,
     )
+
+
+def _rerank_chunks(query: str, candidates: list[dict], top_n: int = 5) -> list[dict]:
+    """Rerank candidates using a cross-encoder model (remote HTTP or local CrossEncoder).
+
+    If len(candidates) <= 1, ORACLE_NO_RERANK=1, or ORACLE_RANKING_MODEL is empty,
+    returns candidates[:top_n] immediately.
+    """
+    global _RERANKER_LOCAL_INSTANCE
+
+    if len(candidates) <= 1 or os.environ.get("ORACLE_NO_RERANK") == "1":
+        return candidates[:top_n]
+
+    model = os.environ.get("ORACLE_RANKING_MODEL", "").strip()
+    if not model:
+        return candidates[:top_n]
+
+    api_base = os.environ.get("ORACLE_RANKING_API_BASE", "").strip()
+
+    # Remote HTTP Path
+    if api_base:
+        import requests
+
+        docs = [c.get("text", "") for c in candidates]
+        payload = {
+            "model": model,
+            "query": query,
+            "documents": docs,
+            "top_n": min(top_n, len(candidates)),
+        }
+        headers = {
+            "Authorization": "Bearer sk-dummy",
+            "Content-Type": "application/json",
+        }
+
+        clean_base = api_base.rstrip("/")
+        base_no_v1 = clean_base[:-3] if clean_base.endswith("/v1") else clean_base
+
+        try:
+            url = f"{base_no_v1}/v1/rerank"
+            resp = requests.post(url, json=payload, headers=headers, timeout=10)
+            if resp.status_code == 404:
+                url = f"{clean_base}/rerank"
+                resp = requests.post(url, json=payload, headers=headers, timeout=10)
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            results = data.get("results") if isinstance(data, dict) else data
+            if not isinstance(results, list):
+                return candidates[:top_n]
+
+            # Assign scores
+            for item in results:
+                if isinstance(item, dict):
+                    idx = item.get("index")
+                    score = item.get("relevance_score", item.get("score"))
+                    if idx is not None and 0 <= idx < len(candidates) and score is not None:
+                        candidates[idx]["_relevance_score"] = float(score)
+
+            # Candidates with a score sort first by score descending
+            scored = [c for c in candidates if "_relevance_score" in c]
+            unscored = [c for c in candidates if "_relevance_score" not in c]
+
+            scored.sort(key=lambda x: x["_relevance_score"], reverse=True)
+            return (scored + unscored)[:top_n]
+        except Exception as e:
+            print(
+                f"[rerank] warning: remote rerank failed ({e}); falling back to vector order.",
+                file=sys.stderr,
+            )
+            return candidates[:top_n]
+
+    # In-Process Local Path
+    try:
+        if _RERANKER_LOCAL_INSTANCE is None:
+            from sentence_transformers import CrossEncoder
+
+            _RERANKER_LOCAL_INSTANCE = CrossEncoder(model, trust_remote_code=True)
+
+        pairs = [[query, c.get("text", "")] for c in candidates]
+        scores = _RERANKER_LOCAL_INSTANCE.predict(pairs)
+        for idx, score in enumerate(scores):
+            candidates[idx]["_relevance_score"] = float(score)
+
+        candidates.sort(key=lambda x: x.get("_relevance_score", 0.0), reverse=True)
+        return candidates[:top_n]
+    except Exception as e:
+        print(
+            f"[rerank] warning: local rerank failed ({e}); falling back to vector order.",
+            file=sys.stderr,
+        )
+        return candidates[:top_n]
 
 
 def _rrf_merge(result_lists, k, c=60):
@@ -188,10 +291,15 @@ def _retrieve(query, k):
     except Exception as e:
         return f"[knowledge base unavailable: {e}]"
 
+    try:
+        recall_k = int(os.environ.get("ORACLE_RECALL_K", max(k * 4, 30)))
+    except (ValueError, TypeError):
+        recall_k = max(k * 4, 30)
+
     per_table = []
     for t in tables:
         try:
-            per_table.append(db.open_table(t).search(qvec).limit(k).to_list())
+            per_table.append(db.open_table(t).search(qvec).limit(recall_k).to_list())
         except Exception as e:
             print(
                 f"[oracle] warning: table '{t}' unavailable ({e}); skipping.",
@@ -200,12 +308,14 @@ def _retrieve(query, k):
             continue
 
     rows = (
-        _rrf_merge(per_table, k)
+        _rrf_merge(per_table, recall_k)
         if len(per_table) > 1
         else (per_table[0] if per_table else [])
     )
     if not rows:
         return ""
+
+    rows = _rerank_chunks(query, rows, top_n=k)
 
     def _cite(r):
         loc = f":{r['line_start']}-{r['line_end']}" if r.get("line_start") else ""
@@ -399,6 +509,7 @@ def _run_auto():
         try:
             import litellm
 
+            resolved_key = _resolve_api_key(model, api_base, api_key)
             kwargs = {
                 "model": model,
                 "messages": messages,
@@ -406,8 +517,8 @@ def _run_auto():
             }
             if api_base:
                 kwargs["api_base"] = api_base
-            if api_key:
-                kwargs["api_key"] = api_key
+            if resolved_key:
+                kwargs["api_key"] = resolved_key
             resp = litellm.completion(**kwargs)
             answer = _response_content(resp)
             cost_line = _litellm_cost_line(resp, persist_session=False)
@@ -500,7 +611,22 @@ def _extract_overrides(argv):
     ORACLE_RETRIEVE_MODE for this call (top_k|no_retrieve|full_document). `--list`
     requests a listing of the tables and exits. Returns (remaining_args, do_list, did_clear, maintenance_action, maintenance_target).
     """
-    os.environ.pop("ORACLE_EXPLICIT_COLLECTION", None)
+    transient_keys = [
+        "ORACLE_EXPLICIT_COLLECTION",
+        "ORACLE_DEBATE_MODE",
+        "ORACLE_DEBATE_LOOPS",
+        "ORACLE_DEBATE_ROUNDS",
+        "ORACLE_CLAIMS_ONLY",
+        "ORACLE_NO_PRINT",
+        "ORACLE_TYPE_FILTER",
+        "ORACLE_NO_RAG_INGEST",
+        "ORACLE_NO_RERANK",
+        "ORACLE_RECALL_K",
+        "ORACLE_WEB_WORKERS",
+    ]
+    for k in transient_keys:
+        os.environ.pop(k, None)
+
     out, do_list, did_clear, i, args = [], False, False, 0, list(argv)
     no_rag_forced = False
     maintenance_action = None
@@ -530,6 +656,17 @@ def _extract_overrides(argv):
             os.environ["ORACLE_NO_RAG_INGEST"] = "1"
             i += 1
             continue
+        if a == "--no-rerank":
+            os.environ["ORACLE_NO_RERANK"] = "1"
+            i += 1
+            continue
+        if a == "--recall-k":
+            if i + 1 < len(args):
+                os.environ["ORACLE_RECALL_K"] = args[i + 1]
+                i += 2
+                continue
+            print("[oracle] --recall-k requires an integer depth", file=sys.stderr)
+            return out, do_list, did_clear, None, None
         if a == "--claims-only":
             os.environ["ORACLE_CLAIMS_ONLY"] = "1"
             i += 1
@@ -1567,6 +1704,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
         try:
             import litellm
 
+            t0_key = _resolve_api_key(oracle_model, oracle_api)
             _t0_kwargs = {
                 "model": oracle_model,
                 "messages": oracle_messages,
@@ -1574,7 +1712,8 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
             }
             if oracle_api:
                 _t0_kwargs["api_base"] = oracle_api
-                _t0_kwargs["api_key"] = "sk-dummy"
+            if t0_key:
+                _t0_kwargs["api_key"] = t0_key
             resp = litellm.completion(**_t0_kwargs)
             initial_oracle = _response_content(resp)
             oracle_cost_line_0 = _litellm_cost_line(resp, persist_session=False)
@@ -1702,6 +1841,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
             try:
                 import litellm
 
+                turn_key = _resolve_api_key(oracle_model, oracle_api)
                 kwargs = {
                     "model": oracle_model,
                     "messages": oracle_messages,
@@ -1709,7 +1849,8 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
                 }
                 if oracle_api:
                     kwargs["api_base"] = oracle_api
-                    kwargs["api_key"] = "sk-dummy"
+                if turn_key:
+                    kwargs["api_key"] = turn_key
                 resp = litellm.completion(**kwargs)
                 last_oracle = _response_content(resp)
                 oracle_cost_line = _litellm_cost_line(resp, persist_session=False)
@@ -1763,12 +1904,11 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
 
 def _ensure_oracle_config():
     """Populate missing ORACLE_* environment variables from the active YAML config."""
+    load_env_files()
     # Inject LITELLM_BASE_URL fallback for cluster mode
     if os.environ.get("LITELLM_BASE_URL"):
         os.environ.setdefault("ORACLE_AGENT_API_BASE", os.environ["LITELLM_BASE_URL"])
         os.environ.setdefault("ORACLE_EMBED_API_BASE", os.environ["LITELLM_BASE_URL"])
-    if os.environ.get("LITELLM_API_KEY"):
-        os.environ.setdefault("ORACLE_AGENT_API_KEY", os.environ["LITELLM_API_KEY"])
 
     project_dir = os.getcwd()
     yaml_path = os.environ.get("ORACLE_CONFIG_FILE")
@@ -1809,16 +1949,15 @@ def _ensure_oracle_config():
         if not active_phase and phases:
             active_phase = next((p for p in phases if p.get("enabled", True)), phases[0])
 
-        explicit_coll = os.environ.get("ORACLE_EXPLICIT_COLLECTION") == "1"
-        if not explicit_coll:
+        if "ORACLE_COLLECTION" not in os.environ:
             yaml_coll = (active_phase.get("rag") or {}).get("collection_name") if active_phase else None
             if yaml_coll:
                 os.environ["ORACLE_COLLECTION"] = yaml_coll
-                os.environ["ORACLE_RAG_DB_DIR"] = os.path.join(
-                    project_dir, ".aider_factory", "markdown", "lanceDB", yaml_coll, "lancedb"
+                os.environ.setdefault(
+                    "ORACLE_RAG_DB_DIR",
+                    os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB", yaml_coll, "lancedb"),
                 )
-        else:
-            # If explicit collection is a local name (no slashes), ensure it respects the YAML working_directory
+        elif not os.environ.get("ORACLE_RAG_DB_DIR"):
             coll = os.environ.get("ORACLE_COLLECTION")
             if coll and "/" not in coll and "\\" not in coll:
                 os.environ["ORACLE_RAG_DB_DIR"] = os.path.join(
@@ -1830,6 +1969,16 @@ def _ensure_oracle_config():
 
         rag_agent = phase_models.get("rag_agent") or config.get("models", {}).get("rag_agent", "gemini/gemini-2.5-flash")
         arch_agent = phase_models.get("architect_agent") or config.get("models", {}).get("architect_agent", "gemini/gemini-3.6-flash")
+        ranking_agent = phase_models.get("ranking_agent") or config.get("models", {}).get("ranking_agent", "")
+        ranking_api_base = endpoints.get("ranking_api_base", "")
+
+        os.environ.setdefault("ORACLE_RANKING_MODEL", ranking_agent)
+        if ranking_api_base:
+            os.environ.setdefault("ORACLE_RANKING_API_BASE", ranking_api_base)
+
+        recall_k = phase_rag.get("recall_k") or global_rag.get("recall_k")
+        if recall_k:
+            os.environ.setdefault("ORACLE_RECALL_K", str(recall_k))
 
         embed_model = (
             phase_models.get("embed_model")
@@ -1996,10 +2145,24 @@ def main():
 
         prompt += f"<question>\n{question}\n</question>"
 
+        nchunks = context.count("[source:") if isinstance(context, str) and context else 0
+        if context and isinstance(context, str):
+            import re
+            sources = set(re.findall(r"\[source: (?:.*? \| )?(.*?)(?::\d+-\d+)?\]", context))
+            src_str = f" from {len(sources)} file(s): {', '.join(sorted(sources)[:5])}" + ("..." if len(sources) > 5 else "") if sources else ""
+        else:
+            src_str = ""
+
+        print(
+            f"[oracle] {nchunks} source chunk(s){src_str} · mode={mode} · model={model}",
+            file=sys.stderr,
+        )
+
         messages.append({"role": "user", "content": prompt})
         try:
             import litellm
 
+            resolved_key = _resolve_api_key(model, api_base, api_key)
             kwargs = {
                 "model": model,
                 "messages": messages,
@@ -2007,8 +2170,8 @@ def main():
             }
             if api_base:
                 kwargs["api_base"] = api_base
-            if api_key:
-                kwargs["api_key"] = api_key
+            if resolved_key:
+                kwargs["api_key"] = resolved_key
             resp = litellm.completion(**kwargs)
             answer = _response_content(resp)
             cost_line = _litellm_cost_line(resp, persist_session=use_session)
@@ -2029,19 +2192,6 @@ def main():
             
         _validate_oracle_response(answer)
 
-    # Status -> stderr; answer -> stdout (folds cleanly into the aider chat).
-    nchunks = context.count("[source:") if context else 0
-    if context:
-        import re
-        sources = set(re.findall(r"\[source: (?:.*? \| )?(.*?)(?::\d+-\d+)?\]", context))
-        src_str = f" from {len(sources)} file(s): {', '.join(sorted(sources)[:5])}" + ("..." if len(sources) > 5 else "") if sources else ""
-    else:
-        src_str = ""
-
-    print(
-        f"[oracle] {nchunks} source chunk(s){src_str} · mode={mode} · model={model}",
-        file=sys.stderr,
-    )
     if sys.stdout.isatty() or os.environ.get("FORCE_COLOR"):
         print(f"{_ORACLE_COLOR}{answer}{_RESET}", flush=True)
     else:

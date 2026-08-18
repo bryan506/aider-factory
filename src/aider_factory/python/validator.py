@@ -238,22 +238,36 @@ def _region(block, db_dir, collection, k):
                 return None, []
 
             # NO prefix (passage-to-passage comparison)
+            try:
+                recall_k = int(os.environ.get("ORACLE_RECALL_K", max(k * 4, 25)))
+            except (ValueError, TypeError):
+                recall_k = max(k * 4, 25)
+
             bvec = embed_texts([block], backend, model, api_base)[0]
             
             for t in tables:
                 try:
                     table = db.open_table(t)
-                    per_table.append(table.search(bvec).metric("cosine").limit(k).to_list())
+                    per_table.append(table.search(bvec).metric("cosine").limit(recall_k).to_list())
                 except Exception:
                     continue
         except Exception:
             return None, []
 
-    rows = _rrf_merge(per_table, k) if len(per_table) > 1 else (per_table[0] if per_table else [])
+    rows = _rrf_merge(per_table, recall_k) if len(per_table) > 1 else (per_table[0] if per_table else [])
     if not rows:
         return None, []
-        
-    sim = 1.0 - float(rows[0].get("_distance", 1.0))
+
+    try:
+        from oracle_agent import _rerank_chunks
+        rows = _rerank_chunks(block, rows, top_n=k)
+    except Exception:
+        rows = rows[:k]
+
+    if "_relevance_score" in rows[0]:
+        sim = float(rows[0]["_relevance_score"])
+    else:
+        sim = 1.0 - float(rows[0].get("_distance", 1.0))
     chunks = [
         (r.get("source_file", "unknown"), (r.get("text", "") or "").strip())
         for r in rows
@@ -321,10 +335,18 @@ def _entail(claim, chunks, a):
                 "messages": [{"role": "user", "content": prompt}],
                 "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID}
             }
-            if getattr(a, "grounding_api_base", None):
-                kwargs["api_base"] = a.grounding_api_base
-            if getattr(a, "grounding_api_key", None):
-                kwargs["api_key"] = a.grounding_api_key
+            try:
+                from aider_factory.python.env_utils import resolve_api_key
+            except ImportError:
+                from env_utils import resolve_api_key
+
+            g_base = getattr(a, "grounding_api_base", None)
+            raw_g_key = getattr(a, "grounding_api_key", None)
+            g_key = resolve_api_key(model=model, api_base=g_base, explicit_key=raw_g_key)
+            if g_base:
+                kwargs["api_base"] = g_base
+            if g_key:
+                kwargs["api_key"] = g_key
             
             r = litellm.completion(**kwargs)
             
@@ -831,6 +853,8 @@ def main():
     ap.add_argument("--file", required=True, help="generated document (review)")
     ap.add_argument("--source", required=False, help="OCR <stem>.md source of truth")
     ap.add_argument("--report", required=False, help="heal report to write")
+    ap.add_argument("--no-rerank", action="store_true", help="Disable Stage 2 reranking")
+    ap.add_argument("--recall-k", type=int, default=None, help="Stage 1 candidate pool size before reranking")
     ap.add_argument("--claims-only", action="store_true", help="Verify raw text paragraphs without requiring [evidence] tags")
     ap.add_argument("--no-print", action="store_true", help="Suppress printing the report to stdout in claims-only mode")
     ap.add_argument("--ledger", default=None)
@@ -925,6 +949,11 @@ def main():
             inferred_db = os.path.join(os.getcwd(), ".aider_factory", "markdown", "lanceDB", a.collection, "lancedb")
             if os.path.isdir(inferred_db):
                 a.db = inferred_db
+
+    if a.no_rerank:
+        os.environ["ORACLE_NO_RERANK"] = "1"
+    if a.recall_k:
+        os.environ["ORACLE_RECALL_K"] = str(a.recall_k)
 
     if not os.path.isfile(a.file):
         print(f"[validate] missing file: {a.file} (skipping)", file=sys.stderr)

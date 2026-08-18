@@ -291,6 +291,72 @@ def test_oracle_clear_custom_session_file():
             os.environ.pop(k, None)
 
 
+def test_cloud_model_bypasses_dummy_api_key():
+    for k in ["ORACLE_AGENT_API_BASE", "ORACLE_SESSION_FILE", "ORACLE_RETRIEVE_MODE"]:
+        os.environ.pop(k, None)
+    os.environ["ORACLE_AGENT_MODEL"] = "gemini/gemini-2.5-flash"
+    os.environ["ORACLE_AGENT_API_KEY"] = "sk-dummy"
+    os.environ["ORACLE_RETRIEVE_MODE"] = "no_retrieve"
+    os.environ["ORACLE_SESSION_FILE"] = os.path.join(tempfile.gettempdir(), "isolated_dummy_key_test.json")
+
+    captured_kwargs = []
+    def mock_completion(**kwargs):
+        captured_kwargs.append(kwargs)
+        return {"choices": [{"message": {"content": "Mock cloud reply"}}], "usage": {}}
+
+    try:
+        with patch.object(sys, "argv", ["oracle", "--no-rag", "test query"]), \
+             patch("litellm.completion", side_effect=mock_completion):
+            oracle_agent.main()
+
+        assert len(captured_kwargs) == 1
+        assert captured_kwargs[0].get("api_key") != "sk-dummy", "Dummy api_key 'sk-dummy' must not be passed to cloud models!"
+        print("  ✅ Cloud model routing ignores leaked 'sk-dummy' API keys.")
+    finally:
+        if os.path.exists(os.environ["ORACLE_SESSION_FILE"]):
+            os.remove(os.environ["ORACLE_SESSION_FILE"])
+        for k in ["ORACLE_AGENT_MODEL", "ORACLE_AGENT_API_KEY", "ORACLE_AGENT_API_BASE", "ORACLE_SESSION_FILE", "ORACLE_RETRIEVE_MODE"]:
+            os.environ.pop(k, None)
+
+
+def test_auto_job_cloud_model_bypasses_dummy_api_key():
+    for k in ["ORACLE_AGENT_API_BASE", "ORACLE_JOB_TEMPLATE", "ORACLE_JOB_OUT", "ORACLE_JOB_FULLDOC"]:
+        os.environ.pop(k, None)
+    os.environ["ORACLE_AGENT_MODEL"] = "gemini/gemini-2.5-flash"
+    os.environ["ORACLE_AGENT_API_KEY"] = "sk-dummy"
+
+    tmp_tmpl = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False)
+    tmp_tmpl.write("Analyze the following")
+    tmp_tmpl.close()
+
+    tmp_out = os.path.join(tempfile.gettempdir(), "test_auto_job_out.md")
+
+    os.environ["ORACLE_JOB_TEMPLATE"] = tmp_tmpl.name
+    os.environ["ORACLE_JOB_OUT"] = tmp_out
+    os.environ["ORACLE_JOB_FULLDOC"] = "0"
+    os.environ["ORACLE_RETRIEVE_MODE"] = "no_retrieve"
+
+    captured_kwargs = []
+    def mock_completion(**kwargs):
+        captured_kwargs.append(kwargs)
+        return {"choices": [{"message": {"content": "Mock auto reply"}}], "usage": {}}
+
+    try:
+        with patch("litellm.completion", side_effect=mock_completion), \
+             patch("oracle_agent._retrieve", return_value=""):
+            rc = oracle_agent._run_auto()
+            assert rc == 0
+        assert len(captured_kwargs) == 1
+        assert captured_kwargs[0].get("api_key") != "sk-dummy", "Dummy api_key 'sk-dummy' must not be passed to cloud models in _run_auto!"
+        print("  ✅ _run_auto() cloud model routing ignores leaked 'sk-dummy' API keys.")
+    finally:
+        os.remove(tmp_tmpl.name)
+        if os.path.exists(tmp_out):
+            os.remove(tmp_out)
+        for k in ["ORACLE_AGENT_MODEL", "ORACLE_AGENT_API_KEY", "ORACLE_AGENT_API_BASE", "ORACLE_JOB_TEMPLATE", "ORACLE_JOB_OUT", "ORACLE_JOB_FULLDOC", "ORACLE_RETRIEVE_MODE"]:
+            os.environ.pop(k, None)
+
+
 def test_oracle_passes_session_id():
     if "ORACLE_RETRIEVE_MODE" in os.environ:
         del os.environ["ORACLE_RETRIEVE_MODE"]
@@ -327,4 +393,6 @@ if __name__ == "__main__":
     test_oracle_session_context_not_duplicated()
     test_oracle_passes_session_id()
     test_oracle_clear_custom_session_file()
+    test_cloud_model_bypasses_dummy_api_key()
+    test_auto_job_cloud_model_bypasses_dummy_api_key()
     print("\n🎉 All CLI Oracle Tests Passed!")

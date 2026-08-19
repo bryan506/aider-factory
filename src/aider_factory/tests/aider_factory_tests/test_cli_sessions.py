@@ -154,6 +154,48 @@ class TestCLISessionManagement(unittest.TestCase):
             cli._clear_side_session_by_name(self.test_dir, "oracle")
             self.assertFalse(os.path.exists(oracle_file))
 
+    def test_apply_session_resolution_and_discovery(self):
+        import time
+        from aider_factory.python.apply_agent import find_active_session_chat_history
+
+        sess_dir1 = os.path.join(self.af_dir, "sessions", "worker_1")
+        sess_dir2 = os.path.join(self.af_dir, "sessions", "worker_2")
+        os.makedirs(sess_dir1, exist_ok=True)
+        os.makedirs(sess_dir2, exist_ok=True)
+
+        h1 = os.path.join(sess_dir1, ".aider.chat.history.md")
+        h2 = os.path.join(sess_dir2, ".aider.chat.history.md")
+
+        with open(h1, "w", encoding="utf-8") as f:
+            f.write("worker_1 history")
+        time.sleep(0.01)
+        with open(h2, "w", encoding="utf-8") as f:
+            f.write("worker_2 history")
+
+        # Explicit
+        path, name = find_active_session_chat_history(self.test_dir, session_name="worker_1")
+        self.assertEqual(path, h1)
+        self.assertEqual(name, "worker_1")
+
+        # Auto-discovery by mtime
+        path, name = find_active_session_chat_history(self.test_dir)
+        self.assertEqual(path, h2)
+        self.assertEqual(name, "worker_2")
+
+    def test_apply_paired_session_config_override(self):
+        import yaml
+        from aider_factory.python.apply_agent import resolve_editor_config
+
+        sess_dir = os.path.join(self.af_dir, "sessions", "custom_sess")
+        os.makedirs(sess_dir, exist_ok=True)
+        sess_yaml = os.path.join(sess_dir, "session.yml")
+
+        with open(sess_yaml, "w", encoding="utf-8") as f:
+            yaml.dump({"models": {"editor_agent": "model_from_session_yml"}}, f)
+
+        cfg = resolve_editor_config(self.test_dir, session_name="custom_sess")
+        self.assertEqual(cfg["editor_model"], "model_from_session_yml")
+
 
 if __name__ == "__main__":
     unittest.main()

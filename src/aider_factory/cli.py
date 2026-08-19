@@ -37,7 +37,7 @@ man/
 inst/
 
 # Ignore any large data, media, or document folders
-docs/
+/docs/
 *.pdf
 *.png
 *.jpg
@@ -304,6 +304,7 @@ def ensure_bash_wrappers(project_aider_factory_dir):
         "oracle": f'#!/bin/bash\nexec "{aider_py}" "{os.path.join(python_dir, "oracle_agent.py")}" "$@"\n',
         "validate": f'#!/bin/bash\nexec "{aider_py}" "{os.path.join(python_dir, "validator.py")}" "$@"\n',
         "research": f'#!/bin/bash\nexec "{aider_py}" "{os.path.join(python_dir, "research_agent.py")}" "$@"\n',
+        "apply": f'#!/bin/bash\nexec "{aider_py}" "{os.path.join(python_dir, "apply_agent.py")}" "$@"\n',
     }
 
     for script, content in wrappers.items():
@@ -1041,6 +1042,18 @@ def research_cli():
 
     research_path = os.path.join(pkg_dir, "python", "research_agent.py")
     runpy.run_path(research_path, run_name="__main__")
+
+
+def apply_cli():
+    """Global 'aider-apply' CLI entry point."""
+    ensure_aider_installed()
+    _load_env_files()
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, os.path.join(pkg_dir, "python"))
+    os.environ["AI_FACTORY_PKG_DIR"] = pkg_dir
+
+    apply_path = os.path.join(pkg_dir, "python", "apply_agent.py")
+    runpy.run_path(apply_path, run_name="__main__")
 
 
 def helper_cli():

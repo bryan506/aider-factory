@@ -39,8 +39,29 @@ class TestE2EMultiSessionPersistence(unittest.TestCase):
             if k.startswith("AI_FACTORY_") or k.startswith("ORACLE_") or k == "AIDER_ARCHITECT":
                 os.environ.pop(k, None)
 
+        self.bin_dir = os.path.join(self.test_dir, "bin")
+        os.makedirs(self.bin_dir, exist_ok=True)
+        fake_aider = os.path.join(self.bin_dir, "aider")
+        fake_script = """#!/bin/bash
+prev=""
+for i in "$@"; do
+    if [[ "$prev" == "--llm-history-file" ]]; then
+        echo '{"mock": "llm_turn"}' >> "$i"
+    fi
+    prev="$i"
+done
+exit 0
+"""
+        with open(fake_aider, "w", encoding="utf-8") as f:
+            f.write(fake_script)
+        os.chmod(fake_aider, 0o755)
+
+        self.old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{self.bin_dir}:{self.old_path}"
+
     def tearDown(self):
         os.chdir(self.old_cwd)
+        os.environ["PATH"] = self.old_path
         shutil.rmtree(self.test_dir, ignore_errors=True)
         for k in list(os.environ.keys()):
             if k.startswith("AI_FACTORY_") or k.startswith("ORACLE_") or k == "AIDER_ARCHITECT":
@@ -154,6 +175,70 @@ class TestE2EMultiSessionPersistence(unittest.TestCase):
         self.assertFalse(toggles["auto_commits"])
         self.assertTrue(toggles["detect_urls"])
         self.assertTrue(toggles["disable_playwright"])
+
+    def test_e2e_apply_agent_multi_session_isolation(self):
+        """Verify aider-apply operates in multi-session environments with zero cross-talk."""
+        from aider_factory.python.apply_agent import run_apply
+
+        subprocess.run(["git", "init"], cwd=self.test_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "E2E Tester"], cwd=self.test_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "e2e@test.local"], cwd=self.test_dir, check=True)
+
+        os.makedirs(os.path.join(self.test_dir, "src"), exist_ok=True)
+        alpha_file = os.path.join(self.test_dir, "src", "alpha.py")
+        beta_file = os.path.join(self.test_dir, "src", "beta.py")
+        with open(alpha_file, "w", encoding="utf-8") as f:
+            f.write("def alpha(): return 1\n")
+        with open(beta_file, "w", encoding="utf-8") as f:
+            f.write("def beta(): return 2\n")
+
+        subprocess.run(["git", "add", "."], cwd=self.test_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=self.test_dir, check=True)
+
+        bin_dir = os.path.join(self.test_dir, "bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        fake_aider = os.path.join(bin_dir, "aider")
+        with open(fake_aider, "w", encoding="utf-8") as f:
+            f.write('#!/bin/bash\nTARGET="${@: -1}"\necho "# patched" >> "$TARGET"\ngit add "$TARGET"\ngit commit -m "aider: edit"\nexit 0\n')
+        os.chmod(fake_aider, 0o755)
+
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{bin_dir}:{old_path}"
+
+        try:
+            af_dir = os.path.join(self.test_dir, ".aider_factory")
+            sess_a = os.path.join(af_dir, "sessions", "sess_a")
+            sess_b = os.path.join(af_dir, "sessions", "sess_b")
+            os.makedirs(sess_a, exist_ok=True)
+            os.makedirs(sess_b, exist_ok=True)
+
+            with open(os.path.join(sess_a, ".aider.chat.history.md"), "w", encoding="utf-8") as f:
+                f.write("#### /ask Update alpha function\n# Spec\nPatch alpha.\n\n> Tokens: 100 sent, 50 received.\n")
+            with open(os.path.join(sess_a, "session.yml"), "w", encoding="utf-8") as f:
+                yaml.dump({"models": {"editor_agent": "model_alpha"}}, f)
+
+            with open(os.path.join(sess_b, ".aider.chat.history.md"), "w", encoding="utf-8") as f:
+                f.write("#### /ask Update beta function\n# Spec\nPatch beta.\n\n> Tokens: 100 sent, 50 received.\n")
+            with open(os.path.join(sess_b, "session.yml"), "w", encoding="utf-8") as f:
+                yaml.dump({"models": {"editor_agent": "model_beta"}}, f)
+
+            ok_a = run_apply(["src/alpha.py"], session_name="sess_a", cwd=self.test_dir)
+            self.assertTrue(ok_a)
+
+            ok_b = run_apply(["src/beta.py"], session_name="sess_b", cwd=self.test_dir)
+            self.assertTrue(ok_b)
+
+            with open(alpha_file, "r", encoding="utf-8") as f:
+                self.assertIn("# patched", f.read())
+            with open(beta_file, "r", encoding="utf-8") as f:
+                self.assertIn("# patched", f.read())
+
+            with open(os.path.join(sess_a, ".aider.chat.history.md"), "r", encoding="utf-8") as f:
+                self.assertNotIn("# patched", f.read())
+            with open(os.path.join(sess_b, ".aider.chat.history.md"), "r", encoding="utf-8") as f:
+                self.assertNotIn("# patched", f.read())
+        finally:
+            os.environ["PATH"] = old_path
 
 
 if __name__ == "__main__":

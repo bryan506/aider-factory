@@ -90,8 +90,21 @@ def test_init_playwright_provisioning(mock_sub, mock_bash, mock_searxng):
     print("✅ Playwright Auto-Provisioning PASS")
 
 
+def test_ensure_bash_wrappers_provisions_all_launchers():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        af_dir = os.path.join(tmp_dir, ".aider_factory")
+        cli.ensure_bash_wrappers(af_dir)
+        bash_dir = os.path.join(af_dir, "bash")
+        for launcher in ["factory", "oracle", "validate", "research", "apply"]:
+            launcher_path = os.path.join(bash_dir, launcher)
+            assert os.path.isfile(launcher_path), f"Missing launcher script: {launcher}"
+            assert os.access(launcher_path, os.X_OK), f"Launcher script not executable: {launcher}"
+    print("✅ All Bash Wrappers Provisioning PASS")
+
+
 if __name__ == "__main__":
     test_init_empty_dir_creates_scratchpad()
     test_init_discovers_existing_files()
     test_init_playwright_provisioning()
+    test_ensure_bash_wrappers_provisions_all_launchers()
     print("\n🎉 All CLI Quickstart Unit Tests Passed!")

@@ -1,5 +1,11 @@
 # .aider.conf.yml
 # App-wide operational configurations
+check-update: false
+show-release-notes: false
+notifications: false
+analytics: false
+no-show-model-warnings: true
+
 
 # Caching & Timeouts
 timeout: "10800"
@@ -16,6 +22,9 @@ auto-commits: true
 suggest-shell-commands: true
 detect-urls: true
 disable-playwright: false
+fancy-input: true
+multiline: false
+auto-lint: true
 map-multiplier-no-files: 0
 # Architecture & Mode Settings
 

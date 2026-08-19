@@ -74,8 +74,11 @@ Every agent session, harness extension, or pipeline change must honor these six 
 **Phase 6 — Cross-validate (see §4 — the heart of it).**
 - Run the full matrix. If any check fails, fix and re-run the *whole* matrix, not just the failed check.
 
-**Phase 7 — Document truthfully.**
-- Update the user-facing config reference and the operator manual to match reality.
+**Phase 7 — Document truthfully (Separation of Concerns).**
+- Maintain a strict **Separation of Concerns** in technical documentation:
+  - **Master Feature Manuals (`src/aider_factory/markdown/docs/`)**: Every major engine, standalone CLI tool, or protocol (`aider_apply.md`, `terminal_ux_and_linting.md`, etc.) must have its own dedicated, in-depth reference manual.
+  - **High-Level Service Manual (`factory_service_manual.md`)**: Preserves global orchestration topology, systemd setup, and cross-cutting invariants.
+  - **Agent Skills (`skills/`)**: Concise, agent-facing invocation references.
 - Remove/flag obsolete claims; add new knobs. **No hallucinated features** — every documented behavior must map to shipped code.
 
 ---
@@ -165,7 +168,7 @@ Run these after **every** change. The theme: **verify with logic independent of 
     · backward-compat matrix · smoke test · dangling-ref sweep · isolation proof
 [ ] Secure test artifacts: embed unit tests into the permanent project suite
 [ ] Any failure → fix → re-run WHOLE matrix
-[ ] Update docs truthfully; no hallucinated features
+[ ] Update docs truthfully (modular docs in markdown/docs/ per separation of concerns); no hallucinated features
 [ ] Report: what changed, verified how, known limits, out of scope
 ```
 

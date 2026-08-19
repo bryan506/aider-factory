@@ -40,8 +40,29 @@ class TestE2ERealSessionLifecycle(unittest.TestCase):
             if k.startswith("AI_FACTORY_") or k.startswith("ORACLE_") or k == "AIDER_ARCHITECT":
                 os.environ.pop(k, None)
 
+        self.bin_dir = os.path.join(self.test_dir, "bin")
+        os.makedirs(self.bin_dir, exist_ok=True)
+        fake_aider = os.path.join(self.bin_dir, "aider")
+        fake_script = """#!/bin/bash
+prev=""
+for i in "$@"; do
+    if [[ "$prev" == "--llm-history-file" ]]; then
+        echo '{"mock": "llm_turn"}' >> "$i"
+    fi
+    prev="$i"
+done
+exit 0
+"""
+        with open(fake_aider, "w", encoding="utf-8") as f:
+            f.write(fake_script)
+        os.chmod(fake_aider, 0o755)
+
+        self.old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{self.bin_dir}:{self.old_path}"
+
     def tearDown(self):
         os.chdir(self.old_cwd)
+        os.environ["PATH"] = self.old_path
         shutil.rmtree(self.test_dir, ignore_errors=True)
         for k in list(os.environ.keys()):
             if k.startswith("AI_FACTORY_") or k.startswith("ORACLE_") or k == "AIDER_ARCHITECT":
@@ -483,6 +504,63 @@ class TestE2ERealSessionLifecycle(unittest.TestCase):
         self.assertEqual(res_global_clear.returncode, 0)
         self.assertFalse(os.path.exists(os.path.join(proj_b, ".aider_factory", "sessions", "beta_core")))
         self.assertTrue(os.path.exists(os.path.join(proj_a, ".aider_factory", "sessions", "alpha_core")))
+
+    def test_real_apply_session_integration_and_history_isolation(self):
+        """8. Real user session executes aider-apply on a target file.
+        Verify that active_spec.md is created in temp/, history is not polluted,
+        and session.yml configuration is respected with zero root leakage.
+        """
+        from aider_factory.python.apply_agent import run_apply
+
+        sess_name = "lifecycle_apply"
+        env = self._get_subprocess_env({"AI_FACTORY_SESSION": sess_name})
+
+        self.assertEqual(self._run_live([sys.executable, CLI_PATH, sess_name], env).returncode, 0)
+
+        subprocess.run(["git", "init"], cwd=self.test_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Lifecycle Tester"], cwd=self.test_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "life@test.local"], cwd=self.test_dir, check=True)
+
+        os.makedirs(os.path.join(self.test_dir, "src"), exist_ok=True)
+        target_path = os.path.join(self.test_dir, "src", "calculator.py")
+        with open(target_path, "w", encoding="utf-8") as f:
+            f.write("def calculate_tax(amount):\n    return amount * 0.1\n")
+
+        subprocess.run(["git", "add", "."], cwd=self.test_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=self.test_dir, check=True)
+
+        bin_dir = os.path.join(self.test_dir, "bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        fake_aider = os.path.join(bin_dir, "aider")
+        with open(fake_aider, "w", encoding="utf-8") as f:
+            f.write('#!/bin/bash\nTARGET="${@: -1}"\necho "# applied calculation" >> "$TARGET"\ngit add "$TARGET"\ngit commit -m "aider: applied"\nexit 0\n')
+        os.chmod(fake_aider, 0o755)
+
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{bin_dir}:{old_path}"
+
+        try:
+            sess_dir = os.path.join(self.test_dir, ".aider_factory", "sessions", sess_name)
+            chat_hist = os.path.join(sess_dir, ".aider.chat.history.md")
+            with open(chat_hist, "w", encoding="utf-8") as f:
+                f.write("#### /ask Add tax calculation\n# Spec\nAdd calculate_tax function.\n\n> Tokens: 200 sent, 80 received.\n")
+
+            ok = run_apply(["src/calculator.py"], session_name=sess_name, cwd=self.test_dir)
+            self.assertTrue(ok)
+
+            with open(target_path, "r", encoding="utf-8") as f:
+                self.assertIn("# applied calculation", f.read())
+
+            with open(chat_hist, "r", encoding="utf-8") as f:
+                hist_content = f.read()
+                self.assertNotIn("# applied calculation", hist_content)
+                self.assertIn("Add tax calculation", hist_content)
+
+            root_factory = Path(self.test_dir) / ".aider_factory"
+            self.assertFalse((root_factory / ".aider.chat.history.md").exists())
+            self.assertFalse((root_factory / ".apply.chat.history.md").exists())
+        finally:
+            os.environ["PATH"] = old_path
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ aider-oracle = "aider_factory.cli:oracle_cli"
 aider-validate = "aider_factory.cli:validate_cli"
 aider-research = "aider_factory.cli:research_cli"
 aider-helper = "aider_factory.cli:helper_cli"
+aider-apply = "aider_factory.cli:apply_cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aider_factory"]

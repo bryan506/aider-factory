@@ -20,79 +20,241 @@ except ImportError:
 
 _load_env_files = load_env_files
 
+import re
+
 BASELINE_AIDERIGNORE = """# Ignore RAG database, logs, and caches
 .aider_factory/
-#src/aider_factory/tests/**
-#src/aider_factory/python/**
-#src/aider_factory/markdown/**
-#src/aider_factory/default_configs/**
-#R/**
-#bash/**
 
 # Ignore temp folders
 temp/
+tmp/
 
 # Ignore package-level build, documentation, and installation folders
+docs/
+doc/
 man/
 inst/
+site/
+_site/
 
-# Ignore any large data, media, or document folders
-/docs/
+# Ignore binaries, media, and heavy data files
 *.pdf
 *.png
 *.jpg
 *.jpeg
 *.gif
+*.svg
+*.ico
+*.mp4
+*.wasm
+*.woff
+*.woff2
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.h5
+*.bin
+*.exe
+*.zip
+*.tar.gz
+*.lock
+package-lock.json
+Cargo.lock
+*.log
+*.map
 """
+
+TEST_DIR_NAMES = frozenset({
+    "test",
+    "tests",
+    "testing",
+    "testthat",
+    "__tests__",
+    "spec",
+    "specs",
+    "e2e",
+    "end-to-end",
+    "fixtures",
+    "testdata",
+    "test_fixtures",
+    "benchmarks",
+    "benches",
+})
+
+# 1. Delimited test patterns (case-insensitive) - requires delimiter boundary
+TEST_DELIMITED_RE = re.compile(
+    r"(^|/)((tests?|specs?|unit_?tests?)[_\-\.][^/]+|.+[_\-\.](tests?|specs?|unit_?tests?)\.[^/]+)$",
+    re.IGNORECASE,
+)
+
+# 2. Exact test harness & fixture files (case-insensitive)
+TEST_EXACT_RE = re.compile(
+    r"(^|/)(conftest\.py|tests?\.py|tests?\.rs|test_helper\.rb|setupTests\.[^/]+)$",
+    re.IGNORECASE,
+)
+
+# 3. CamelCase test classes (case-sensitive to avoid matching contest.java, latest.ts, etc.)
+TEST_CAMEL_RE = re.compile(
+    r"(^|/)[a-zA-Z0-9_]*(Test|Tests|TestCase|Spec)\.[a-zA-Z0-9]+$"
+)
+
+
+def _is_test_path(rel_path: str) -> bool:
+    """Classify whether a normalized relative path is a test file or inside a test directory."""
+    clean_path = rel_path.replace("\\", "/").strip("/")
+    if not clean_path:
+        return False
+    parts = clean_path.split("/")
+    # 1. Directory component check
+    for p in parts[:-1]:
+        if p.lower() in TEST_DIR_NAMES:
+            return True
+    # 2. Delimited pattern check (test_*.py, *.test.tsx, *-test.R)
+    if TEST_DELIMITED_RE.search(clean_path):
+        return True
+    # 3. Exact filename check (conftest.py, tests.rs)
+    if TEST_EXACT_RE.search(clean_path):
+        return True
+    # 4. CamelCase class check (UserTest.java, AuthSpec.scala)
+    if TEST_CAMEL_RE.search(clean_path):
+        return True
+    return False
+
+
+def _read_user_aiderignore(cwd: str) -> list[str]:
+    """Read active ignore rules from workspace .aiderignore, stripping comments and blank lines."""
+    ignore_file = os.path.join(cwd, ".aiderignore")
+    rules: list[str] = []
+    if os.path.isfile(ignore_file):
+        try:
+            with open(ignore_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    s = line.strip()
+                    if s and not s.startswith("#"):
+                        rules.append(s)
+        except Exception:
+            pass
+    if not rules:
+        for line in BASELINE_AIDERIGNORE.splitlines():
+            s = line.strip()
+            if s and not s.startswith("#"):
+                rules.append(s)
+    # Always guarantee AI Factory internal directory is ignored
+    if ".aider_factory/" not in rules:
+        rules.insert(0, ".aider_factory/")
+    return list(dict.fromkeys(rules))
+
+
+def _scan_repo_files(cwd: str) -> list[str]:
+    """Discover all repository files using git ls-files with an os.walk fallback."""
+    files: list[str] = []
+    # Fast path: git ls-files
+    try:
+        res = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            for line in res.stdout.splitlines():
+                f = line.strip().replace("\\", "/").lstrip("./")
+                if f and not f.startswith(".git/") and not f.startswith(".aider_factory/"):
+                    files.append(f)
+            if files:
+                return sorted(list(dict.fromkeys(files)))
+    except Exception:
+        pass
+
+    # Fallback path: os.walk
+    ignored_dirs = {
+        ".git", ".aider_factory", "node_modules", "dist", "build",
+        "target", ".venv", "venv", "__pycache__", ".pytest_cache",
+        "temp", "tmp", "docs", "doc", "man", "inst",
+    }
+    for root, dirs, filenames in os.walk(cwd):
+        dirs[:] = [d for d in dirs if d not in ignored_dirs and not d.startswith(".")]
+        for fn in filenames:
+            full_path = os.path.join(root, fn)
+            rel = os.path.relpath(full_path, cwd).replace("\\", "/").lstrip("./")
+            if rel and not rel.startswith(".git/") and not rel.startswith(".aider_factory/"):
+                files.append(rel)
+    return sorted(list(dict.fromkeys(files)))
 
 
 def _ensure_baseline_aiderignore(cwd):
-    """Ensure the root .aiderignore exists and matches the baseline standard."""
+    """Ensure the root .aiderignore exists and matches the baseline standard if missing."""
     local_aider_ignore = os.path.join(cwd, ".aiderignore")
-    with open(local_aider_ignore, "w", encoding="utf-8") as f:
-        f.write(BASELINE_AIDERIGNORE)
+    if not os.path.exists(local_aider_ignore):
+        with open(local_aider_ignore, "w", encoding="utf-8") as f:
+            f.write(BASELINE_AIDERIGNORE)
 
 
-def _build_repomap_ignore_content(cwd, mode="source"):
-    """Construct deterministic ignore content for source mapping vs. test mapping."""
-    base_rules = [
-        ".aider_factory/",
-        "temp/",
-        "man/",
-        "inst/",
-        "docs/",
-        "*.pdf",
-        "*.png",
-        "*.jpg",
-        "*.jpeg",
-        "*.gif",
-    ]
+def _build_repomap_ignore_content(cwd, mode="source", all_files=None):
+    """Construct deterministic ignore content for source mapping vs. test mapping,
+    inheriting all user-defined base rules from .aiderignore."""
+    user_base_rules = _read_user_aiderignore(cwd)
+
+    if all_files is None:
+        all_files = _scan_repo_files(cwd)
 
     if mode == "source":
-        # Exclude test files so static_repo_map.md contains only source code
-        test_rules = [
-            "src/aider_factory/tests/**",
-            "tests/**",
-            "testthat/**",
+        # Broad patterns to catch test directories + dynamic test files
+        universal_test_rules = [
+            "tests/",
+            "test/",
+            "testing/",
+            "testthat/",
+            "__tests__/",
+            "spec/",
+            "specs/",
+            "e2e/",
+            "end-to-end/",
+            "fixtures/",
+            "testdata/",
+            "test_fixtures/",
+            "benchmarks/",
+            "benches/",
             "**/tests/**",
+            "**/test/**",
+            "**/testing/**",
             "**/testthat/**",
             "**/__tests__/**",
-            "*test*.*",
+            "**/spec/**",
+            "**/specs/**",
+            "**/e2e/**",
+            "**/end-to-end/**",
+            "**/fixtures/**",
+            "**/testdata/**",
+            "**/benchmarks/**",
+            "**/benches/**",
+            "test_*.*",
+            "tests_*.*",
             "*_test.*",
+            "*_tests.*",
+            "test-*.*",
+            "tests-*.*",
+            "*-test.*",
+            "*-tests.*",
+            "*.test.*",
+            "*.spec.*",
+            "*Test.*",
+            "*Tests.*",
+            "*TestCase.*",
+            "*Spec.*",
+            "conftest.py",
         ]
-        return "\n".join(base_rules + test_rules) + "\n"
+        dynamic_test_files = [f for f in all_files if _is_test_path(f)]
+        combined = user_base_rules + universal_test_rules + dynamic_test_files
+        return "\n".join(dict.fromkeys(combined)) + "\n"
     elif mode == "tests":
-        # Exclude non-test source files so static_repo_map_tests.md contains only test code
-        source_rules = [
-            "src/aider_factory/python/**",
-            "src/aider_factory/markdown/**",
-            "src/aider_factory/default_configs/**",
-            "src/aider_factory/cli.py",
-            "R/**",
-            "bash/**",
-        ]
-        return "\n".join(base_rules + source_rules) + "\n"
-    return BASELINE_AIDERIGNORE
+        # Exclude all non-test source files so only test code remains
+        dynamic_non_test_files = [f for f in all_files if not _is_test_path(f)]
+        combined = user_base_rules + dynamic_non_test_files
+        return "\n".join(dict.fromkeys(combined)) + "\n"
+    return "\n".join(user_base_rules) + "\n"
 
 
 def _generate_repo_maps(cwd, map_tokens=4096, target="all", is_global=False):
@@ -109,6 +271,8 @@ def _generate_repo_maps(cwd, map_tokens=4096, target="all", is_global=False):
         if is_global:
             print(f"\nWorkspace: {p_name} ({proj})")
 
+        all_files = _scan_repo_files(proj)
+
         targets = []
         if target in ("source", "all"):
             targets.append(("source", os.path.join(af_dir, "static_repo_map.md")))
@@ -121,7 +285,7 @@ def _generate_repo_maps(cwd, map_tokens=4096, target="all", is_global=False):
                 e_ignore = os.path.join(af_dir, f".aiderignore_{mode}")
                 ephemeral_files.append(e_ignore)
                 with open(e_ignore, "w", encoding="utf-8") as f:
-                    f.write(_build_repomap_ignore_content(proj, mode=mode))
+                    f.write(_build_repomap_ignore_content(proj, mode=mode, all_files=all_files))
 
                 cmd = [
                     "aider",

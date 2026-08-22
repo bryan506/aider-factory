@@ -1,4 +1,4 @@
-name: "My Project"
+name: "Autonomous Code Debate Pipeline"
 working_directory: "/path/to/project"
 
 test_command_prefix: ""
@@ -14,12 +14,9 @@ loop_aider_test: 3
 #     rag_agent_api: "http://localhost:8080/v1"
 
 phases:
-    # Phase 0: architect + oracle debate to build an implementation strategy.
-    # The pre-edit debate (architect_oracle_chat) runs before job_one. The debate
-    # verdict becomes job_one's instruction file. job_one writes the strategy to the
-    # target file. Phase 1 picks it up via sticky_context.
-    #
-    # job_two and iterate_test are off — this phase only builds the strategy document.
+    # Phase 0: Interactive or Autonomous Strategy Creation
+    # pair_programming: true drops user into interactive planning.
+    # On exit, sticky_context passes strategy_template.md to downstream phases.
     - name: "Strategy — Debate and Plan"
       enabled: true
 
@@ -54,18 +51,22 @@ phases:
           ignore: null
 
       oracle:
-          start_job: false                     # CODE mode
-          template: ".aider_factory/markdown/internal/analyze_bugs.md"
+          start_job: false
+          template: "src/aider_factory/markdown/internal/analyze_bugs.md"
           full_document: false
           pre_edit_debate:
-              enabled: true                    # debate before job_one
-              job_debate_template: ".aider_factory/markdown/templates/strategy_debate.md"
+              enabled: true
+              insert_debate: [1, 0, 0]
+              loops: 3
+              job_debate_template: "src/aider_factory/markdown/oracle_pre_plan/strategy_instruct_template.md"
+              job_debate_collection: "project_docs"
 
       toggles:
-          pair_programming: false
-          run_job_one: true                    # verdict feeds job_one, which writes to target
-          run_job_two: false                   # no tests for the strategy document
-          iterate_test: false                  # no test loop for strategy
+          pair_programming: true
+          run_job_one: true                    # Writes strategy to target
+          run_job_two: false
+          run_job_three: false
+          iterate_test: false
           auto_test: false
           sticky_context: true                 # strategy_template.md carries to Phase 1
 
@@ -82,9 +83,9 @@ phases:
           entail_threshold: 0.5
 
       escalation_debate:
-          loops: 4                             # max architect/oracle turns
-          rounds: 2                            # full debate cycles
-          pass_history: true                   # persist context across rounds
+          loops: 4
+          rounds: 2
+          pass_history: true
 
       files:
           target_files:
@@ -95,16 +96,13 @@ phases:
           context_files_test: []
 
       plans:
-          job_one_plan: "markdown/templates/implement.md"
-          job_two_plan: "markdown/templates/testing.md"
+          job_one_plan: "markdown/oracle_pre_plan/strategy_instruct_template.md"
+          job_two_plan: null
+          job_three_plan: null
           iterate_plan: "markdown/templates/testing_unit_iterate.md"
 
-    # Phase 1: implement from the strategy with pre-edit debates and escalation.
-    # sticky_context carries strategy_template.md as read context for all jobs.
-    # Three debate points fire automatically:
-    #   1. Pre-job1 debate (architect_oracle_chat) — plan the implementation
-    #   2. Pre-job2 debate (architect_oracle_chat) — plan the tests
-    #   3. Post-iterate escalation (debate_loops > 0) — diagnose test failures
+    # Phase 1: Autonomous 4-Stage Execution (Implement -> Audit -> Write Tests -> Self-Heal)
+    # job_two_plan: null triggers programmatic injection of strategy_template.md into validate.md
     - name: "Implementation — Debate and Build"
       enabled: true
 
@@ -120,7 +118,7 @@ phases:
           collection_name: "project_docs"
           batch: true
           retrieval_mode: top_k
-          run_ocr_rag: false                   # already ingested in Phase 0
+          run_ocr_rag: false
           vectordb_overwrite: false
           ocr_prompt: "Extract the text, tables, and mathematical formulas from this page into clean Markdown. Preserve all structural integrity."
           query_prefix: "Instruct: Given a coding query, retrieve relevant passages\nQuery: "
@@ -139,19 +137,23 @@ phases:
 
       oracle:
           start_job: false
-          template: ".aider_factory/markdown/internal/analyze_bugs.md"
+          template: "src/aider_factory/markdown/internal/analyze_bugs.md"
           full_document: false
           pre_edit_debate:
-              enabled: true                    # debates before job_one AND job_two
-              job_debate_template: ".aider_factory/markdown/templates/strategy_debate.md"
+              enabled: true
+              insert_debate: [1, 0, 0]
+              loops: 3
+              job_debate_template: "src/aider_factory/markdown/internal/analyze_bugs.md"
+              job_debate_collection: "project_docs"
 
       toggles:
-          run_job_one: true
-          run_job_two: true
-          iterate_test: true
-          auto_test: false                     # architect every attempt
+          run_job_one: true                    # Job 1: Implement
+          run_job_two: true                    # Job 2: Validate / Audit
+          run_job_three: true                  # Job 3: Write Tests
+          iterate_test: true                   # Job 4: Self-Healing Test Loop
+          auto_test: false
           pair_programming: false
-          sticky_context: true                 # carries strategy from Phase 0
+          sticky_context: true                 # Carries strategy from Phase 0
 
       validation:
           enabled: false
@@ -166,8 +168,8 @@ phases:
           entail_threshold: 0.5
 
       escalation_debate:
-          loops: 4                             # pre-job + escalation debate turns
-          rounds: 2                            # escalation cycles on test failure
+          loops: 4
+          rounds: 2
           pass_history: true
 
       files:
@@ -184,5 +186,28 @@ phases:
 
       plans:
           job_one_plan: "markdown/templates/implement.md"
-          job_two_plan: "markdown/templates/testing.md"
+          job_two_plan: null
+          job_three_plan: "markdown/templates/testing.md"
           iterate_plan: "markdown/templates/testing_unit_iterate.md"
+
+    # Phase 2: Final Pair Review
+    - name: "Phase 2 — Final Pair Review"
+      enabled: true
+
+      models:
+          architect_agent: "gemini/gemini-2.5-flash"
+          editor_agent: "gemini/gemini-2.5-flash"
+
+      toggles:
+          pair_programming: true
+          run_job_one: true
+          run_job_two: false
+          run_job_three: false
+          iterate_test: false
+
+      files:
+          target_files:
+              - "src/my_module.py"
+
+      plans:
+          job_one_plan: "markdown/templates/general.md"

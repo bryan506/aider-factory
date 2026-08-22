@@ -28,7 +28,7 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 for _n in ("httpx", "urllib3"):
     logging.getLogger(_n).setLevel(logging.WARNING)
-for _n in ("huggingface_hub", "sentence_transformers", "transformers", "LiteLLM"):
+for _n in ("huggingface_hub", "huggingface_hub.utils._http", "sentence_transformers", "transformers", "LiteLLM"):
     logging.getLogger(_n).setLevel(logging.ERROR)
 
 _DEFAULT_SESSION_FILE = os.path.join(".aider_factory", ".oracle_session.json")
@@ -132,6 +132,7 @@ def _rerank_chunks(query: str, candidates: list[dict], top_n: int = 5) -> list[d
             "model": model,
             "query": query,
             "documents": docs,
+            "texts": docs,
             "top_n": min(top_n, len(candidates)),
         }
         headers = {
@@ -146,10 +147,16 @@ def _rerank_chunks(query: str, candidates: list[dict], top_n: int = 5) -> list[d
             url = f"{base_no_v1}/v1/rerank"
             resp = requests.post(url, json=payload, headers=headers, timeout=10)
             if resp.status_code == 404:
-                url = f"{clean_base}/rerank"
+                url = f"{base_no_v1}/rerank"
                 resp = requests.post(url, json=payload, headers=headers, timeout=10)
 
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                print(
+                    f"[rerank] warning: remote rerank failed ({resp.status_code}: {resp.text.strip()}); falling back to vector order.",
+                    file=sys.stderr,
+                )
+                return candidates[:top_n]
+
             data = resp.json()
 
             results = data.get("results") if isinstance(data, dict) else data
@@ -178,16 +185,76 @@ def _rerank_chunks(query: str, candidates: list[dict], top_n: int = 5) -> list[d
             return candidates[:top_n]
 
     # In-Process Local Path
+    _RERANK_CHAT_TMPL = (
+        '<Query>: {{ messages | selectattr("role", "eq", "query") | map(attribute="content") | first }}\n'
+        '<Document>: {{ messages | selectattr("role", "eq", "document") | map(attribute="content") | first }}'
+    )
     try:
         if _RERANKER_LOCAL_INSTANCE is None:
             from sentence_transformers import CrossEncoder
 
-            _RERANKER_LOCAL_INSTANCE = CrossEncoder(model, trust_remote_code=True)
+            try:
+                # 1. Offline-first: load directly from local cache (zero network calls, zero HF Hub warnings)
+                _RERANKER_LOCAL_INSTANCE = CrossEncoder(
+                    model, trust_remote_code=True, local_files_only=True
+                )
+            except Exception:
+                # 2. Cold-start fallback: download once if not present in local cache
+                _RERANKER_LOCAL_INSTANCE = CrossEncoder(
+                    model, trust_remote_code=True, local_files_only=False
+                )
+
+        tok = getattr(_RERANKER_LOCAL_INSTANCE, "tokenizer", None)
+        if tok:
+            if getattr(tok, "pad_token", None) is None:
+                pad_tok = getattr(tok, "eos_token", None) or "<|endoftext|>"
+                tok.pad_token = pad_tok
+                if getattr(tok, "pad_token_id", None) is None and getattr(tok, "eos_token_id", None) is not None:
+                    tok.pad_token_id = tok.eos_token_id
+
+            mod = getattr(_RERANKER_LOCAL_INSTANCE, "model", None)
+            if mod and hasattr(mod, "config") and getattr(mod.config, "pad_token_id", None) is None:
+                mod.config.pad_token_id = getattr(tok, "pad_token_id", 0)
+
+            if getattr(tok, "chat_template", None):
+                tmpl = str(tok.chat_template)
+                if "query" not in tmpl or "document" not in tmpl:
+                    tok.chat_template = _RERANK_CHAT_TMPL
 
         pairs = [[query, c.get("text", "")] for c in candidates]
-        scores = _RERANKER_LOCAL_INSTANCE.predict(pairs)
+        try:
+            scores = _RERANKER_LOCAL_INSTANCE.predict(pairs)
+        except ValueError as ve:
+            ve_str = str(ve).lower()
+            if hasattr(_RERANKER_LOCAL_INSTANCE, "tokenizer"):
+                tok = _RERANKER_LOCAL_INSTANCE.tokenizer
+                if "padding token" in ve_str or "pad_token" in ve_str:
+                    pad_tok = getattr(tok, "eos_token", None) or "<|endoftext|>"
+                    tok.pad_token = pad_tok
+                    if getattr(tok, "eos_token_id", None) is not None:
+                        tok.pad_token_id = tok.eos_token_id
+                    mod = getattr(_RERANKER_LOCAL_INSTANCE, "model", None)
+                    if mod and hasattr(mod, "config"):
+                        mod.config.pad_token_id = getattr(tok, "pad_token_id", 0)
+                    scores = _RERANKER_LOCAL_INSTANCE.predict(pairs)
+                elif "chat template" in ve_str:
+                    tok.chat_template = _RERANK_CHAT_TMPL
+                    scores = _RERANKER_LOCAL_INSTANCE.predict(pairs)
+                else:
+                    raise
+            else:
+                raise
+
+        def _extract_score(val):
+            if hasattr(val, "__len__") and not isinstance(val, (str, bytes)):
+                if len(val) > 1:
+                    return float(val[-1])
+                elif len(val) == 1:
+                    return float(val[0])
+            return float(val)
+
         for idx, score in enumerate(scores):
-            candidates[idx]["_relevance_score"] = float(score)
+            candidates[idx]["_relevance_score"] = _extract_score(score)
 
         candidates.sort(key=lambda x: x.get("_relevance_score", 0.0), reverse=True)
         return candidates[:top_n]
@@ -203,14 +270,15 @@ def _rrf_merge(result_lists, k, c=60):
     """Reciprocal Rank Fusion across per-table hit lists -> one deterministic top-k.
 
     Pure arithmetic (score = sum of 1/(c+rank)); a chunk appearing near the top of
-    several tables ranks higher. Dedup key = (source_file, text prefix)."""
+    several tables ranks higher. Dedup key = (source_file, text prefix).
+    Includes deterministic secondary sort keys to eliminate filesystem tie-breaker variance."""
     scores, keep = {}, {}
     for rows in result_lists:
         for rank, r in enumerate(rows):
             key = (r.get("source_file", ""), (r.get("text", "") or "")[:64])
             scores[key] = scores.get(key, 0.0) + 1.0 / (c + rank)
             keep[key] = r
-    ranked = sorted(scores, key=scores.get, reverse=True)[:k]
+    ranked = sorted(scores.keys(), key=lambda x: (-scores[x], x[0], x[1]))[:k]
     return [keep[key] for key in ranked]
 
 
@@ -265,13 +333,13 @@ def _retrieve(query, k):
         if collection in all_tables:
             tables = [collection]
         else:
-            tables = [t for t in all_tables if t.startswith(collection + "_")]
+            tables = sorted([t for t in all_tables if t.startswith(collection + "_")])
             if type_filter == "code":
                 tables = [t for t in tables if t.endswith("_code")]
             elif type_filter == "docs":
                 tables = [t for t in tables if t.endswith("_docs")]
     else:
-        tables = list(all_tables)
+        tables = sorted(list(all_tables))
         if type_filter == "code":
             tables = [t for t in tables if t.endswith("_code")]
         elif type_filter == "docs":
@@ -292,9 +360,10 @@ def _retrieve(query, k):
         return f"[knowledge base unavailable: {e}]"
 
     try:
-        recall_k = int(os.environ.get("ORACLE_RECALL_K", max(k * 4, 30)))
+        default_recall = min(max(k * 4, 30, len(tables) * 4), 100) if len(tables) > 1 else max(k * 4, 30)
+        recall_k = int(os.environ.get("ORACLE_RECALL_K", default_recall))
     except (ValueError, TypeError):
-        recall_k = max(k * 4, 30)
+        recall_k = min(max(k * 4, 30, len(tables) * 4), 100) if len(tables) > 1 else max(k * 4, 30)
 
     per_table = []
     for t in tables:
@@ -1021,6 +1090,11 @@ def _remove_file(filename):
                         f"  - Table '{tname}' is now empty; dropped table.",
                         file=sys.stderr,
                     )
+                else:
+                    try:
+                        tbl.optimize()
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"[oracle] error processing table {tname}: {e}", file=sys.stderr)
 

@@ -45,10 +45,16 @@ _PIPELINE_SESSION_ID = os.environ.get("LITELLM_SESSION_ID") or str(uuid.uuid4())
 os.environ["LITELLM_SESSION_ID"] = _PIPELINE_SESSION_ID
 
 # Quiet noisy ML/HTTP libs (region check loads sentence-transformers via lancedb).
+import logging
+
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+for _n in ("httpx", "urllib3"):
+    logging.getLogger(_n).setLevel(logging.WARNING)
+for _n in ("huggingface_hub", "huggingface_hub.utils._http", "sentence_transformers", "transformers"):
+    logging.getLogger(_n).setLevel(logging.ERROR)
 
 
 # The template's explicit "no evidence" marker. A quote equal to this is an
@@ -176,14 +182,15 @@ def _claim_block(raw_lines, idx, margin, para_margin=0):
 
 
 def _rrf_merge(result_lists, k, c=60):
-    """Reciprocal Rank Fusion across per-table hit lists -> one deterministic top-k."""
+    """Reciprocal Rank Fusion across per-table hit lists -> one deterministic top-k.
+    Includes deterministic secondary sort keys to eliminate filesystem tie-breaker variance."""
     scores, keep = {}, {}
     for rows in result_lists:
         for rank, r in enumerate(rows):
             key = (r.get("source_file", ""), (r.get("text", "") or "")[:64])
             scores[key] = scores.get(key, 0.0) + 1.0 / (c + rank)
             keep[key] = r
-    ranked = sorted(scores, key=scores.get, reverse=True)[:k]
+    ranked = sorted(scores.keys(), key=lambda x: (-scores[x], x[0], x[1]))[:k]
     return [keep[key] for key in ranked]
 
 
@@ -230,18 +237,19 @@ def _region(block, db_dir, collection, k):
                 if collection in all_tables:
                     tables = [collection]
                 else:
-                    tables = [t for t in all_tables if t.startswith(collection + "_")]
+                    tables = sorted([t for t in all_tables if t.startswith(collection + "_")])
             else:
-                tables = list(all_tables)
+                tables = sorted(list(all_tables))
 
             if not tables:
                 return None, []
 
             # NO prefix (passage-to-passage comparison)
             try:
-                recall_k = int(os.environ.get("ORACLE_RECALL_K", max(k * 4, 25)))
+                default_recall = min(max(k * 4, 25, len(tables) * 4), 100) if len(tables) > 1 else max(k * 4, 25)
+                recall_k = int(os.environ.get("ORACLE_RECALL_K", default_recall))
             except (ValueError, TypeError):
-                recall_k = max(k * 4, 25)
+                recall_k = min(max(k * 4, 25, len(tables) * 4), 100) if len(tables) > 1 else max(k * 4, 25)
 
             bvec = embed_texts([block], backend, model, api_base)[0]
             

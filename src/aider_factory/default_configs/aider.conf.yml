@@ -6,7 +6,6 @@ notifications: false
 analytics: false
 no-show-model-warnings: true
 
-
 # Caching & Timeouts
 timeout: "10800"
 
@@ -19,24 +18,24 @@ yes-always: true ## read below
 auto-accept-architect: true
 architect: true ## toggle on and off along with yes-always for automatic commands, so far commands only works in /code-edit mode.
 auto-commits: true
-suggest-shell-commands: true
-detect-urls: true
-disable-playwright: false
+
+# Allow the agent to propose shell commands (e.g. the Knowledge Oracle skill).
+# Autonomy/approval is governed separately by --yes-always.
+suggest-shell-commands: false
+detect-urls: false
+disable-playwright: true
 fancy-input: true
-multiline: false
+pretty: true
+multiline: true
 auto-lint: true
 map-multiplier-no-files: 0
+
 # Architecture & Mode Settings
 
 editor-edit-format: editor-diff
-# Allow the agent to propose shell commands (e.g. the Knowledge Oracle skill).
-# Autonomy/approval is governed separately by --yes-always.
-weak-model: "gemini/gemini-2.5-flash"
-# weak-model: "gemini/gemini-2.5-flash"
-# gemma4-12B-90k:latest
-#
+weak-model: "gemini/gemini-3.5-flash-lite"
+
 # Global Automation & Silence Settings
-no-show-model-warnings: true
 dark-mode: false
 code-theme: gruvbox-dark # friendly for light monokai for dark.
 # user-input-color: "#ff00ff"
@@ -44,9 +43,8 @@ user-input-color: "#d97706" # Controls the prompt text, file listings, and /comm
 assistant-output-color: "#38bdf8" # icy blue agent response
 # tool-output-color: "#0284c7" # Controls the output of /test or /run commands (blue)
 # tool-error-color: "#dc2626" # Controls error text (red)
-# assistant-output-color: "#cbd5e1" # Controls the LLM's streaming response text
+# assistant-output-color: "#cbd5e1"
 
-pretty: true
 
 # Git Management (Keep true to allow auto-commits while caching!)
 
@@ -68,24 +66,3 @@ input-history-file: .aider_factory/.aider.input.history
 # Since we bypass LiteLLM, Aider natively routes the `gemini/` prefix
 # to Google and the `ollama/` prefix to your local instance.
 # Repo map settings
-
-# Files to always include in context
-# read:
-#   - .aider_factory/markdown/CONVENTIONS.md
-# - CONTEXT_MAP.md
-# Reasoning/Thinking control
-# See: https://aider.adressiness.reasoning_models for full documentation
-
-## hardcoded settings from copy-paste:
-# "--architect",
-# "--yes-always",
-# "--no-show-model-warnings",
-# "--no-attribute-author",
-# "--no-attribute-committer",
-# "--editor-edit-format",
-# "editor-diff",
-# "--auto-accept-architect",
-# "--no-pretty",
-
-## command line argument to create static repo map, add as context
-# aider --map-tokens 2048 --show-repo-map > .aider_factory/markdown/static_repo_map.md

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+import yaml
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -84,8 +85,6 @@ class Task:
     suggest_shell_commands: Optional[bool] = None
     detect_urls: Optional[bool] = None
     disable_playwright: Optional[bool] = None
-
-    status: TaskStatus = TaskStatus.PENDING
 
 
 class AiderFactory:
@@ -1085,11 +1084,51 @@ class AiderFactory:
             # Resolve config paths: prioritize .aider_factory/ then fall back to root
             local_aider_factory_conf = os.path.join(root, ".aider_factory", ".aider.conf.yml")
             root_aider_conf = os.path.join(root, ".aider.conf.yml")
-            aider_conf = (
+            base_aider_conf = (
                 local_aider_factory_conf
                 if os.path.exists(local_aider_factory_conf)
                 else (root_aider_conf if os.path.exists(root_aider_conf) else None)
             )
+
+            # Deterministically compile session-scoped .aider.conf.yml merging base config with task toggles
+            session_aider_conf = os.path.join(str(self.session_dir), ".aider.conf.yml")
+            conf_data = {}
+            if base_aider_conf and os.path.exists(base_aider_conf):
+                try:
+                    with open(base_aider_conf, "r", encoding="utf-8") as f:
+                        conf_data = yaml.safe_load(f) or {}
+                except Exception as e:
+                    log.warning(f"⚠️ Could not load base config {base_aider_conf}: {e}")
+
+            if task.map_tokens is not None:
+                conf_data["map-tokens"] = task.map_tokens
+            if task.map_refresh is not None:
+                conf_data["map-refresh"] = task.map_refresh
+            if task.map_multiplier_no_files is not None:
+                conf_data["map-multiplier-no-files"] = task.map_multiplier_no_files
+            if task.max_chat_history_tokens is not None:
+                conf_data["max-chat-history-tokens"] = str(task.max_chat_history_tokens)
+
+            if task.yes_always is not None:
+                conf_data["yes-always"] = bool(task.yes_always)
+            if task.auto_accept_architect is not None:
+                conf_data["auto-accept-architect"] = bool(task.auto_accept_architect)
+            if task.auto_commits is not None:
+                conf_data["auto-commits"] = bool(task.auto_commits)
+            if task.suggest_shell_commands is not None:
+                conf_data["suggest-shell-commands"] = bool(task.suggest_shell_commands)
+            if task.detect_urls is not None:
+                conf_data["detect-urls"] = bool(task.detect_urls)
+            if task.disable_playwright is not None:
+                conf_data["disable-playwright"] = bool(task.disable_playwright)
+
+            try:
+                with open(session_aider_conf, "w", encoding="utf-8") as f:
+                    yaml.safe_dump(conf_data, f)
+                aider_conf = session_aider_conf
+            except Exception as e:
+                log.warning(f"⚠️ Could not write session config {session_aider_conf}: {e}")
+                aider_conf = base_aider_conf
 
             local_aider_factory_settings = os.path.join(
                 root, ".aider_factory", ".aider.model.settings.yml"
@@ -1169,6 +1208,7 @@ class AiderFactory:
                 test_proc = subprocess.Popen(
                     task.test_cmd,
                     shell=True,
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,  # Combine stderr into stdout
                     text=True,
@@ -1280,6 +1320,21 @@ class AiderFactory:
 
             # Inject the correct endpoints for the specific machine (Strix vs 7900XT)
             env = os.environ.copy()
+
+            # Enforce toggle overrides via environment variables
+            if task.yes_always is not None:
+                env["AIDER_YES_ALWAYS"] = "true" if task.yes_always else "false"
+            if task.disable_playwright is not None:
+                env["AIDER_DISABLE_PLAYWRIGHT"] = "true" if task.disable_playwright else "false"
+            if task.auto_accept_architect is not None:
+                env["AIDER_AUTO_ACCEPT_ARCHITECT"] = "true" if task.auto_accept_architect else "false"
+            if task.auto_commits is not None:
+                env["AIDER_AUTO_COMMITS"] = "true" if task.auto_commits else "false"
+            if task.suggest_shell_commands is not None:
+                env["AIDER_SUGGEST_SHELL_COMMANDS"] = "true" if task.suggest_shell_commands else "false"
+            if task.detect_urls is not None:
+                env["AIDER_DETECT_URLS"] = "true" if task.detect_urls else "false"
+
             if task.architect_api_base:
                 env["OPENAI_API_BASE"] = task.architect_api_base
                 env["OPENAI_API_KEY"] = "sk-dummy"
@@ -1327,6 +1382,7 @@ class AiderFactory:
                     shell=True,
                     cwd=self.project_dir,
                     env=env,
+                    stdin=subprocess.DEVNULL,
                 )
 
                 # Wait for Aider to finish

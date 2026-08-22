@@ -1070,6 +1070,10 @@ All paths are relative to `working_directory` unless noted.
 
 ## 6. Knowledge Oracle & RAG Ingestion
 
+> **Modular Documentation Reference:**  
+> • For the comprehensive LanceDB architecture, AST chunking, RRF fusion, and table maintenance specification, see **[`markdown/docs/lancedb_rag.md`](docs/lancedb_rag.md)**.  
+> • For the Two-Stage Cross-Encoder Reranking engine specification, see **[`markdown/docs/reranking.md`](docs/reranking.md)**.
+
 The Phase-0 OCR ingestion process uses the isolated `llama-vision` server (8080) to parse images/PDFs, embed them, and store them in LanceDB.
 
 ### Crucial Fix: LanceDB Table Retrieval
@@ -2115,6 +2119,28 @@ curl -s http://192.168.100.1:8090/v1/chat/completions -H 'content-type: applicat
   -d '{"model":"minicheck-flan-t5-large","messages":[{"role":"user","content":"DOCUMENT:\nStudents study in the library for finals.\n\nCLAIM:\nThe students prepare for an exam.\n\nIs the CLAIM fully supported by the DOCUMENT? Answer only SUPPORTED or UNSUPPORTED."}]}'
 # -> {... "content":"0.98xx" ...}
 ```
+
+### 7.15 Academic Foundations & Literature References
+
+The mathematical and algorithmic checks in the AI Factory validation and RAG pipelines are grounded in formal peer-reviewed literature:
+
+1. **Reciprocal Rank Fusion (Multi-Table RRF)**:
+   - **Citation:** Cormack, G. V., Clarke, C. L., & Buettcher, S. (2009). *Reciprocal rank fusion outperforms Condorcet and individual rank learning methods.* ACM SIGIR '09, 758–759. DOI: [10.1145/1571941.1572114](https://doi.org/10.1145/1571941.1572114).
+   - **Formula:**
+     $$\text{RRF\_Score}(d \in D) = \sum_{t \in \text{Tables}} \frac{1}{60 + \text{rank}_t(d)}$$
+   - **Implementation:** `oracle_agent._rrf_merge` and `validator._rrf_merge`.
+
+2. **Normalized Character Error Rate (CER)**:
+   - **Citation:** Morris, A. C., Maier, V., & Green, P. (2004). *From WER and RIL to MER and WIL: improved evaluation measures for connected speech recognition.* Interspeech 2004; Levenshtein, V. I. (1966). *Binary codes capable of correcting deletions, insertions, and reversals.* Soviet Physics Doklady.
+   - **Formula:**
+     $$\text{CER}(\text{ref}, \text{hyp}) = \frac{\text{LevenshteinDistance}(\text{ref}_{\text{alphanumeric}}, \text{hyp}_{\text{alphanumeric}})}{\text{Length}(\text{ref}_{\text{alphanumeric}})}$$
+   - **Implementation:** `rag_manager._calculate_cer`.
+
+3. **Weakest-Link Sentence-Level Entailment & Factuality**:
+   - **Citation:** Zhang, L., et al. (2024). *MiniCheck: Efficient and Factuality Verification.* ACL Anthology; Honovich, O., et al. (2022). *TRUE: Re-evaluating Factual Consistency Evaluation over Diverse Tasks.* EMNLP 2022.
+   - **Formula:**
+     $$\text{Faithfulness}(\text{Claim}) = \min_{s_i \in \text{Sentences}(\text{Claim})} P(\text{Entailed} \mid \text{Document}, s_i)$$
+   - **Implementation:** `minicheck_server.py` and `validator._entail`.
 
 ### 7.14 Raw Text Validation (`--claims-only`)
 

@@ -28,7 +28,7 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 for _n in ("httpx", "urllib3"):
     logging.getLogger(_n).setLevel(logging.WARNING)
-for _n in ("huggingface_hub", "sentence_transformers", "transformers"):
+for _n in ("huggingface_hub", "huggingface_hub.utils._http", "sentence_transformers", "transformers"):
     logging.getLogger(_n).setLevel(logging.ERROR)
 
 import Levenshtein
@@ -128,9 +128,14 @@ def embed_texts(texts, backend, model, api_base, batch_size=8):
     elif backend == "sentence-transformers":
         from sentence_transformers import SentenceTransformer
 
-        st = _ST_CACHE.get(model) or _ST_CACHE.setdefault(
-            model, SentenceTransformer(model)
-        )
+        if model not in _ST_CACHE:
+            try:
+                # Offline-first: load directly from local cache (zero network calls)
+                _ST_CACHE[model] = SentenceTransformer(model, local_files_only=True)
+            except Exception:
+                # Cold-start fallback: download once if not present in local cache
+                _ST_CACHE[model] = SentenceTransformer(model, local_files_only=False)
+        st = _ST_CACHE[model]
         out = [v.tolist() for v in st.encode(texts, normalize_embeddings=True)]
     else:
         raise ValueError(f"unknown embed_backend: {backend}")
@@ -1020,6 +1025,10 @@ def ingest(
 
         flush()
         if table is not None:
+            try:
+                table.optimize()
+            except Exception:
+                pass
             _maybe_create_index(table, table_name)
         log.info(f"[RAG] table '{table_name}': +{appended} chunk(s)")
         return appended > 0 or bool(existing_files)

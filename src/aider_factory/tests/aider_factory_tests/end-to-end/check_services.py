@@ -9,7 +9,7 @@ print("==================================================")
 print("Checking Local Service Endpoints...")
 print("==================================================")
 
-def probe_post(name, url, payload, expected_key, timeout=10):
+def probe_post(name, url, payload, expected_key, timeout=25):
     print(f"\nSending probe to {name}: {url} ...")
     try:
         req = urllib.request.Request(
@@ -41,7 +41,7 @@ def probe_post(name, url, payload, expected_key, timeout=10):
         print(f"  ❌ {name} is OFFLINE or unreachable: {e}", file=sys.stderr)
         return False
 
-def probe_get(name, url, expected_key, timeout=10):
+def probe_get(name, url, expected_key, timeout=25):
     print(f"\nSending probe to {name}: {url} ...")
     try:
         req = urllib.request.Request(

@@ -50,6 +50,14 @@ for i in "$@"; do
     fi
     prev="$i"
 done
+if [ -n "$FAKE_AIDER_LOG" ]; then
+    echo "CMD: $@" >> "$FAKE_AIDER_LOG"
+    echo "AIDER_YES_ALWAYS=$AIDER_YES_ALWAYS" >> "$FAKE_AIDER_LOG"
+    echo "AIDER_AUTO_ACCEPT_ARCHITECT=$AIDER_AUTO_ACCEPT_ARCHITECT" >> "$FAKE_AIDER_LOG"
+    echo "AIDER_AUTO_COMMITS=$AIDER_AUTO_COMMITS" >> "$FAKE_AIDER_LOG"
+    echo "AIDER_DISABLE_PLAYWRIGHT=$AIDER_DISABLE_PLAYWRIGHT" >> "$FAKE_AIDER_LOG"
+    echo "AIDER_DETECT_URLS=$AIDER_DETECT_URLS" >> "$FAKE_AIDER_LOG"
+fi
 exit 0
 """
         with open(fake_aider, "w", encoding="utf-8") as f:
@@ -161,6 +169,9 @@ exit 0
             yaml.safe_dump(loaded, f)
 
         # Resume session via real CLI invocation: `aider-factory reloaded_feature`
+        aider_log_path = os.path.join(self.test_dir, "fake_aider.log")
+        env["FAKE_AIDER_LOG"] = aider_log_path
+
         res = self._run_live([sys.executable, CLI_PATH, sess_name], env)
         self.assertEqual(res.returncode, 0)
 
@@ -175,6 +186,23 @@ exit 0
         self.assertFalse(toggles["auto_commits"])
         self.assertTrue(toggles["detect_urls"])
         self.assertTrue(toggles["disable_playwright"])
+
+        # Verify physical subprocess execution received the reloaded toggles
+        self.assertTrue(os.path.exists(aider_log_path), "Subprocess must log invocation details")
+        with open(aider_log_path, "r", encoding="utf-8") as f:
+            log_content = f.read()
+
+        self.assertIn("AIDER_YES_ALWAYS=true", log_content)
+        self.assertIn("AIDER_AUTO_ACCEPT_ARCHITECT=true", log_content)
+        self.assertIn("AIDER_AUTO_COMMITS=false", log_content)
+        self.assertIn("AIDER_DISABLE_PLAYWRIGHT=true", log_content)
+        self.assertIn("AIDER_DETECT_URLS=true", log_content)
+        self.assertIn("--no-auto-commits", log_content)
+        self.assertIn("--yes-always", log_content)
+        self.assertIn("--auto-accept-architect", log_content)
+        self.assertIn("--disable-playwright", log_content)
+        self.assertIn("--detect-urls", log_content)
+        self.assertIn("--max-chat-history-tokens 85000", log_content)
 
     def test_e2e_apply_agent_multi_session_isolation(self):
         """Verify aider-apply operates in multi-session environments with zero cross-talk."""

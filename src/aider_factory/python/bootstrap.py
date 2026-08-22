@@ -462,7 +462,7 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
             except Exception:
                 pass
         else:
-            print("⚠️ [aider-helper] Warning: --repo-map requested, but '.aider_factory/static_repo_map.md' not found. Generate it via: aider --map-tokens 4096 --show-repo-map > .aider_factory/static_repo_map.md", file=sys.stderr)
+            print("⚠️ [aider-helper] Warning: --repo-map requested, but '.aider_factory/static_repo_map.md' not found. Generate it via: aider-factory --repo-map", file=sys.stderr)
 
     if context_paths:
         ctx_blocks = []

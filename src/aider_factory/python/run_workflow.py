@@ -172,7 +172,7 @@ def _render_validate_template(
     if placeholder in val_text:
         final_text = re.sub(
             r"## PREVIOUS COMPLETED SYSTEM GOALS AND CONSTRAINTS.*?(?=\n---|\n## 2\.|\Z)",
-            injection + "\n",
+            lambda _: injection + "\n",
             val_text,
             flags=re.DOTALL,
         )
@@ -1195,7 +1195,10 @@ if __name__ in ("__main__", "__test__"):
                             pre_edit_cfg, job_num=1, project_directory=project_directory
                         )
                         _j1_coll, _j1_db = _resolve_job_debate_collection(
-                            pre_edit_cfg, job_num=1, default_collection=_table, rag_context_root=rag_context_root
+                            pre_edit_cfg,
+                            job_num=1,
+                            default_collection=_table,
+                            rag_context_root=rag_context_root,
                         )
                         _j1_rag_env = dict(file_rag_env)
                         if _j1_coll:
@@ -1300,7 +1303,10 @@ if __name__ in ("__main__", "__test__"):
                             "oracle_pre_plan",
                             "strategy_template.md",
                         )
-                        if os.path.exists(default_strat) and os.path.getsize(default_strat) > 0:
+                        if (
+                            os.path.exists(default_strat)
+                            and os.path.getsize(default_strat) > 0
+                        ):
                             strategy_file = default_strat
 
                     if strategy_file:
@@ -1357,7 +1363,10 @@ if __name__ in ("__main__", "__test__"):
                             pre_edit_cfg, job_num=2, project_directory=project_directory
                         )
                         _j2_coll, _j2_db = _resolve_job_debate_collection(
-                            pre_edit_cfg, job_num=2, default_collection=_table, rag_context_root=rag_context_root
+                            pre_edit_cfg,
+                            job_num=2,
+                            default_collection=_table,
+                            rag_context_root=rag_context_root,
                         )
                         _j2_rag_env = dict(file_rag_env)
                         if _j2_coll:
@@ -1473,10 +1482,15 @@ if __name__ in ("__main__", "__test__"):
                             )
 
                             _debate_template = _resolve_job_debate_template(
-                                pre_edit_cfg, job_num=3, project_directory=project_directory
+                                pre_edit_cfg,
+                                job_num=3,
+                                project_directory=project_directory,
                             )
                             _j3_coll, _j3_db = _resolve_job_debate_collection(
-                                pre_edit_cfg, job_num=3, default_collection=_table, rag_context_root=rag_context_root
+                                pre_edit_cfg,
+                                job_num=3,
+                                default_collection=_table,
+                                rag_context_root=rag_context_root,
                             )
                             _j3_rag_env = dict(file_rag_env)
                             if _j3_coll:

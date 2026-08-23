@@ -650,7 +650,7 @@ def init_user_project(cwd=None):
             cluster_config = _discover_cluster_config()
             if cluster_config:
                 content = content.replace('architect_api_base: "http://192.168.100.2:8080/v1"', f'architect_api_base: "{cluster_config["architect_api_base"]}"')
-                content = content.replace('editor_ollama_api: "http://192.168.100.1:8080/v1"', f'editor_ollama_api: "{cluster_config["editor_ollama_api"]}"')
+                content = content.replace('editor_api: "http://192.168.100.1:8080/v1"', f'editor_api: "{cluster_config["editor_api"]}"')
                 content = content.replace('rag_agent_api: "http://192.168.100.1:8080/v1"', f'rag_agent_api: "{cluster_config["rag_agent_api"]}"')
                 if "architect_agent" in cluster_config:
                     content = content.replace('architect_agent: "gemini/gemini-3.6-flash"', f'architect_agent: "{cluster_config["architect_agent"]}"')
@@ -704,6 +704,27 @@ def ensure_aider_installed():
             print(f"⚠️ [aider-factory] Could not auto-install aider-chat: {e}", file=sys.stderr)
 
 
+def _backup_workspace_cache(proj_path: str):
+    """Back up workspace .aider_factory directory to ~/.cache/aider_factory_cache/<repo_name>/.aider_factory/."""
+    cache_base = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+    cache_root = os.path.join(cache_base, "aider_factory_cache")
+    p_name = os.path.basename(proj_path.rstrip("/\\"))
+    dest_proj_dir = os.path.join(cache_root, p_name)
+    dest_af = os.path.join(dest_proj_dir, ".aider_factory")
+    src_af = os.path.join(proj_path, ".aider_factory")
+    if os.path.exists(src_af):
+        os.makedirs(dest_proj_dir, exist_ok=True)
+        if shutil.which("rsync"):
+            subprocess.run(
+                ["rsync", "-a", f"{src_af.rstrip('/')}/", f"{dest_af.rstrip('/')}/"],
+                check=False,
+                capture_output=True,
+            )
+        else:
+            shutil.copytree(src_af, dest_af, dirs_exist_ok=True)
+        print(f"📦 Backed up workspace to {dest_af}")
+
+
 def _list_sessions(cwd, is_global=False):
     projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
     if not projects:
@@ -739,7 +760,7 @@ def _list_sessions(cwd, is_global=False):
     return total_found
 
 
-def _clear_session(cwd, name, is_global=False):
+def _clear_session(cwd, name, is_global=False, forever=False):
     import re
     target_project = None
     target_session = name.strip()
@@ -760,6 +781,8 @@ def _clear_session(cwd, name, is_global=False):
             continue
         sess_dir = os.path.join(proj, ".aider_factory", "sessions", slug)
         if os.path.exists(sess_dir):
+            if not forever:
+                _backup_workspace_cache(proj)
             shutil.rmtree(sess_dir, ignore_errors=True)
             print(f"Session '{slug}' cleared in project '{p_name}'.")
             cleared += 1
@@ -768,7 +791,7 @@ def _clear_session(cwd, name, is_global=False):
         print(f"Session '{slug}' not found.")
 
 
-def _clear_all_sessions(cwd, is_global=False):
+def _clear_all_sessions(cwd, is_global=False, forever=False):
     projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
     if not projects:
         projects = [os.path.abspath(cwd)]
@@ -777,6 +800,8 @@ def _clear_all_sessions(cwd, is_global=False):
         p_name = os.path.basename(proj)
         sess_root = os.path.join(proj, ".aider_factory", "sessions")
         if os.path.exists(sess_root):
+            if not forever:
+                _backup_workspace_cache(proj)
             shutil.rmtree(sess_root, ignore_errors=True)
             print(f"All session archives cleared in '{p_name}'.")
         elif not is_global:
@@ -903,7 +928,7 @@ def _get_side_session_artifacts(cwd):
     return found
 
 
-def _clear_side_session_by_name(cwd, target_name, is_global=False):
+def _clear_side_session_by_name(cwd, target_name, is_global=False, forever=False):
     """Surgically delete a specific side-agent session by alias or session name."""
     projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
     if not projects:
@@ -939,13 +964,16 @@ def _clear_side_session_by_name(cwd, target_name, is_global=False):
                 os.path.join(sess_dir, ".oracle_debate_session.json"),
             ])
 
-        for path in targets_to_delete:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                    total_deleted += 1
-                except OSError:
-                    pass
+        existing_targets = [p for p in targets_to_delete if os.path.exists(p)]
+        if existing_targets and not forever:
+            _backup_workspace_cache(proj)
+
+        for path in existing_targets:
+            try:
+                os.remove(path)
+                total_deleted += 1
+            except OSError:
+                pass
 
     p_info = " across registered projects" if is_global else ""
     if total_deleted > 0:
@@ -1024,7 +1052,7 @@ def _status(cwd, is_global=False):
     print()
 
 
-def _clear_side_sessions(cwd, is_global=False):
+def _clear_side_sessions(cwd, is_global=False, forever=False):
     """Surgically clear side-agent session files and release cluster slots."""
     projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
     if not projects:
@@ -1035,6 +1063,8 @@ def _clear_side_sessions(cwd, is_global=False):
 
     for proj in projects:
         artifacts = _get_side_session_artifacts(proj)
+        if artifacts and not forever:
+            _backup_workspace_cache(proj)
         for art in artifacts:
             try:
                 os.remove(art["path"])
@@ -1066,6 +1096,7 @@ def main():
     args = sys.argv[1:]
 
     is_global = "--global" in args or "-g" in args
+    forever = "--forever" in args
     _register_project(cwd)
 
     # Parse repo map options and flags
@@ -1105,14 +1136,14 @@ def main():
         try:
             idx = args.index("--clear-side-session")
             target = args[idx + 1]
-            _clear_side_session_by_name(cwd, target, is_global=is_global)
+            _clear_side_session_by_name(cwd, target, is_global=is_global, forever=forever)
             sys.exit(0)
         except (IndexError, ValueError):
             print("Error: --clear-side-session requires a target name (e.g. helper, terminal, oracle, debate, <session_name>).", file=sys.stderr)
             sys.exit(1)
 
     if "--clear-side-sessions" in args:
-        _clear_side_sessions(cwd, is_global=is_global)
+        _clear_side_sessions(cwd, is_global=is_global, forever=forever)
         sys.exit(0)
 
     if "--list-sessions" in args:
@@ -1120,14 +1151,14 @@ def main():
         sys.exit(0)
 
     if "--clear-all" in args:
-        _clear_all_sessions(cwd, is_global=is_global)
+        _clear_all_sessions(cwd, is_global=is_global, forever=forever)
         sys.exit(0)
 
     if "--clear-session" in args:
         try:
             idx = args.index("--clear-session")
             name = args[idx + 1]
-            _clear_session(cwd, name, is_global=is_global)
+            _clear_session(cwd, name, is_global=is_global, forever=forever)
             sys.exit(0)
         except (IndexError, ValueError):
             print("Error: --clear-session requires a session name.", file=sys.stderr)

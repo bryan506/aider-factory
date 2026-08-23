@@ -312,7 +312,7 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \
 
 ## 6. Ollama Configuration (Port 11434)
 
-Ollama is primarily used for fast, background coding tasks (the Editor model). It runs on its default port (11434) and is referenced by the `editor_ollama_api` endpoint.
+Ollama is primarily used for fast, background coding tasks (the Editor model). It runs on its default port (11434) and is referenced by the `editor_api` endpoint.
 
 #### Installation
 

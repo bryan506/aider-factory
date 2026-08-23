@@ -55,7 +55,7 @@ class TestE2EApplyAgentLiveCluster(unittest.TestCase):
     ARCH_API_BASE = os.environ.get("ARCHITECT_API_BASE", "http://192.168.100.1:8080/v1")
     ARCH_MODEL = "lm_studio/qwen3.6-27B-90k-udq4kxl:LATEST"
 
-    EDITOR_API_BASE = os.environ.get("EDITOR_OLLAMA_API", "http://192.168.100.2:8081/v1")
+    EDITOR_API_BASE = os.environ.get("EDITOR_API", "http://192.168.100.2:8081/v1")
     EDITOR_MODEL = "openai/qwen3.6-27B-90k-udq4kxl-rag:LATEST"
 
     @classmethod
@@ -96,7 +96,7 @@ class TestE2EApplyAgentLiveCluster(unittest.TestCase):
             "working_directory": self.test_dir,
             "endpoints": {
                 "architect_api_base": self.ARCH_API_BASE,
-                "editor_ollama_api": self.EDITOR_API_BASE,
+                "editor_api": self.EDITOR_API_BASE,
             },
             "models": {
                 "architect_agent": self.ARCH_MODEL,

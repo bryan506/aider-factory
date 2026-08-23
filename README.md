@@ -188,14 +188,20 @@ aider-factory refactor_ohlcv
 # Start a session with a custom configuration file
 aider-factory .env.yml refactor_ohlcv
 
-# List all active sessions
-aider-factory --list-sessions
+# List all active sessions across registered workspaces
+aider-factory --list-sessions --global
 
-# Clear a specific session archive
+# Clear a session (safely backed up to ~/.cache/aider_factory_cache/ by default)
 aider-factory --clear-session refactor_ohlcv
 
-# Clear all session archives
-aider-factory --clear-all
+# Permanently delete a session without backing up
+aider-factory --clear-session refactor_ohlcv --forever
+
+# Clear all sessions across all registered workspaces (backed up to cache)
+aider-factory --clear-all --global
+
+# Permanently purge all sessions across all workspaces
+aider-factory --clear-all -g --forever
 ```
 
 ### Run Deterministic Quote Validation (CI/CD Ready)

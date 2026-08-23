@@ -11,8 +11,8 @@ loop_aider_test: 1
 # Global Endpoints
 endpoints:
     architect_api_base: "http://192.168.100.2:8081/v1"
-    editor_ollama_api: "http://192.168.100.1:8080/v1"
-    editor_test_ollama_api: "http://192.168.100.1:8080/v1"
+    editor_api: "http://192.168.100.1:8080/v1"
+    editor_api_fallback: "http://192.168.100.1:8080/v1"
     rag_agent_api: "http://192.168.100.1:8080/v1"
     grounding_agent_api: "http://192.168.100.1:8090/v1"
     ocr_api_base: "" # Empty to route OCR to cloud Gemini model

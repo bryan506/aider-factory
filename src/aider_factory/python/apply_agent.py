@@ -169,7 +169,7 @@ def resolve_editor_config(
                 editor_model = merged_models["editor_agent"]
 
             endpoints_cfg = cfg.get("endpoints", {}) or {}
-            editor_api_base = endpoints_cfg.get("editor_ollama_api")
+            editor_api_base = endpoints_cfg.get("editor_api")
         except Exception:
             pass
 

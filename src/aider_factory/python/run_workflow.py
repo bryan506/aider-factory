@@ -403,8 +403,8 @@ if __name__ in ("__main__", "__test__"):
     endpoints = config.get("endpoints", {})
 
     global_architect_api_base = endpoints.get("architect_api_base")
-    global_editor_api = endpoints.get("editor_ollama_api")
-    global_editor_test_api = endpoints.get("editor_test_ollama_api")
+    global_editor_api = endpoints.get("editor_api")
+    global_editor_test_api = endpoints.get("editor_api_fallback")
     global_rag_agent_api = endpoints.get("rag_agent_api")
     global_grounding_api = endpoints.get("grounding_agent_api")
     global_ranking_api = endpoints.get("ranking_api_base")
@@ -609,8 +609,8 @@ if __name__ in ("__main__", "__test__"):
         ARCHITECT_API_BASE = (
             None if "gemini/" in ARCHITECT_AGENT else global_architect_api_base
         )
-        EDITOR_OLLAMA_API = None if "gemini/" in EDITOR_AGENT else global_editor_api
-        EDITOR_TEST_OLLAMA_API = (
+        EDITOR_API = None if "gemini/" in EDITOR_AGENT else global_editor_api
+        EDITOR_API_FALLBACK = (
             None if "gemini/" in EDITOR_AGENT_TEST else global_editor_test_api
         )
 
@@ -1012,7 +1012,7 @@ if __name__ in ("__main__", "__test__"):
                             model=ARCHITECT_AGENT,
                             editor_model=EDITOR_AGENT,
                             architect_api_base=ARCHITECT_API_BASE,
-                            editor_api_base=EDITOR_OLLAMA_API,
+                            editor_api_base=EDITOR_API,
                             rag_env=file_rag_env,
                             ocr_ingest=task_ocr_ingest,
                             oracle={
@@ -1096,7 +1096,7 @@ if __name__ in ("__main__", "__test__"):
                                 editor_model=EDITOR_AGENT_TEST,
                                 fallback_editor_model=EDITOR_AGENT_TEST_FALLBACK,
                                 architect_api_base=ARCHITECT_API_BASE,
-                                editor_api_base=EDITOR_TEST_OLLAMA_API,
+                                editor_api_base=EDITOR_API_FALLBACK,
                                 test_cmd=_vcmd,
                                 iterate_test=True,
                                 max_aider_loops=validation_loops,
@@ -1263,7 +1263,7 @@ if __name__ in ("__main__", "__test__"):
                             model=ARCHITECT_AGENT,
                             editor_model=EDITOR_AGENT,
                             architect_api_base=ARCHITECT_API_BASE,
-                            editor_api_base=EDITOR_OLLAMA_API,
+                            editor_api_base=EDITOR_API,
                             rag_env=file_rag_env,
                             ocr_ingest=task_ocr_ingest,
                             pair_programming=pair_programming,
@@ -1431,7 +1431,7 @@ if __name__ in ("__main__", "__test__"):
                             model=ARCHITECT_AGENT,
                             editor_model=EDITOR_AGENT,
                             architect_api_base=ARCHITECT_API_BASE,
-                            editor_api_base=EDITOR_OLLAMA_API,
+                            editor_api_base=EDITOR_API,
                             pair_programming=pair_programming,
                             rag_env=file_rag_env,
                             ocr_ingest=task_ocr_ingest,
@@ -1543,7 +1543,7 @@ if __name__ in ("__main__", "__test__"):
                                 model=ARCHITECT_AGENT,
                                 editor_model=EDITOR_AGENT_TEST,
                                 architect_api_base=ARCHITECT_API_BASE,
-                                editor_api_base=EDITOR_TEST_OLLAMA_API,
+                                editor_api_base=EDITOR_API_FALLBACK,
                                 pair_programming=pair_programming,
                                 rag_env=file_rag_env,
                                 ocr_ingest=task_ocr_ingest,
@@ -1576,7 +1576,7 @@ if __name__ in ("__main__", "__test__"):
                                 editor_model=EDITOR_AGENT_TEST,
                                 fallback_editor_model=EDITOR_AGENT_TEST_FALLBACK,
                                 architect_api_base=ARCHITECT_API_BASE,
-                                editor_api_base=EDITOR_TEST_OLLAMA_API,
+                                editor_api_base=EDITOR_API_FALLBACK,
                                 test_cmd=test_cmd,
                                 iterate_test=True,
                                 max_aider_loops=global_max_aider_loops,
@@ -1699,7 +1699,7 @@ if __name__ in ("__main__", "__test__"):
                             model=ARCHITECT_AGENT,
                             editor_model=EDITOR_AGENT,
                             architect_api_base=ARCHITECT_API_BASE,
-                            editor_api_base=EDITOR_OLLAMA_API,
+                            editor_api_base=EDITOR_API,
                             rag_env=file_rag_env,
                             deliberate=_round_debate,
                         )
@@ -1722,7 +1722,7 @@ if __name__ in ("__main__", "__test__"):
                             editor_model=EDITOR_AGENT_TEST,
                             fallback_editor_model=EDITOR_AGENT_TEST_FALLBACK,
                             architect_api_base=ARCHITECT_API_BASE,
-                            editor_api_base=EDITOR_TEST_OLLAMA_API,
+                            editor_api_base=EDITOR_API_FALLBACK,
                             iterate_test=True,
                             auto_test=auto_test,
                             **_r_apply_kwargs,

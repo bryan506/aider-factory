@@ -172,8 +172,8 @@ class TestE2ELocalPersistentPipeline(unittest.TestCase):
             },
             "endpoints": {
                 "architect_api_base": self.arch_api,
-                "editor_ollama_api": self.editor_api,
-                "editor_test_ollama_api": self.editor_api,
+                "editor_api": self.editor_api,
+                "editor_api_fallback": self.editor_api,
                 "rag_agent_api": self.rag_api,
                 "ocr_api_base": self.ocr_embed_api,
                 "embed_api_base": self.ocr_embed_api,

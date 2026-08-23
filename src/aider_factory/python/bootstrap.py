@@ -52,7 +52,7 @@ def _discover_cluster_config():
 
     config = {
         "architect_api_base": base_url,
-        "editor_ollama_api": base_url,
+        "editor_api": base_url,
         "rag_agent_api": base_url,
         "api_key": api_key or "sk-dummy",
     }
@@ -268,7 +268,7 @@ def run_bootstrap(target_dir):
     cluster_config = _discover_cluster_config()
     if cluster_config:
         content = content.replace('architect_api_base: "http://192.168.100.2:8080/v1"', f'architect_api_base: "{cluster_config["architect_api_base"]}"')
-        content = content.replace('editor_ollama_api: "http://192.168.100.1:8080/v1"', f'editor_ollama_api: "{cluster_config["editor_ollama_api"]}"')
+        content = content.replace('editor_api: "http://192.168.100.1:8080/v1"', f'editor_api: "{cluster_config["editor_api"]}"')
         content = content.replace('rag_agent_api: "http://192.168.100.1:8080/v1"', f'rag_agent_api: "{cluster_config["rag_agent_api"]}"')
         if "architect_agent" in cluster_config:
             profile["architect_agent"] = cluster_config["architect_agent"]

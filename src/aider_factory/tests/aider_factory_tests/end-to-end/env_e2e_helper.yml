@@ -8,7 +8,7 @@ loop_aider_test: 1
 
 endpoints:
     architect_api_base: "http://localhost:11434/v1"
-    editor_ollama_api: "http://localhost:11434"
+    editor_api: "http://localhost:11434"
 
 phases:
   - name: "E2E Helper Phase"

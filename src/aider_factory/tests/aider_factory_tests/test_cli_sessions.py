@@ -182,6 +182,329 @@ class TestCLISessionManagement(unittest.TestCase):
         self.assertEqual(path, h2)
         self.assertEqual(name, "worker_2")
 
+    def test_backup_workspace_cache_isolated(self):
+        cache_dir = os.path.join(self.test_dir, "cache")
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": cache_dir}):
+            proj_name = os.path.basename(self.test_dir)
+            test_file = os.path.join(self.af_dir, "test_file.txt")
+            with open(test_file, "w", encoding="utf-8") as f:
+                f.write("sample backup data")
+
+            cli._backup_workspace_cache(self.test_dir)
+
+            dest_file = os.path.join(cache_dir, "aider_factory_cache", proj_name, ".aider_factory", "test_file.txt")
+            self.assertTrue(os.path.exists(dest_file))
+            with open(dest_file, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "sample backup data")
+
+    def test_backup_workspace_cache_rsync_fallback(self):
+        cache_dir = os.path.join(self.test_dir, "cache_fallback")
+        proj_name = os.path.basename(self.test_dir)
+        test_file = os.path.join(self.af_dir, "fallback_test.txt")
+        with open(test_file, "w", encoding="utf-8") as f:
+            f.write("copytree fallback content")
+
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": cache_dir}), patch("shutil.which", return_value=None):
+            cli._backup_workspace_cache(self.test_dir)
+
+            dest_file = os.path.join(cache_dir, "aider_factory_cache", proj_name, ".aider_factory", "fallback_test.txt")
+            self.assertTrue(os.path.exists(dest_file))
+            with open(dest_file, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "copytree fallback content")
+
+    def test_backup_workspace_cache_missing_dir(self):
+        cache_dir = os.path.join(self.test_dir, "cache_missing")
+        empty_proj = os.path.join(self.test_dir, "empty_proj")
+        os.makedirs(empty_proj, exist_ok=True)
+
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": cache_dir}):
+            cli._backup_workspace_cache(empty_proj)
+            self.assertFalse(os.path.exists(os.path.join(cache_dir, "aider_factory_cache")))
+
+    def test_clear_session_backup_vs_forever(self):
+        cache_dir = os.path.join(self.test_dir, "cache")
+        proj_name = os.path.basename(self.test_dir)
+        sess_dir1 = os.path.join(self.af_dir, "sessions", "sess_backup")
+        os.makedirs(sess_dir1, exist_ok=True)
+        with open(os.path.join(sess_dir1, "session.yml"), "w", encoding="utf-8") as f:
+            f.write("name: sess_backup\n")
+
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": cache_dir}), patch("sys.stdout", new=io.StringIO()):
+            # 1. Clear session with default forever=False -> backs up to cache
+            cli._clear_session(self.test_dir, "sess_backup", forever=False)
+            self.assertFalse(os.path.exists(sess_dir1))
+            cached_yml = os.path.join(cache_dir, "aider_factory_cache", proj_name, ".aider_factory", "sessions", "sess_backup", "session.yml")
+            self.assertTrue(os.path.exists(cached_yml))
+
+            # 2. Clear session with forever=True -> does not write to cache
+            import shutil
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            sess_dir2 = os.path.join(self.af_dir, "sessions", "sess_forever")
+            os.makedirs(sess_dir2, exist_ok=True)
+            with open(os.path.join(sess_dir2, "session.yml"), "w", encoding="utf-8") as f:
+                f.write("name: sess_forever\n")
+
+            cli._clear_session(self.test_dir, "sess_forever", forever=True)
+            self.assertFalse(os.path.exists(sess_dir2))
+            cached_forever = os.path.join(cache_dir, "aider_factory_cache", proj_name, ".aider_factory", "sessions", "sess_forever")
+            self.assertFalse(os.path.exists(cached_forever))
+
+    def test_clear_all_sessions_backup_vs_forever(self):
+        cache_dir = os.path.join(self.test_dir, "cache")
+        proj_name = os.path.basename(self.test_dir)
+        sess_dir = os.path.join(self.af_dir, "sessions", "work_sess")
+        os.makedirs(sess_dir, exist_ok=True)
+        with open(os.path.join(sess_dir, "session.yml"), "w", encoding="utf-8") as f:
+            f.write("name: work_sess\n")
+
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": cache_dir}), patch("sys.stdout", new=io.StringIO()):
+            cli._clear_all_sessions(self.test_dir, forever=False)
+            self.assertFalse(os.path.exists(sess_dir))
+            cached_sess = os.path.join(cache_dir, "aider_factory_cache", proj_name, ".aider_factory", "sessions", "work_sess", "session.yml")
+            self.assertTrue(os.path.exists(cached_sess))
+
+    def test_clear_side_sessions_backup_vs_forever(self):
+        cache_dir = os.path.join(self.test_dir, "cache")
+        proj_name = os.path.basename(self.test_dir)
+        helper_file = os.path.join(self.af_dir, ".helper_session.json")
+        with open(helper_file, "w", encoding="utf-8") as f:
+            f.write("[{\"role\": \"user\", \"content\": \"test\"}]")
+
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": cache_dir}), patch("sys.stdout", new=io.StringIO()):
+            # 1. Default (forever=False) -> backs up
+            cli._clear_side_sessions(self.test_dir, forever=False)
+            self.assertFalse(os.path.exists(helper_file))
+            cached_helper = os.path.join(cache_dir, "aider_factory_cache", proj_name, ".aider_factory", ".helper_session.json")
+            self.assertTrue(os.path.exists(cached_helper))
+
+            # 2. With forever=True -> does not write to cache
+            import shutil
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            oracle_file = os.path.join(self.af_dir, ".oracle_session.json")
+            with open(oracle_file, "w", encoding="utf-8") as f:
+                f.write("{}")
+
+            cli._clear_side_sessions(self.test_dir, forever=True)
+            self.assertFalse(os.path.exists(oracle_file))
+            self.assertFalse(os.path.exists(os.path.join(cache_dir, "aider_factory_cache")))
+
+    def test_clear_side_session_by_name_backup_vs_forever(self):
+        cache_dir = os.path.join(self.test_dir, "cache_side_name")
+        proj_name = os.path.basename(self.test_dir)
+        oracle_file = os.path.join(self.af_dir, ".oracle_session.json")
+        with open(oracle_file, "w", encoding="utf-8") as f:
+            f.write("{\"messages\": []}")
+
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": cache_dir}), patch("sys.stdout", new=io.StringIO()):
+            # 1. Clear oracle with default forever=False -> backs up
+            cli._clear_side_session_by_name(self.test_dir, "oracle", forever=False)
+            self.assertFalse(os.path.exists(oracle_file))
+            cached_oracle = os.path.join(cache_dir, "aider_factory_cache", proj_name, ".aider_factory", ".oracle_session.json")
+            self.assertTrue(os.path.exists(cached_oracle))
+
+            # 2. Clear helper with forever=True -> skips backup
+            import shutil
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            helper_file = os.path.join(self.af_dir, ".helper_session.json")
+            with open(helper_file, "w", encoding="utf-8") as f:
+                f.write("[]")
+
+            cli._clear_side_session_by_name(self.test_dir, "helper", forever=True)
+            self.assertFalse(os.path.exists(helper_file))
+            self.assertFalse(os.path.exists(os.path.join(cache_dir, "aider_factory_cache")))
+
+    def test_clear_all_sessions_global_backup(self):
+        cache_dir = os.path.join(self.test_dir, "cache_global_all")
+        reg_file = os.path.join(self.test_dir, "fake_reg.json")
+        proj1 = os.path.join(self.test_dir, "proj1")
+        proj2 = os.path.join(self.test_dir, "proj2")
+        sess1 = os.path.join(proj1, ".aider_factory", "sessions", "s1")
+        sess2 = os.path.join(proj2, ".aider_factory", "sessions", "s2")
+        os.makedirs(sess1, exist_ok=True)
+        os.makedirs(sess2, exist_ok=True)
+        with open(os.path.join(sess1, "session.yml"), "w", encoding="utf-8") as f:
+            f.write("proj1")
+        with open(os.path.join(sess2, "session.yml"), "w", encoding="utf-8") as f:
+            f.write("proj2")
+
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": cache_dir}), \
+             patch("aider_factory.cli._get_registry_path", return_value=reg_file), \
+             patch("sys.stdout", new=io.StringIO()):
+            cli._register_project(proj1)
+            cli._register_project(proj2)
+
+            cli._clear_all_sessions(self.test_dir, is_global=True, forever=False)
+
+            self.assertFalse(os.path.exists(sess1))
+            self.assertFalse(os.path.exists(sess2))
+            self.assertTrue(os.path.exists(os.path.join(cache_dir, "aider_factory_cache", "proj1", ".aider_factory", "sessions", "s1", "session.yml")))
+            self.assertTrue(os.path.exists(os.path.join(cache_dir, "aider_factory_cache", "proj2", ".aider_factory", "sessions", "s2", "session.yml")))
+
+    def test_clear_side_sessions_global_backup(self):
+        cache_dir = os.path.join(self.test_dir, "cache_global_side")
+        reg_file = os.path.join(self.test_dir, "fake_reg.json")
+        proj1 = os.path.join(self.test_dir, "proj1")
+        proj2 = os.path.join(self.test_dir, "proj2")
+        af1 = os.path.join(proj1, ".aider_factory")
+        af2 = os.path.join(proj2, ".aider_factory")
+        os.makedirs(af1, exist_ok=True)
+        os.makedirs(af2, exist_ok=True)
+        h1 = os.path.join(af1, ".helper_session.json")
+        h2 = os.path.join(af2, ".helper_session.json")
+        with open(h1, "w", encoding="utf-8") as f:
+            f.write("[]")
+        with open(h2, "w", encoding="utf-8") as f:
+            f.write("[]")
+
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": cache_dir}), \
+             patch("aider_factory.cli._get_registry_path", return_value=reg_file), \
+             patch("sys.stdout", new=io.StringIO()):
+            cli._register_project(proj1)
+            cli._register_project(proj2)
+
+            cli._clear_side_sessions(self.test_dir, is_global=True, forever=False)
+
+            self.assertFalse(os.path.exists(h1))
+            self.assertFalse(os.path.exists(h2))
+            self.assertTrue(os.path.exists(os.path.join(cache_dir, "aider_factory_cache", "proj1", ".aider_factory", ".helper_session.json")))
+            self.assertTrue(os.path.exists(os.path.join(cache_dir, "aider_factory_cache", "proj2", ".aider_factory", ".helper_session.json")))
+
+    def test_main_cli_clear_all_default_vs_forever(self):
+        cache_dir = os.path.join(self.test_dir, "cache_cli_all")
+        proj_name = os.path.basename(self.test_dir)
+        sess_dir = os.path.join(self.af_dir, "sessions", "cli_all_sess")
+        os.makedirs(sess_dir, exist_ok=True)
+        with open(os.path.join(sess_dir, "session.yml"), "w", encoding="utf-8") as f:
+            f.write("cli_all_sess")
+
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": cache_dir}), \
+             patch("os.getcwd", return_value=self.test_dir), \
+             patch("sys.stdout", new=io.StringIO()):
+            # 1. CLI --clear-all (default: backup)
+            with patch.object(sys, "argv", ["aider-factory", "--clear-all"]):
+                with self.assertRaises(SystemExit) as cm:
+                    cli.main()
+                self.assertEqual(cm.exception.code, 0)
+            self.assertFalse(os.path.exists(sess_dir))
+            cached_yml = os.path.join(cache_dir, "aider_factory_cache", proj_name, ".aider_factory", "sessions", "cli_all_sess", "session.yml")
+            self.assertTrue(os.path.exists(cached_yml))
+
+            # 2. CLI --clear-all --forever (no backup)
+            import shutil
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            sess_dir2 = os.path.join(self.af_dir, "sessions", "cli_all_sess2")
+            os.makedirs(sess_dir2, exist_ok=True)
+            with open(os.path.join(sess_dir2, "session.yml"), "w", encoding="utf-8") as f:
+                f.write("cli_all_sess2")
+
+            with patch.object(sys, "argv", ["aider-factory", "--clear-all", "--forever"]):
+                with self.assertRaises(SystemExit) as cm:
+                    cli.main()
+                self.assertEqual(cm.exception.code, 0)
+            self.assertFalse(os.path.exists(sess_dir2))
+            self.assertFalse(os.path.exists(os.path.join(cache_dir, "aider_factory_cache")))
+
+    def test_main_cli_clear_session_default_vs_forever(self):
+        cache_dir = os.path.join(self.test_dir, "cache_cli_sess")
+        proj_name = os.path.basename(self.test_dir)
+        sess_dir = os.path.join(self.af_dir, "sessions", "target_sess")
+        os.makedirs(sess_dir, exist_ok=True)
+        with open(os.path.join(sess_dir, "session.yml"), "w", encoding="utf-8") as f:
+            f.write("target_sess")
+
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": cache_dir}), \
+             patch("os.getcwd", return_value=self.test_dir), \
+             patch("sys.stdout", new=io.StringIO()):
+            # 1. Clear session default -> backup
+            with patch.object(sys, "argv", ["aider-factory", "--clear-session", "target_sess"]):
+                with self.assertRaises(SystemExit) as cm:
+                    cli.main()
+                self.assertEqual(cm.exception.code, 0)
+            self.assertFalse(os.path.exists(sess_dir))
+            cached_yml = os.path.join(cache_dir, "aider_factory_cache", proj_name, ".aider_factory", "sessions", "target_sess", "session.yml")
+            self.assertTrue(os.path.exists(cached_yml))
+
+            # 2. Clear session --forever -> no backup
+            import shutil
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            sess_dir2 = os.path.join(self.af_dir, "sessions", "target_sess2")
+            os.makedirs(sess_dir2, exist_ok=True)
+            with open(os.path.join(sess_dir2, "session.yml"), "w", encoding="utf-8") as f:
+                f.write("target_sess2")
+
+            with patch.object(sys, "argv", ["aider-factory", "--clear-session", "target_sess2", "--forever"]):
+                with self.assertRaises(SystemExit) as cm:
+                    cli.main()
+                self.assertEqual(cm.exception.code, 0)
+            self.assertFalse(os.path.exists(sess_dir2))
+            self.assertFalse(os.path.exists(os.path.join(cache_dir, "aider_factory_cache")))
+
+    def test_main_cli_clear_side_sessions_default_vs_forever(self):
+        cache_dir = os.path.join(self.test_dir, "cache_cli_sides")
+        proj_name = os.path.basename(self.test_dir)
+        helper_file = os.path.join(self.af_dir, ".helper_session.json")
+        with open(helper_file, "w", encoding="utf-8") as f:
+            f.write("[]")
+
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": cache_dir}), \
+             patch("os.getcwd", return_value=self.test_dir), \
+             patch("sys.stdout", new=io.StringIO()):
+            # 1. Clear side sessions -> backup
+            with patch.object(sys, "argv", ["aider-factory", "--clear-side-sessions"]):
+                with self.assertRaises(SystemExit) as cm:
+                    cli.main()
+                self.assertEqual(cm.exception.code, 0)
+            self.assertFalse(os.path.exists(helper_file))
+            cached_helper = os.path.join(cache_dir, "aider_factory_cache", proj_name, ".aider_factory", ".helper_session.json")
+            self.assertTrue(os.path.exists(cached_helper))
+
+            # 2. Clear side sessions --forever -> no backup
+            import shutil
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            oracle_file = os.path.join(self.af_dir, ".oracle_session.json")
+            with open(oracle_file, "w", encoding="utf-8") as f:
+                f.write("{}")
+
+            with patch.object(sys, "argv", ["aider-factory", "--clear-side-sessions", "--forever"]):
+                with self.assertRaises(SystemExit) as cm:
+                    cli.main()
+                self.assertEqual(cm.exception.code, 0)
+            self.assertFalse(os.path.exists(oracle_file))
+            self.assertFalse(os.path.exists(os.path.join(cache_dir, "aider_factory_cache")))
+
+    def test_main_cli_clear_side_session_default_vs_forever(self):
+        cache_dir = os.path.join(self.test_dir, "cache_cli_side_name")
+        proj_name = os.path.basename(self.test_dir)
+        oracle_file = os.path.join(self.af_dir, ".oracle_session.json")
+        with open(oracle_file, "w", encoding="utf-8") as f:
+            f.write("{}")
+
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": cache_dir}), \
+             patch("os.getcwd", return_value=self.test_dir), \
+             patch("sys.stdout", new=io.StringIO()):
+            # 1. Clear single side session -> backup
+            with patch.object(sys, "argv", ["aider-factory", "--clear-side-session", "oracle"]):
+                with self.assertRaises(SystemExit) as cm:
+                    cli.main()
+                self.assertEqual(cm.exception.code, 0)
+            self.assertFalse(os.path.exists(oracle_file))
+            cached_oracle = os.path.join(cache_dir, "aider_factory_cache", proj_name, ".aider_factory", ".oracle_session.json")
+            self.assertTrue(os.path.exists(cached_oracle))
+
+            # 2. Clear single side session --forever -> no backup
+            import shutil
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            helper_file = os.path.join(self.af_dir, ".helper_session.json")
+            with open(helper_file, "w", encoding="utf-8") as f:
+                f.write("[]")
+
+            with patch.object(sys, "argv", ["aider-factory", "--clear-side-session", "helper", "--forever"]):
+                with self.assertRaises(SystemExit) as cm:
+                    cli.main()
+                self.assertEqual(cm.exception.code, 0)
+            self.assertFalse(os.path.exists(helper_file))
+            self.assertFalse(os.path.exists(os.path.join(cache_dir, "aider_factory_cache")))
+
     def test_apply_paired_session_config_override(self):
         import yaml
         from aider_factory.python.apply_agent import resolve_editor_config

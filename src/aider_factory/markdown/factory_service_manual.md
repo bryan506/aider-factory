@@ -265,8 +265,8 @@ The AI Factory pipeline routes model traffic automatically based on **model pref
 | Prefix            | Backend                          | Endpoint Used                             | Notes                                                                                                                                        |
 | ----------------- | -------------------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `openai/`         | Any OpenAI-compatible API server | `architect_api_base`                      | Used for high-capability reasoning models (Architect, RAG Oracle). Routes to your local `llama-server` on port 8081 or remote LiteLLM proxy. |
-| `ollama/`         | Ollama native API                | `editor_ollama_api`                       | Ollama must be running (`ollama serve`). Ideal for fast, local coding models.                                                                |
-| `lm_studio/`      | LM Studio (OpenAI-compatible)    | `editor_ollama_api`                       | LM Studio presents an OpenAI-compatible API on its own port. Mapped to the same `editor_ollama_api` endpoint.                                |
+| `ollama/`         | Ollama native API                | `editor_api`                       | Ollama must be running (`ollama serve`). Ideal for fast, local coding models.                                                                |
+| `lm_studio/`      | LM Studio (OpenAI-compatible)    | `editor_api`                       | LM Studio presents an OpenAI-compatible API on its own port. Mapped to the same `editor_api` endpoint.                                |
 | `gemini/`         | Google Gemini API                | Bypasses endpoints, uses `GEMINI_API_KEY` | Direct API routing. No local server needed.                                                                                                  |
 | `vertex_ai/`      | GCP Vertex AI                    | Bypasses endpoints, uses GCP credentials  | Direct API routing. No local server needed.                                                                                                  |
 | `github_copilot/` | GitHub Copilot                   | Handled natively by Aider                 | Uses Copilot auth. No local server needed.                                                                                                   |
@@ -280,7 +280,7 @@ phases:
   - name: "High-Capability Implementation"
     models:
       architect_agent: "openai/qwen3.5-122b-a10b-90k:latest" # Routes to architect_api_base (port 8081)
-      editor_agent: "ollama/qwen3.6-27B-90k:latest" # Routes to editor_ollama_api (port 11434)
+      editor_agent: "ollama/qwen3.6-27B-90k:latest" # Routes to editor_api (port 11434)
       rag_agent: "gemini/gemini-3.5-flash" # Bypasses endpoints, uses GEMINI_API_KEY
 ```
 
@@ -460,7 +460,7 @@ This file forces specific APIs and controls the "Reasoning Budget". Setting `thi
     temperature: 0.1 # Forces determinism
     top_p: 1.0
 
-- name: lm_studio/qwen3.5-122B-80k:latest # Routes natively to editor_ollama_api
+- name: lm_studio/qwen3.5-122B-80k:latest # Routes natively to editor_api
   edit_format: editor-diff
   examples_as_sys_msg: true
   caches_by_default: true
@@ -676,8 +676,8 @@ You can and should use multiple endpoints simultaneously across phases. For exam
 | Prefix            | Source                                                               | Routing Target                             | Example Model                              |
 | ----------------- | -------------------------------------------------------------------- | ------------------------------------------ | ------------------------------------------ |
 | `openai/`         | Any OpenAI-compatible server (llama-server, LiteLLM, text-gen-webui) | `architect_api_base`                       | `openai/qwen3.5-122b-a10b-90k:latest`      |
-| `ollama/`         | Ollama native API                                                    | `editor_ollama_api`                        | `ollama/qwen3.6-27B-90k:latest`            |
-| `lm_studio/`      | LM Studio (OpenAI-compatible)                                        | `editor_ollama_api`                        | `lm_studio/qwen3.6-27B-90k-udq4kxl:latest` |
+| `ollama/`         | Ollama native API                                                    | `editor_api`                        | `ollama/qwen3.6-27B-90k:latest`            |
+| `lm_studio/`      | LM Studio (OpenAI-compatible)                                        | `editor_api`                        | `lm_studio/qwen3.6-27B-90k-udq4kxl:latest` |
 | `gemini/`         | Google Gemini API                                                    | Bypasses endpoints (uses `GEMINI_API_KEY`) | `gemini/gemini-3.5-flash`                  |
 | `vertex_ai/`      | GCP Vertex AI                                                        | Bypasses endpoints (uses GCP auth)         | `vertex_ai/claude-opus-4-6`                |
 | `github_copilot/` | GitHub Copilot                                                       | Bypasses endpoints (uses Copilot auth)     | `github_copilot/gpt-5.4`                   |
@@ -690,8 +690,8 @@ working_directory: "/home/user/projects/my-app"
 
 endpoints:
   architect_api_base: "http://192.168.100.2:8080/v1"
-  editor_ollama_api: "http://192.168.100.1:8080/v1"
-  editor_test_ollama_api: "http://192.168.100.1:8080/v1"
+  editor_api: "http://192.168.100.1:8080/v1"
+  editor_api_fallback: "http://192.168.100.1:8080/v1"
   rag_agent_api: "http://192.168.100.1:8080/v1"
   grounding_agent_api: "http://192.168.100.1:8090/v1"
   ocr_api_base: "http://192.168.100.2:8081/v1"

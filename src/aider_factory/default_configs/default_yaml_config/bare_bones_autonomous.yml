@@ -10,8 +10,8 @@ loop_aider_test: 3                             # max test-fix attempts per targe
 # Uncomment for local model endpoints (not needed for gemini/ or github_copilot/ prefixes)
 # endpoints:
 #     architect_api_base: "http://localhost:8080/v1"     # openai/ prefix models
-#     editor_ollama_api: "http://localhost:11434"         # ollama/ prefix models
-#     editor_test_ollama_api: "http://localhost:11434"
+#     editor_api: "http://localhost:11434"         # ollama/ prefix models
+#     editor_api_fallback: "http://localhost:11434"
 
 phases:
     - name: "Implement and Test"

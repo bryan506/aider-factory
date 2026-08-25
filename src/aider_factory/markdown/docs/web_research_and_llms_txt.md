@@ -1,62 +1,48 @@
 # Web Research, Sitemap Harvesting & `llms.txt` Ingestion
 
-`aider-factory` provides a private, automated web research and ingestion subsystem composed of `research_agent.py` (metasearch & sitemap harvesting) and `rag_web.py` (multi-stage URL extraction & `llms.txt` discovery).
+## 1. Executive Overview & Foundational Invariants
+
+`aider-factory` provides a private, automated web research and ingestion subsystem composed of `research_agent.py` (metasearch & sitemap harvesting) and `rag_web.py` (multi-stage URL extraction & `llms.txt` discovery). This subsystem enables agents to query live web data, harvest documentation manifests, and ingest external HTML/PDFs into LanceDB without relying on commercial search APIs.
+
+### Foundational Invariants
+
+1. **Strict Privacy & Zero-Tracking**: Queries are routed through a local, user-level SearXNG container (`port 8088`). Queries never leave the infrastructure unless falling back to public instances.
+2. **Deterministic Fallback**: If the local SearXNG instance is rate-limited (e.g., CAPTCHAs), the system automatically falls back to the top 5 healthiest public instances from `searx.space`.
+3. **Cheapest-First Extraction**: URL conversion follows a strict waterfall, attempting low-overhead extraction (HEAD sniff, direct text) before escalating to expensive methods (Trafilatura, Headless Playwright).
+4. **JIT Browser Provisioning**: If Headless Chromium is required but missing, the pipeline automatically provisions it via `playwright install chromium` in the background.
 
 ---
 
-## 1. Private Metasearch CLI (`aider-research`)
+## 2. System Topology & Lifecycle Flowcharts
 
-`aider-research` interfaces with a local, user-level SearXNG container on port **8088** to perform private, zero-tracking web searches.
+### Web Research & Sitemap Harvesting Pipeline
 
-### Invocations
-```bash
-# General query (top 10 results)
-aider-research search "quantum computing error correction" --top 10
-
-# Academic search mode (filters to arXiv, Google Scholar, Crossref, CORE)
-aider-research search "liquidity adjusted volatility" --academic --time-range month
-
-# Read complex query from a text file
-aider-research search --file query_prompt.txt --academic
-
-# Return ONLY a list of URLs (supports search operators like site:, filetype:)
-aider-research search "site:lemonade-server.ai/docs" --links-only --out temp/urls.txt
+```text
+[User / Agent Query] ──▶ `aider-research search`
+                            │
+    ┌───────────────────────┴───────────────────────┐
+    │                 Query Type?                   │
+    └─────────┬───────────────────────────┬─────────┘
+              │                           │
+        [Metasearch]                 [Sitemap]
+              │                           │
+    ┌─────────▼─────────┐       ┌─────────▼─────────┐
+    │ Query SearXNG API │       │ Fetch sitemap.xml │
+    │ (Local or Public) │       │ -> robots.txt     │
+    └─────────┬─────────┘       │ -> llms.txt       │
+                                └─────────┬─────────┘
+              │                           │
+              ▼                           ▼
+    [Filter & Format]           [Regex Grep Filter]
+              │                           │
+              └─────────────┬─────────────┘
+                            ▼
+                    [Output URLs / Report]
 ```
 
-### CAPTCHA & Rate Limit Resilience (Dynamic Public Fallback)
-If local SearXNG hits upstream rate limits (returning 0 results), `research_agent.py` fetches the top 5 healthiest public SearXNG instances from `searx.space` (cached locally for 24 hours) and retries the query seamlessly.
+### URL Conversion Waterfall (`rag_web.py`)
 
----
-
-## 2. Deterministic Sitemap & `llms.txt` Harvesting
-
-Extract and filter URLs from domain sitemaps or AI documentation manifests (`llms.txt`) with zero LLM token costs.
-
-```bash
-# 1. Recursive sitemap harvesting with regex filtering
-aider-research search "https://docs.example.com" --sitemap \
-  --grep "api|guide" \
-  --grep-exclude "zh-cn|de|ja" \
-  --site-depth 2 \
-  --out temp/docs_urls.txt
-
-# 2. Direct llms.txt manifest harvesting
-aider-research search "https://docs.example.com/llms.txt" --sitemap --out temp/llms_urls.txt
-```
-
-### Harvesting Pipeline Algorithm
-1. **Direct `llms.txt` Check**: If the target URL contains `/llms.txt`, `fetch_llms_txt_urls()` parses all Markdown link targets (`[Title](url)`), resolves relative URLs, and applies regex filters.
-2. **Sitemap XML Parsing**: Fetches `/sitemap.xml`. If it is a `<sitemapindex>`, recursively follows child `<sitemap>` tags up to `--site-depth`.
-3. **Robots.txt Fallback**: If `/sitemap.xml` returns 404, fetches `/robots.txt` and parses `Sitemap:` directives.
-4. **`robots.txt` $\to$ `llms.txt` Fallback**: If no sitemap is declared in `robots.txt`, attempts to discover `{domain}/llms.txt`.
-
----
-
-## 3. Multi-Stage URL Ingestion Engine (`rag_web.py`)
-
-When URLs are processed via `aider-oracle --add-web`, `rag_web.py` classifies the content type and converts the page into clean Markdown using a 4-tier waterfall:
-
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                 URL CONVERSION WATERFALL                                        │
 │                                                                                                 │
@@ -64,11 +50,11 @@ When URLs are processed via `aider-oracle --add-web`, `rag_web.py` classifies th
 │       │                                                                                         │
 │       ▼                                                                                         │
 │  [Step A: HEAD Content-Type Sniff]                                                              │
-│  • application/pdf or .pdf -> Direct Binary PDF Download (saved as <stem>.pdf)                 │
+│  • application/pdf or .pdf -> Direct Binary PDF Download (saved as <stem>.pdf)                  │
 │       │ (If not PDF)                                                                            │
 │       ▼                                                                                         │
-│  [Step B: Direct Plain Text / Markdown Fast-Path]                                              │
-│  • .md, .txt, .rst, .json, .csv, llms-full.txt, text/markdown -> Direct text download          │
+│  [Step B: Direct Plain Text / Markdown Fast-Path]                                               │
+│  • .md, .txt, .rst, .json, .csv, .tsv, llms-full.txt, text/markdown -> Direct text download      │
 │       │ (If HTML)                                                                               │
 │       ▼                                                                                         │
 │  [Step C: Trafilatura Main-Text Extraction]                                                     │
@@ -77,24 +63,100 @@ When URLs are processed via `aider-oracle --add-web`, `rag_web.py` classifies th
 │       │ (If Trafilatura fails or yields < 100 bytes e.g. SPA)                                   │
 │       ▼                                                                                         │
 │  [Step D: Headless Playwright Chromium Fallback]                                                │
-│  • Launches headless browser, evaluates JS, and extracts rendered DOM Markdown                 │
+│  • Launches headless browser, evaluates JS, and extracts rendered DOM Markdown                  │
 └─────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 4. End-to-End Ingestion Examples
+## 3. Technical Mechanics & Deep-Dive Logic
 
-```bash
-# Scenario A: Batch Ingest Documentation URLs using 8 Threads
-aider-oracle --collection my_docs --add-web --file temp/docs_urls.txt --workers 8
+### Dynamic Public Instance Fallback
+To mitigate upstream rate limits (e.g., Google serving CAPTCHAs to the local SearXNG instance), `research_agent.py` implements a dynamic fallback mechanism:
+1. Fetches `https://searx.space/data/instances.json`.
+2. Filters for instances with `network_type == "normal"`, `uptimeMonth >= 99`, `grade` in `["A", "A+", "V"]`, and Google error rate `< 50`.
+3. Sorts by highest uptime and lowest latency.
+4. Caches the top 5 URLs in `.aider_factory/logs/cache/searxng_fallbacks.json` for 24 hours.
 
-# Scenario B: Single Page Direct RAG Ingestion
-aider-oracle --collection my_docs --add-web "https://example.com/guide.html"
+### Sitemap Discovery & Fallback Chain
+When harvesting a domain, if the default `sitemap.xml` endpoint fails or returns 404 at depth 1, the pipeline automatically falls back to fetching `robots.txt` to parse official `Sitemap:` directives. If no directives are found, it performs a final probe for an `llms.txt` manifest.
 
-# Scenario C: Direct PDF Download & OCR Ingestion
-aider-oracle --collection my_docs --add-web "https://example.com/whitepaper.pdf"
+### Multi-Line Query Collapse
+When passing complex prompts via `--file <query.txt>`, the research agent deterministically collapses multi-line inputs into a single-line query using `re.sub(r"\s+", " ", query).strip()` before dispatching to the SearXNG API.
 
-# Scenario D: Direct Markdown Download (No RAG Indexing)
-aider-oracle --collection my_docs --add-web "https://example.com/llms-full.txt" --no-rag
+### `llms.txt` Discovery & Regex Parsing
+When harvesting an `llms.txt` manifest, the pipeline extracts valid Markdown link targets using the following regular expression:
+```python
+re.findall(r'\[.*?\]\((https?://[^\s\)]+|/[^\s\)]+|[^\s\)]+\.md|[^\s\)]+\.html|[^\s\)]+\.txt)\)', text)
 ```
+Relative URLs are automatically resolved against the manifest's base URL using `urllib.parse.urljoin`.
+
+### Headless Playwright JIT Provisioning
+For Single-Page Applications (SPAs) where Trafilatura yields $< 100$ bytes, `rag_web.py` falls back to Playwright. If the Chromium binary is missing, it catches the `Executable doesn't exist` exception and executes:
+```python
+subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+```
+This downloads the ~150MB binary to `~/.cache/ms-playwright` transparently.
+
+### Concurrent Web Fetching
+When `aider-oracle --add-web` is invoked with multiple URLs, `rag_web.fetch_urls_batch()` utilizes a `ThreadPoolExecutor`. The concurrency level is controlled by the `--workers` flag (or `ORACLE_WEB_WORKERS`), allowing rapid ingestion of large documentation sites.
+
+---
+
+## 4. Exhaustive CLI Invocations & Command Matrix
+
+| Command / Flag | Context | Description & Operational Behavior |
+| :--- | :--- | :--- |
+| `aider-research search "<query>" --top 10` | Metasearch | Queries SearXNG and returns the top 10 results as a Markdown report. |
+| `aider-research search "<query>" --academic` | Academic Search | Filters SearXNG engines to `arxiv,google_scholar,crossref,core`. |
+| `aider-research search "<query>" --engines e1,e2` | Metasearch | Queries specific SearXNG engines (e.g., `google,bing`). |
+| `aider-research search "<query>" --time-range day\|month\|year` | Metasearch | Restricts search results to a specific time range. |
+| `aider-research search --file <query.txt>` | Metasearch | Reads a multi-line query from a file and collapses it into a single search string. |
+| `aider-research search "<query>" --links-only` | URL Extraction | Returns only a raw list of URLs (useful for piping into `--add-web`). |
+| `aider-research search "<url>" --sitemap` | Sitemap Harvest | Recursively parses `sitemap.xml` or `llms.txt` for URLs up to `--site-depth`. |
+| `aider-research search "<url>" --sitemap --site-depth N` | Sitemap Harvest | Recursively parses sitemaps up to depth `N` (default: 1). |
+| `aider-research search ... --grep "<regex>"` | URL Filtering | Applies case-insensitive regex inclusion filtering to harvested URLs. |
+| `aider-research search ... --grep-exclude "<regex>"` | URL Filtering | Applies case-insensitive regex exclusion filtering to harvested URLs. |
+| `aider-oracle --add-web <url>` | Single URL Ingest | Downloads, converts to Markdown/PDF, and incrementally ingests into LanceDB. |
+| `aider-oracle --add-web --file <urls.txt>` | Batch URL Ingest | Reads line-separated URLs and ingests them sequentially. |
+| `aider-oracle --add-web --file:<urls.txt>` | Batch URL Ingest | Explicit inline syntax for URL list files, avoiding positional ambiguity. |
+| `aider-oracle --add-web ... --workers 8` | Concurrent Ingest | Processes batch URL ingestion using 8 parallel worker threads. |
+| `aider-oracle --add-web ... --no-rag` | Conversion Only | Downloads and converts URLs to Markdown, but skips LanceDB vector indexing. |
+
+---
+
+## 5. Configuration Schema & YAML Knobs
+
+Web research and ingestion parameters are controlled via environment variables and `.env.yml` settings:
+
+```yaml
+endpoints:
+  # Optional: Override the default local SearXNG endpoint
+  # Environment Variable: SEARXNG_BASE_URL
+  searxng_api_base: "http://localhost:8088" 
+
+phases:
+  - name: "Web Ingestion Phase"
+    rag:
+      chunk_size_chars: 800         # Chunk size for ingested web Markdown
+      chunk_overlap_chars: 100      # Overlap for ingested web Markdown
+      code_chunk_size: 2000         # Chunk size for code snippets in web docs
+      ocr_parallel: 1               # Concurrency for OCR (if web PDF is scanned)
+```
+
+**Environment Variables**:
+- `SEARXNG_BASE_URL`: Defines the primary SearXNG endpoint (Default: `http://localhost:8088`).
+- `ORACLE_WEB_WORKERS`: Defines the ThreadPoolExecutor worker count for `--add-web` (Default: `1`).
+- `ORACLE_NO_RAG_INGEST`: If `1`, bypasses LanceDB indexing during `--add-web` (Markdown conversion only).
+
+---
+
+## 6. Operational Edge Cases, Failure Modes & Telemetry
+
+| Edge Case / Failure Mode | Root Cause / Symptom | Mitigation & System Recovery |
+| :--- | :--- | :--- |
+| **SearXNG Rate Limit (CAPTCHA)** | Local SearXNG returns 0 results or `unresponsive_engines`. | `research_agent.py` automatically fetches healthy public instances from `searx.space` and retries the query. |
+| **Playwright Provisioning Blocked** | `playwright install chromium` fails due to corporate firewall or air-gapped environment. | Exception is caught safely. Extraction fails gracefully without crashing the pipeline, logging a warning to `stderr`. |
+| **Sitemap 404 Not Found** | Target domain does not expose `/sitemap.xml`. | Pipeline automatically fetches `/robots.txt` to parse `Sitemap:` directives. If absent, falls back to probing `/llms.txt`. |
+| **SPA Yields Empty Markdown** | Target URL is a React/Vue SPA; Trafilatura extracts $< 100$ bytes. | Pipeline detects low byte count and escalates to the Headless Playwright fallback to render the DOM before extraction. |
+| **Invalid Regex Filter** | User provides malformed regex to `--grep` or `--grep-exclude`. | `re.compile` catches the error, logs a clear message to `stderr`, and exits with code 1. |

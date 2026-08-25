@@ -246,10 +246,10 @@ def _region(block, db_dir, collection, k):
 
             # NO prefix (passage-to-passage comparison)
             try:
-                default_recall = min(max(k * 4, 25, len(tables) * 4), 100) if len(tables) > 1 else max(k * 4, 25)
+                default_recall = min(max(k * 4, 30, len(tables) * 4), 100) if len(tables) > 1 else max(k * 4, 30)
                 recall_k = int(os.environ.get("ORACLE_RECALL_K", default_recall))
             except (ValueError, TypeError):
-                recall_k = min(max(k * 4, 25, len(tables) * 4), 100) if len(tables) > 1 else max(k * 4, 25)
+                recall_k = min(max(k * 4, 30, len(tables) * 4), 100) if len(tables) > 1 else max(k * 4, 30)
 
             bvec = embed_texts([block], backend, model, api_base)[0]
             

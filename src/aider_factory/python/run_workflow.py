@@ -325,6 +325,12 @@ if __name__ in ("__main__", "__test__"):
     session_dir = os.path.join(base_cwd, ".aider_factory", "sessions", session_name)
     os.makedirs(session_dir, exist_ok=True)
 
+    hist_dir = os.path.join(session_dir, "chat_history")
+    if os.path.exists(hist_dir):
+        hist_files = [f for f in os.listdir(hist_dir) if f.startswith(".aider.chat.history_")]
+        if len(hist_files) > 1:
+            print(f"⚠️  Resuming a multi-file isolated session. Found {len(hist_files)} history files in {hist_dir}.", file=sys.stderr)
+
     # Resolve config YAML path (CLI argument takes precedence over environment variable)
     session_yaml = os.path.join(session_dir, "session.yml")
     yaml_path = session_yaml
@@ -499,6 +505,9 @@ if __name__ in ("__main__", "__test__"):
         sticky_context = toggles.get("sticky_context", False)
         pair_programming = toggles.get("pair_programming", False)
 
+        shared_history_val = toggles.get("shared_history")
+        shared_history = shared_history_val if shared_history_val is not None else False
+
         oracle_cfg = phase.get("oracle")
         val_cfg = phase.get("validation", {}) or {}
         resolve_evidence = val_cfg.get("enabled", False)
@@ -539,6 +548,11 @@ if __name__ in ("__main__", "__test__"):
         auto_commits_val = toggles.get("auto_commits")
         auto_commits = auto_commits_val if auto_commits_val is not None else True
 
+        auto_lint_val = toggles.get("auto_lint")
+        auto_lint = auto_lint_val if auto_lint_val is not None else True
+
+        lint_cmd = toggles.get("lint_cmd")
+
         suggest_shell_commands_val = toggles.get("suggest_shell_commands")
         suggest_shell_commands = (
             suggest_shell_commands_val
@@ -562,6 +576,8 @@ if __name__ in ("__main__", "__test__"):
             "yes_always": yes_always,
             "auto_accept_architect": auto_accept_architect,
             "auto_commits": auto_commits,
+            "auto_lint": auto_lint,
+            "lint_cmd": lint_cmd,
             "suggest_shell_commands": suggest_shell_commands,
             "detect_urls": detect_urls,
             "disable_playwright": disable_playwright,
@@ -584,7 +600,7 @@ if __name__ in ("__main__", "__test__"):
         esc_cfg = phase.get("escalation_debate", {}) or {}
         debate_loops = esc_cfg.get("loops", 0)
         debate_rounds = esc_cfg.get("rounds", 1)
-        pass_round_history = esc_cfg.get("pass_round_history", True)
+        pass_round_history = esc_cfg.get("pass_round_history", esc_cfg.get("pass_history", True))
 
         rag_phase_cfg = phase.get("rag", {}) or {}
         phase_run_ocr_rag = rag_phase_cfg.get("run_ocr_rag", False)
@@ -832,10 +848,12 @@ if __name__ in ("__main__", "__test__"):
                 or global_rag.get("docling_timeout", None),
             }
 
-        plans = phase.get("plans", {})
-        j1_val = plans.get("job_one_plan") or "markdown/templates/implement.md"
-        job_one_plan = resolve_template_path(
-            j1_val, project_directory=project_directory
+        plans = phase.get("plans", {}) or {}
+        j1_val = plans.get("job_one_plan")
+        job_one_plan = (
+            resolve_template_path(j1_val, project_directory=project_directory)
+            if j1_val
+            else None
         )
 
         j2_val = plans.get("job_two_plan")
@@ -845,16 +863,18 @@ if __name__ in ("__main__", "__test__"):
             else None
         )
 
-        j3_val = plans.get("job_three_plan") or "markdown/templates/testing.md"
-        job_three_plan = resolve_template_path(
-            j3_val, project_directory=project_directory
+        j3_val = plans.get("job_three_plan")
+        job_three_plan = (
+            resolve_template_path(j3_val, project_directory=project_directory)
+            if j3_val
+            else None
         )
 
-        it_val = (
-            plans.get("iterate_plan") or "markdown/templates/testing_unit_iterate.md"
-        )
-        iterate_plan = resolve_template_path(
-            it_val, project_directory=project_directory
+        it_val = plans.get("iterate_plan")
+        iterate_plan = (
+            resolve_template_path(it_val, project_directory=project_directory)
+            if it_val
+            else None
         )
 
         delib_val = plans.get(
@@ -911,6 +931,8 @@ if __name__ in ("__main__", "__test__"):
         # The escalate (debate->apply) block is SHARED; only its gate/issue/template/env differ.
         for current_file in target_files:
             base_name = os.path.splitext(os.path.basename(current_file))[0]
+            def _h_stem(job_prefix: str) -> Optional[str]:
+                return None if shared_history else f"{job_prefix}_{base_name}"
 
             # Specific test file (broadcast if 1, index-matched if many; else auto-generate).
             test_files_list = phase.get("files", {}).get("test_files")
@@ -1024,6 +1046,7 @@ if __name__ in ("__main__", "__test__"):
                                 + list(initial_context_files),
                             },
                             skip_aider=True,
+                            history_stem=_h_stem("oracle"),
                         )
                     )
                     if task_ocr_ingest is not None:
@@ -1055,6 +1078,7 @@ if __name__ in ("__main__", "__test__"):
                                 "top_k": region_top_k,
                             },
                             skip_aider=True,
+                            history_stem=_h_stem("autofix"),
                         )
                     )
                     if task_ocr_ingest is not None:
@@ -1103,6 +1127,7 @@ if __name__ in ("__main__", "__test__"):
                                 auto_test=auto_test,
                                 pair_programming=pair_programming,
                                 rag_env=it_env,
+                                history_stem=_h_stem("heal"),
                                 **task_aider_flags,
                             )
                         )
@@ -1245,6 +1270,7 @@ if __name__ in ("__main__", "__test__"):
                                 rag_env=_j1_rag_env,
                                 ocr_ingest=task_ocr_ingest,
                                 deliberate=_r_deliberate,
+                                history_stem=_h_stem("job1"),
                             )
                         )
                         if task_ocr_ingest is not None:
@@ -1270,6 +1296,7 @@ if __name__ in ("__main__", "__test__"):
                             rag_env=file_rag_env,
                             ocr_ingest=task_ocr_ingest,
                             pair_programming=pair_programming,
+                            history_stem=_h_stem("job1"),
                             **task_aider_flags,
                         )
                     )
@@ -1320,19 +1347,7 @@ if __name__ in ("__main__", "__test__"):
                                 strategy_content = sf.read()
 
                     session_tmpl_dir = os.path.join(session_dir, "templates")
-                    default_val_tmpl = resolve_template_path(
-                        "markdown/templates/validate.md",
-                        project_directory=project_directory,
-                    )
-
-                    if not job_two_plan and strategy_content:
-                        rendered_plan = os.path.join(
-                            session_tmpl_dir, f"{base_name}_validate_rendered.md"
-                        )
-                        job2_msg_file = _render_validate_template(
-                            default_val_tmpl, strategy_content, rendered_plan
-                        )
-                    elif job_two_plan:
+                    if job_two_plan:
                         if (
                             strategy_content
                             and os.path.exists(job_two_plan)
@@ -1348,7 +1363,7 @@ if __name__ in ("__main__", "__test__"):
                         else:
                             job2_msg_file = job_two_plan
                     else:
-                        job2_msg_file = default_val_tmpl
+                        job2_msg_file = None
 
                     if debate_j2:
                         job2_debate_id = f"{env_prefix}_job2_debate_{base_name}"
@@ -1413,6 +1428,7 @@ if __name__ in ("__main__", "__test__"):
                                 rag_env=_j2_rag_env,
                                 ocr_ingest=task_ocr_ingest,
                                 deliberate=_r_deliberate,
+                                history_stem=_h_stem("job2"),
                             )
                         )
                         if task_ocr_ingest is not None:
@@ -1444,6 +1460,7 @@ if __name__ in ("__main__", "__test__"):
                             pair_programming=pair_programming,
                             rag_env=file_rag_env,
                             ocr_ingest=task_ocr_ingest,
+                            history_stem=_h_stem("job2"),
                             **task_aider_flags,
                         )
                     )
@@ -1537,6 +1554,7 @@ if __name__ in ("__main__", "__test__"):
                                     rag_env=_j3_rag_env,
                                     ocr_ingest=task_ocr_ingest,
                                     deliberate=_r_deliberate,
+                                    history_stem=_h_stem("job3"),
                                 )
                             )
                             if task_ocr_ingest is not None:
@@ -1561,6 +1579,7 @@ if __name__ in ("__main__", "__test__"):
                                 pair_programming=pair_programming,
                                 rag_env=file_rag_env,
                                 ocr_ingest=task_ocr_ingest,
+                                history_stem=_h_stem("job3"),
                                 **task_aider_flags,
                             )
                         )
@@ -1600,6 +1619,7 @@ if __name__ in ("__main__", "__test__"):
                                 ocr_ingest=task_ocr_ingest,
                                 soft_fail=escalate,
                                 final_check=True,
+                                history_stem=_h_stem("verify"),
                                 **task_aider_flags,
                             )
                         )
@@ -1664,6 +1684,7 @@ if __name__ in ("__main__", "__test__"):
                         rag_env=file_rag_env,
                         ocr_ingest=task_ocr_ingest,
                         skip_aider=True,
+                        history_stem=_h_stem("ingest"),
                     )
                 )
                 phase_ingest_owner_id = ing_id
@@ -1716,6 +1737,7 @@ if __name__ in ("__main__", "__test__"):
                             editor_api_base=EDITOR_API,
                             rag_env=file_rag_env,
                             deliberate=_round_debate,
+                            history_stem=_h_stem("escalate"),
                         )
                     )
 
@@ -1739,6 +1761,7 @@ if __name__ in ("__main__", "__test__"):
                             editor_api_base=EDITOR_API_FALLBACK,
                             iterate_test=True,
                             auto_test=auto_test,
+                            history_stem=_h_stem("escalate"),
                             **_r_apply_kwargs,
                         )
                     )
@@ -1762,6 +1785,7 @@ if __name__ in ("__main__", "__test__"):
                                 "baseline_ledger": _r_ledger,
                             },
                             skip_aider=True,
+                            history_stem=_h_stem("finalize"),
                         )
                     )
                     last_task_for_file = finalize_id

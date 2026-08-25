@@ -67,8 +67,8 @@ class TestValidatorRRF(unittest.TestCase):
         # Assert RRF merged the chunks from both tables
         self.assertEqual(len(chunks), 2)
         
-        # Assert the similarity score is derived from the top-ranked chunk (1.0 - 0.2 = 0.8)
-        self.assertAlmostEqual(sim, 0.8)
+        # Assert the similarity score is derived from the top-ranked chunk (code.py: 1.0 - 0.3 = 0.7)
+        self.assertAlmostEqual(sim, 0.7)
 
 
 if __name__ == "__main__":

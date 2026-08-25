@@ -106,6 +106,66 @@ except ImportError:
     )
 
 
+def _load_local_reranker(model: str):
+    """Load a local reranker, auto-selecting the correct backend for the model family.
+
+    Native listwise rerankers (e.g. ``jinaai/jina-reranker-v3.5``) declare an
+    ``auto_map`` custom architecture (``JinaForRanking``) and expose a ``.rerank()``
+    method. They are loaded via ``transformers.AutoModel`` with
+    ``trust_remote_code=True`` — the vendor-documented API. Classic pairwise
+    cross-encoders (BAAI/bge-reranker, ms-marco-MiniLM, …) fall back to
+    ``sentence_transformers.CrossEncoder``.
+
+    Both follow the offline-first invariant: try ``local_files_only=True`` first
+    (zero network / no HF Hub telemetry), then download once on cold-start.
+    """
+    from transformers import AutoConfig
+
+    def _is_native_listwise() -> bool:
+        try:
+            for local_only in (True, False):
+                try:
+                    cfg = AutoConfig.from_pretrained(
+                        model, trust_remote_code=True, local_files_only=local_only
+                    )
+                    break
+                except Exception:
+                    if local_only:
+                        continue
+                    raise
+            auto_map = getattr(cfg, "auto_map", {}) or {}
+            archs = getattr(cfg, "architectures", None) or []
+            # Jina listwise rerankers map AutoModel -> a custom *ForRanking class.
+            if any("Ranking" in a for a in archs):
+                return True
+            if any("Ranking" in str(v) for v in auto_map.values()):
+                return True
+        except Exception:
+            pass
+        return False
+
+    if _is_native_listwise():
+        from transformers import AutoModel
+
+        try:
+            # 1. Offline-first: load directly from local cache.
+            return AutoModel.from_pretrained(
+                model, dtype="auto", trust_remote_code=True, local_files_only=True
+            ).eval()
+        except Exception:
+            # 2. Cold-start: download the model + trusted remote code once, then cache.
+            return AutoModel.from_pretrained(
+                model, dtype="auto", trust_remote_code=True, local_files_only=False
+            ).eval()
+
+    from sentence_transformers import CrossEncoder
+
+    try:
+        return CrossEncoder(model, trust_remote_code=True, local_files_only=True)
+    except Exception:
+        return CrossEncoder(model, trust_remote_code=True, local_files_only=False)
+
+
 def _rerank_chunks(query: str, candidates: list[dict], top_n: int = 5) -> list[dict]:
     """Rerank candidates using a cross-encoder model (remote HTTP or local CrossEncoder).
 
@@ -150,102 +210,80 @@ def _rerank_chunks(query: str, candidates: list[dict], top_n: int = 5) -> list[d
                 url = f"{base_no_v1}/rerank"
                 resp = requests.post(url, json=payload, headers=headers, timeout=10)
 
-            if resp.status_code != 200:
-                print(
-                    f"[rerank] warning: remote rerank failed ({resp.status_code}: {resp.text.strip()}); falling back to vector order.",
-                    file=sys.stderr,
-                )
-                return candidates[:top_n]
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("results") if isinstance(data, dict) else data
+                if isinstance(results, list):
+                    for item in results:
+                        if isinstance(item, dict):
+                            idx = item.get("index")
+                            score = item.get("relevance_score", item.get("score"))
+                            if idx is not None and 0 <= idx < len(candidates) and score is not None:
+                                candidates[idx]["_relevance_score"] = float(score)
 
-            data = resp.json()
-
-            results = data.get("results") if isinstance(data, dict) else data
-            if not isinstance(results, list):
-                return candidates[:top_n]
-
-            # Assign scores
-            for item in results:
-                if isinstance(item, dict):
-                    idx = item.get("index")
-                    score = item.get("relevance_score", item.get("score"))
-                    if idx is not None and 0 <= idx < len(candidates) and score is not None:
-                        candidates[idx]["_relevance_score"] = float(score)
-
-            # Candidates with a score sort first by score descending
-            scored = [c for c in candidates if "_relevance_score" in c]
-            unscored = [c for c in candidates if "_relevance_score" not in c]
-
-            scored.sort(key=lambda x: x["_relevance_score"], reverse=True)
-            return (scored + unscored)[:top_n]
+                    scored = [c for c in candidates if "_relevance_score" in c]
+                    unscored = [c for c in candidates if "_relevance_score" not in c]
+                    scored.sort(key=lambda x: x["_relevance_score"], reverse=True)
+                    return (scored + unscored)[:top_n]
+            else:
+                print(f"[rerank] warning: remote rerank returned status {resp.status_code}; falling back to vector order.", file=sys.stderr)
         except Exception as e:
-            print(
-                f"[rerank] warning: remote rerank failed ({e}); falling back to vector order.",
-                file=sys.stderr,
-            )
-            return candidates[:top_n]
+            print(f"[rerank] warning: remote rerank failed ({e}); falling back to vector order.", file=sys.stderr)
+
+        return candidates[:top_n]
 
     # In-Process Local Path
-    _RERANK_CHAT_TMPL = (
-        '<Query>: {{ messages | selectattr("role", "eq", "query") | map(attribute="content") | first }}\n'
-        '<Document>: {{ messages | selectattr("role", "eq", "document") | map(attribute="content") | first }}'
-    )
+    #
+    # Two distinct model families are supported here, auto-detected at load time:
+    #
+    #   1. Native listwise rerankers (e.g. jinaai/jina-reranker-v3.5) — loaded via
+    #      transformers.AutoModel(trust_remote_code=True). These expose a `.rerank()`
+    #      method that ranks the whole candidate list jointly in a single forward pass
+    #      ("Last but Not Late" interaction: an MLP projector + cosine scoring, NOT a
+    #      classification head). This is the vendor-documented API and the only correct
+    #      way to score jina-reranker-v3.x. See the model card:
+    #      https://huggingface.co/jinaai/jina-reranker-v3.5  ("model.rerank(query, documents)").
+    #
+    #   2. Classic pairwise cross-encoders (e.g. BAAI/bge-reranker-large,
+    #      cross-encoder/ms-marco-MiniLM-L-6-v2) — a SequenceClassification head scored
+    #      via sentence_transformers.CrossEncoder.predict([[query, doc], ...]).
+    #
+    # NOTE: jina-reranker-v3.x MUST NOT be loaded through CrossEncoder. Its architecture
+    # is `JinaForRanking` (auto_map -> AutoModel); CrossEncoder forces it through
+    # AutoModelForSequenceClassification, which silently discards the projector head and
+    # randomly initializes `score.weight`, producing non-deterministic garbage scores.
     try:
         if _RERANKER_LOCAL_INSTANCE is None:
-            from sentence_transformers import CrossEncoder
+            _RERANKER_LOCAL_INSTANCE = _load_local_reranker(model)
 
-            try:
-                # 1. Offline-first: load directly from local cache (zero network calls, zero HF Hub warnings)
-                _RERANKER_LOCAL_INSTANCE = CrossEncoder(
-                    model, trust_remote_code=True, local_files_only=True
-                )
-            except Exception:
-                # 2. Cold-start fallback: download once if not present in local cache
-                _RERANKER_LOCAL_INSTANCE = CrossEncoder(
-                    model, trust_remote_code=True, local_files_only=False
-                )
+        instance = _RERANKER_LOCAL_INSTANCE
 
-        tok = getattr(_RERANKER_LOCAL_INSTANCE, "tokenizer", None)
-        if tok:
-            if getattr(tok, "pad_token", None) is None:
-                pad_tok = getattr(tok, "eos_token", None) or "<|endoftext|>"
-                tok.pad_token = pad_tok
-                if getattr(tok, "pad_token_id", None) is None and getattr(tok, "eos_token_id", None) is not None:
-                    tok.pad_token_id = tok.eos_token_id
+        # ---- Native listwise reranker path (jina-reranker-v3.x et al.) ----
+        if hasattr(instance, "rerank") and not hasattr(instance, "predict"):
+            docs = [c.get("text", "") for c in candidates]
+            results = instance.rerank(query, docs)
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                idx = item.get("index")
+                score = item.get("relevance_score", item.get("score"))
+                if idx is not None and score is not None:
+                    idx = int(idx)
+                    if 0 <= idx < len(candidates):
+                        candidates[idx]["_relevance_score"] = float(score)
 
-            mod = getattr(_RERANKER_LOCAL_INSTANCE, "model", None)
-            if mod and hasattr(mod, "config") and getattr(mod.config, "pad_token_id", None) is None:
-                mod.config.pad_token_id = getattr(tok, "pad_token_id", 0)
+            scored = [c for c in candidates if "_relevance_score" in c]
+            unscored = [c for c in candidates if "_relevance_score" not in c]
+            scored.sort(key=lambda x: x["_relevance_score"], reverse=True)
+            return (scored + unscored)[:top_n]
 
-            if getattr(tok, "chat_template", None):
-                tmpl = str(tok.chat_template)
-                if "query" not in tmpl or "document" not in tmpl:
-                    tok.chat_template = _RERANK_CHAT_TMPL
-
+        # ---- Classic pairwise cross-encoder path (CrossEncoder.predict) ----
         pairs = [[query, c.get("text", "")] for c in candidates]
-        try:
-            scores = _RERANKER_LOCAL_INSTANCE.predict(pairs)
-        except ValueError as ve:
-            ve_str = str(ve).lower()
-            if hasattr(_RERANKER_LOCAL_INSTANCE, "tokenizer"):
-                tok = _RERANKER_LOCAL_INSTANCE.tokenizer
-                if "padding token" in ve_str or "pad_token" in ve_str:
-                    pad_tok = getattr(tok, "eos_token", None) or "<|endoftext|>"
-                    tok.pad_token = pad_tok
-                    if getattr(tok, "eos_token_id", None) is not None:
-                        tok.pad_token_id = tok.eos_token_id
-                    mod = getattr(_RERANKER_LOCAL_INSTANCE, "model", None)
-                    if mod and hasattr(mod, "config"):
-                        mod.config.pad_token_id = getattr(tok, "pad_token_id", 0)
-                    scores = _RERANKER_LOCAL_INSTANCE.predict(pairs)
-                elif "chat template" in ve_str:
-                    tok.chat_template = _RERANK_CHAT_TMPL
-                    scores = _RERANKER_LOCAL_INSTANCE.predict(pairs)
-                else:
-                    raise
-            else:
-                raise
+        scores = instance.predict(pairs)
 
         def _extract_score(val):
+            if hasattr(val, "item"):
+                return float(val.item())
             if hasattr(val, "__len__") and not isinstance(val, (str, bytes)):
                 if len(val) > 1:
                     return float(val[-1])

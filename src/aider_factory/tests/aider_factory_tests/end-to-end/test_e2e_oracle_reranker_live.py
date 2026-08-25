@@ -281,6 +281,38 @@ class TestE2EOracleRerankerLive(unittest.TestCase):
         self.assertNotIn("[rerank] warning:", proc.stderr)
         self.assertIn("credit_risk_parameters.md", proc.stderr + proc.stdout)
 
+    def test_live_remote_failure_fallback_to_in_process_reranker_cli(self):
+        """Execute physical oracle CLI with unreachable/failing remote ranking base and verify
+        it seamlessly falls through to local in-process CrossEncoder without warning or error."""
+        try:
+            import sentence_transformers  # noqa: F401
+        except ImportError:
+            self.skipTest("sentence-transformers not installed in environment.")
+
+        env = self._get_subprocess_env({
+            "ORACLE_RANKING_MODEL": "jinaai/jina-reranker-v3.5",
+            "ORACLE_RANKING_API_BASE": "http://127.0.0.1:9999/v1",  # Offline/unreachable remote endpoint
+            "ORACLE_RECALL_K": "10",
+            "ORACLE_TOP_K": "1",
+            "ORACLE_AGENT_MODEL": "openai/dummy",
+            "OPENAI_API_KEY": "sk-dummy",
+        })
+
+        oracle_script = os.path.join(pkg_python_dir, "oracle_agent.py")
+        query = "What is the baseline loss-given-default assumption for senior secured debt?"
+
+        proc = subprocess.run(
+            [sys.executable, oracle_script, query],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+
+        self.assertEqual(proc.returncode, 0, f"Fallback to in-process reranker failed with {proc.returncode}. Stderr: {proc.stderr}")
+        self.assertNotIn("[rerank] warning:", proc.stderr)
+        self.assertIn("credit_risk_parameters.md", proc.stderr + proc.stdout)
+
     def test_live_batch_false_multi_table_e2e(self):
         """Zero-mock physical test of batch=False (per-document tables) with multi-table RRF and in-process CrossEncoder."""
         try:

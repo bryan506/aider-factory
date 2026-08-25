@@ -186,7 +186,19 @@ class TestCLIRepoMap(unittest.TestCase):
         mock_res.stderr = ""
         mock_run.return_value = mock_res
 
-        cli._generate_repo_maps(self.temp_dir, map_tokens=2048, target="all", is_global=False)
+        # Test default invocation (map_tokens defaults to 2048)
+        cli._generate_repo_maps(self.temp_dir, target="all", is_global=False)
+
+        # Verify --map-tokens 2048 is passed to subprocess
+        aider_calls = [
+            c[0][0]
+            for c in mock_run.call_args_list
+            if c[0] and c[0][0] and c[0][0][0] == "aider"
+        ]
+        self.assertTrue(len(aider_calls) > 0, "Aider subprocess was not invoked")
+        first_call_cmd = aider_calls[0]
+        self.assertIn("--map-tokens", first_call_cmd)
+        self.assertIn("2048", first_call_cmd)
 
         source_map = os.path.join(self.temp_dir, ".aider_factory", "static_repo_map.md")
         tests_map = os.path.join(self.temp_dir, ".aider_factory", "static_repo_map_tests.md")

@@ -7,7 +7,7 @@ import sys
 import time
 import urllib.request
 
-
+# This sentence includes the file path src/aider_factory/cli.py.
 pkg_dir = os.path.dirname(os.path.abspath(__file__))
 python_dir = os.path.join(pkg_dir, "python")
 if python_dir not in sys.path:
@@ -16,6 +16,8 @@ if python_dir not in sys.path:
 try:
     from aider_factory.python.env_utils import load_env_files
 except ImportError:
+    # This block handles local development where aider_factory.python might not be a package
+    # but env_utils is directly available in the PYTHONPATH.
     from env_utils import load_env_files
 
 _load_env_files = load_env_files
@@ -65,22 +67,24 @@ Cargo.lock
 *.map
 """
 
-TEST_DIR_NAMES = frozenset({
-    "test",
-    "tests",
-    "testing",
-    "testthat",
-    "__tests__",
-    "spec",
-    "specs",
-    "e2e",
-    "end-to-end",
-    "fixtures",
-    "testdata",
-    "test_fixtures",
-    "benchmarks",
-    "benches",
-})
+TEST_DIR_NAMES = frozenset(
+    {
+        "test",
+        "tests",
+        "testing",
+        "testthat",
+        "__tests__",
+        "spec",
+        "specs",
+        "e2e",
+        "end-to-end",
+        "fixtures",
+        "testdata",
+        "test_fixtures",
+        "benchmarks",
+        "benches",
+    }
+)
 
 # 1. Delimited test patterns (case-insensitive) - requires delimiter boundary
 TEST_DELIMITED_RE = re.compile(
@@ -161,7 +165,11 @@ def _scan_repo_files(cwd: str) -> list[str]:
         if res.returncode == 0 and res.stdout.strip():
             for line in res.stdout.splitlines():
                 f = line.strip().replace("\\", "/").lstrip("./")
-                if f and not f.startswith(".git/") and not f.startswith(".aider_factory/"):
+                if (
+                    f
+                    and not f.startswith(".git/")
+                    and not f.startswith(".aider_factory/")
+                ):
                     files.append(f)
             if files:
                 return sorted(list(dict.fromkeys(files)))
@@ -170,16 +178,33 @@ def _scan_repo_files(cwd: str) -> list[str]:
 
     # Fallback path: os.walk
     ignored_dirs = {
-        ".git", ".aider_factory", "node_modules", "dist", "build",
-        "target", ".venv", "venv", "__pycache__", ".pytest_cache",
-        "temp", "tmp", "docs", "doc", "man", "inst",
+        ".git",
+        ".aider_factory",
+        "node_modules",
+        "dist",
+        "build",
+        "target",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+        "temp",
+        "tmp",
+        "docs",
+        "doc",
+        "man",
+        "inst",
     }
     for root, dirs, filenames in os.walk(cwd):
         dirs[:] = [d for d in dirs if d not in ignored_dirs and not d.startswith(".")]
         for fn in filenames:
             full_path = os.path.join(root, fn)
             rel = os.path.relpath(full_path, cwd).replace("\\", "/").lstrip("./")
-            if rel and not rel.startswith(".git/") and not rel.startswith(".aider_factory/"):
+            if (
+                rel
+                and not rel.startswith(".git/")
+                and not rel.startswith(".aider_factory/")
+            ):
                 files.append(rel)
     return sorted(list(dict.fromkeys(files)))
 
@@ -257,7 +282,7 @@ def _build_repomap_ignore_content(cwd, mode="source", all_files=None):
     return "\n".join(user_base_rules) + "\n"
 
 
-def _generate_repo_maps(cwd, map_tokens=4096, target="all", is_global=False):
+def _generate_repo_maps(cwd, map_tokens=2048, target="all", is_global=False):
     """Generate static repo maps (source and/or tests) using ephemeral ignore files."""
     ensure_aider_installed()
     projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
@@ -285,14 +310,20 @@ def _generate_repo_maps(cwd, map_tokens=4096, target="all", is_global=False):
                 e_ignore = os.path.join(af_dir, f".aiderignore_{mode}")
                 ephemeral_files.append(e_ignore)
                 with open(e_ignore, "w", encoding="utf-8") as f:
-                    f.write(_build_repomap_ignore_content(proj, mode=mode, all_files=all_files))
+                    f.write(
+                        _build_repomap_ignore_content(
+                            proj, mode=mode, all_files=all_files
+                        )
+                    )
 
                 cmd = [
                     "aider",
-                    "--map-tokens", str(map_tokens),
+                    "--map-tokens",
+                    str(map_tokens),
                     "--show-repo-map",
                     "--no-show-model-warnings",
-                    "--aiderignore", e_ignore,
+                    "--aiderignore",
+                    e_ignore,
                 ]
                 res = subprocess.run(cmd, cwd=proj, capture_output=True, text=True)
                 if res.returncode == 0 and res.stdout.strip():
@@ -300,10 +331,15 @@ def _generate_repo_maps(cwd, map_tokens=4096, target="all", is_global=False):
                         f.write(res.stdout)
                     line_count = len(res.stdout.splitlines())
                     size_kb = max(1, os.path.getsize(out_path) // 1024)
-                    print(f"  Generated {os.path.basename(out_path)} ({line_count} lines, {size_kb} KB)")
+                    print(
+                        f"  Generated {os.path.basename(out_path)} ({line_count} lines, {size_kb} KB)"
+                    )
                 else:
                     err = res.stderr.strip() or "No output generated"
-                    print(f"  Warning generating {os.path.basename(out_path)}: {err}", file=sys.stderr)
+                    print(
+                        f"  Warning generating {os.path.basename(out_path)}: {err}",
+                        file=sys.stderr,
+                    )
         finally:
             for ef in ephemeral_files:
                 if os.path.exists(ef):
@@ -440,7 +476,10 @@ WantedBy=default.target
                 )
                 with urllib.request.urlopen(req, timeout=1) as resp:
                     if resp.status == 200:
-                        print("✅ [aider-factory] SearXNG background service is ready.", file=sys.stderr)
+                        print(
+                            "✅ [aider-factory] SearXNG background service is ready.",
+                            file=sys.stderr,
+                        )
                         return
             except Exception:
                 pass
@@ -458,7 +497,7 @@ def ensure_bash_wrappers(project_aider_factory_dir):
 
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
     python_dir = os.path.join(pkg_dir, "python")
-    
+
     # Determine the best python interpreter to use
     aider_py = sys.executable or "python3"
 
@@ -496,7 +535,9 @@ def _register_project(cwd):
             try:
                 with open(reg_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    projects = data.get("projects", []) if isinstance(data, dict) else []
+                    projects = (
+                        data.get("projects", []) if isinstance(data, dict) else []
+                    )
             except Exception:
                 projects = []
         if abs_cwd not in projects:
@@ -516,7 +557,11 @@ def _get_registered_projects():
         with open(reg_file, "r", encoding="utf-8") as f:
             data = json.load(f)
         raw_list = data.get("projects", []) if isinstance(data, dict) else []
-        valid = [p for p in raw_list if os.path.isdir(p) and os.path.isdir(os.path.join(p, ".aider_factory"))]
+        valid = [
+            p
+            for p in raw_list
+            if os.path.isdir(p) and os.path.isdir(os.path.join(p, ".aider_factory"))
+        ]
         if len(valid) != len(raw_list):
             with open(reg_file, "w", encoding="utf-8") as f:
                 json.dump({"projects": valid}, f, indent=2)
@@ -545,6 +590,7 @@ def init_user_project(cwd=None):
     # Ensure Playwright browser binaries are installed automatically if playwright is present
     try:
         import playwright
+
         # Check if the browser cache directory exists and is populated
         playwright_cache = os.path.expanduser("~/.cache/ms-playwright")
         if not os.path.exists(playwright_cache) or not os.listdir(playwright_cache):
@@ -606,60 +652,100 @@ def init_user_project(cwd=None):
             f"📦 First run detected! Initializing default '.env.yml' in {local_aider_factory_dir}..."
         )
         sensible_name = f"{os.path.basename(cwd).replace('_', ' ').replace('-', ' ').title()} Pipeline"
-        with open(os.path.join(default_configs_dir, "env.yml"), "r", encoding="utf-8") as f:
+        with open(
+            os.path.join(default_configs_dir, "env.yml"), "r", encoding="utf-8"
+        ) as f:
             content = f.read()
-        
+
         # Standardized dynamic instantiation
         content = content.replace('name: "My Project"', f'name: "{sensible_name}"')
-        content = content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
-        
+        content = content.replace(
+            'working_directory: "/path/to/project"', f'working_directory: "{cwd}"'
+        )
+
         # Quickstart: Auto-discover a target file and context file
         target_file = None
         for ext in [".py", ".R", ".js", ".ts", ".go", ".rs", ".md", ".txt"]:
             for f in os.listdir(cwd):
-                if f.endswith(ext) and not f.startswith(".") and os.path.isfile(os.path.join(cwd, f)):
+                if (
+                    f.endswith(ext)
+                    and not f.startswith(".")
+                    and os.path.isfile(os.path.join(cwd, f))
+                ):
                     target_file = f
                     break
             if target_file:
                 break
-        
+
         if not target_file:
             target_file = "scratchpad.py"
             with open(os.path.join(cwd, target_file), "w", encoding="utf-8") as f:
                 f.write("# Quickstart scratchpad\n")
-                
+
         context_file = None
         for ext in [".md", ".txt", ".py", ".R"]:
             for f in os.listdir(cwd):
-                if f.endswith(ext) and not f.startswith(".") and f != target_file and os.path.isfile(os.path.join(cwd, f)):
+                if (
+                    f.endswith(ext)
+                    and not f.startswith(".")
+                    and f != target_file
+                    and os.path.isfile(os.path.join(cwd, f))
+                ):
                     context_file = f
                     break
             if context_file:
                 break
 
-        content = content.replace('target_files: []', f'target_files:\n        - "{target_file}"')
+        content = content.replace(
+            "target_files: []", f'target_files:\n        - "{target_file}"'
+        )
         if context_file:
-            content = content.replace('context_files_job: []', f'context_files_job:\n        - "{context_file}"')
-            
+            content = content.replace(
+                "context_files_job: []",
+                f'context_files_job:\n        - "{context_file}"',
+            )
+
         # Quickstart: Auto-discover cluster configuration
         try:
             python_dir = os.path.join(pkg_dir, "python")
             if python_dir not in sys.path:
                 sys.path.insert(0, python_dir)
             from bootstrap import _discover_cluster_config
+
             cluster_config = _discover_cluster_config()
             if cluster_config:
-                content = content.replace('architect_api_base: "http://192.168.100.2:8080/v1"', f'architect_api_base: "{cluster_config["architect_api_base"]}"')
-                content = content.replace('editor_api: "http://192.168.100.1:8080/v1"', f'editor_api: "{cluster_config["editor_api"]}"')
-                content = content.replace('rag_agent_api: "http://192.168.100.1:8080/v1"', f'rag_agent_api: "{cluster_config["rag_agent_api"]}"')
+                content = content.replace(
+                    'architect_api_base: "http://192.168.100.2:8080/v1"',
+                    f'architect_api_base: "{cluster_config["architect_api_base"]}"',
+                )
+                content = content.replace(
+                    'editor_api: "http://192.168.100.1:8080/v1"',
+                    f'editor_api: "{cluster_config["editor_api"]}"',
+                )
+                content = content.replace(
+                    'rag_agent_api: "http://192.168.100.1:8080/v1"',
+                    f'rag_agent_api: "{cluster_config["rag_agent_api"]}"',
+                )
                 if "architect_agent" in cluster_config:
-                    content = content.replace('architect_agent: "gemini/gemini-3.6-flash"', f'architect_agent: "{cluster_config["architect_agent"]}"')
-                    content = content.replace('editor_agent: "gemini/gemini-2.5-flash"', f'editor_agent: "{cluster_config["editor_agent"]}"')
-                    content = content.replace('editor_agent_test: "gemini/gemini-2.5-flash"', f'editor_agent_test: "{cluster_config["editor_agent"]}"')
-                    content = content.replace('editor_agent_test_fallback: "gemini/gemini-2.5-flash"', f'editor_agent_test_fallback: "{cluster_config["architect_agent"]}"')
+                    content = content.replace(
+                        'architect_agent: "gemini/gemini-3.6-flash"',
+                        f'architect_agent: "{cluster_config["architect_agent"]}"',
+                    )
+                    content = content.replace(
+                        'editor_agent: "gemini/gemini-2.5-flash"',
+                        f'editor_agent: "{cluster_config["editor_agent"]}"',
+                    )
+                    content = content.replace(
+                        'editor_agent_test: "gemini/gemini-2.5-flash"',
+                        f'editor_agent_test: "{cluster_config["editor_agent"]}"',
+                    )
+                    content = content.replace(
+                        'editor_agent_test_fallback: "gemini/gemini-2.5-flash"',
+                        f'editor_agent_test_fallback: "{cluster_config["architect_agent"]}"',
+                    )
         except Exception:
             pass
-        
+
         with open(local_env_yaml, "w", encoding="utf-8") as f:
             f.write(content)
 
@@ -670,7 +756,9 @@ def init_user_project(cwd=None):
 
     # 3. Create .aider.conf.yml inside .aider_factory/ if missing
     if not os.path.exists(local_aider_conf):
-        print(f"📦 Initializing default '.aider.conf.yml' in {local_aider_factory_dir}...")
+        print(
+            f"📦 Initializing default '.aider.conf.yml' in {local_aider_factory_dir}..."
+        )
         shutil.copy(
             os.path.join(default_configs_dir, "aider.conf.yml"), local_aider_conf
         )
@@ -695,13 +783,19 @@ def ensure_aider_installed():
     current_path = os.environ.get("PATH", "")
     if os.path.exists(local_bin) and local_bin not in current_path.split(os.pathsep):
         os.environ["PATH"] = f"{local_bin}{os.pathsep}{current_path}"
-        
+
     if not shutil.which("aider"):
-        print("📦 [aider-factory] 'aider' not found. Auto-installing aider-chat globally via uv...", file=sys.stderr)
+        print(
+            "📦 [aider-factory] 'aider' not found. Auto-installing aider-chat globally via uv...",
+            file=sys.stderr,
+        )
         try:
             subprocess.run(["uv", "tool", "install", "aider-chat"], check=False)
         except Exception as e:
-            print(f"⚠️ [aider-factory] Could not auto-install aider-chat: {e}", file=sys.stderr)
+            print(
+                f"⚠️ [aider-factory] Could not auto-install aider-chat: {e}",
+                file=sys.stderr,
+            )
 
 
 def _backup_workspace_cache(proj_path: str):
@@ -751,17 +845,29 @@ def _list_sessions(cwd, is_global=False):
             sess_dir = os.path.join(sess_root, item)
             if os.path.isdir(sess_dir):
                 total_found.append(f"{p_name}/{item}" if is_global else item)
-                mtime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(sess_dir)))
+                mtime = time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(sess_dir))
+                )
                 chat_file = os.path.join(sess_dir, ".aider.chat.history.md")
-                size_str = f"{os.path.getsize(chat_file) // 1024} KB" if os.path.exists(chat_file) else "empty"
+                hist_dir = os.path.join(sess_dir, "chat_history")
+                if os.path.isdir(hist_dir) and any(f.startswith(".aider.chat.history_") for f in os.listdir(hist_dir)):
+                    total_size = sum(os.path.getsize(os.path.join(hist_dir, f)) for f in os.listdir(hist_dir) if os.path.isfile(os.path.join(hist_dir, f)))
+                    size_str = f"{total_size // 1024} KB (isolated)"
+                elif os.path.exists(chat_file):
+                    size_str = f"{os.path.getsize(chat_file) // 1024} KB"
+                else:
+                    size_str = "empty"
                 yml_file = os.path.join(sess_dir, "session.yml")
                 yml_status = "paired" if os.path.exists(yml_file) else "no config"
-                print(f"  - {item:<26} (Active: {mtime}, History: {size_str}, Config: {yml_status})")
+                print(
+                    f"  - {item:<26} (Active: {mtime}, History: {size_str}, Config: {yml_status})"
+                )
     return total_found
 
 
 def _clear_session(cwd, name, is_global=False, forever=False):
     import re
+
     target_project = None
     target_session = name.strip()
 
@@ -769,7 +875,7 @@ def _clear_session(cwd, name, is_global=False, forever=False):
         parts = target_session.split("/", 1)
         target_project, target_session = parts[0], parts[1]
 
-    slug = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', target_session)
+    slug = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", target_session)
     projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
     if not projects:
         projects = [os.path.abspath(cwd)]
@@ -811,7 +917,12 @@ def _clear_all_sessions(cwd, is_global=False, forever=False):
 def _get_cluster_endpoints(cwd):
     """Discover active cluster endpoints from environment and .env.yml."""
     endpoints = set()
-    for env_k in ["LITELLM_BASE_URL", "ARCHITECT_API_BASE", "ORACLE_AGENT_API_BASE", "RANKING_API_BASE"]:
+    for env_k in [
+        "LITELLM_BASE_URL",
+        "ARCHITECT_API_BASE",
+        "ORACLE_AGENT_API_BASE",
+        "RANKING_API_BASE",
+    ]:
         val = os.environ.get(env_k)
         if val and val.startswith("http"):
             endpoints.add(val.rstrip("/"))
@@ -823,6 +934,7 @@ def _get_cluster_endpoints(cwd):
         if os.path.exists(yaml_path):
             try:
                 import yaml
+
                 with open(yaml_path, "r", encoding="utf-8") as f:
                     cfg = yaml.safe_load(f) or {}
                 ep_cfg = cfg.get("endpoints", {}) or {}
@@ -834,68 +946,15 @@ def _get_cluster_endpoints(cwd):
     return sorted(list(endpoints))
 
 
-def _probe_cluster_slots(base_url, timeout=1.0):
-    """Safely query llama-server or cluster /slots endpoint."""
-    clean_base = base_url[:-3] if base_url.endswith("/v1") else base_url
-    slots_url = f"{clean_base}/slots"
-    try:
-        req = urllib.request.Request(
-            slots_url,
-            headers={"User-Agent": "AI-Factory/1.0", "Authorization": "Bearer sk-dummy"},
-            method="GET",
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if resp.status == 200:
-                data = json.loads(resp.read().decode("utf-8"))
-                if isinstance(data, list):
-                    active = sum(1 for s in data if isinstance(s, dict) and (s.get("is_processing") or s.get("state") == 1))
-                    return len(data), active, slots_url
-    except Exception:
-        pass
-    return None, None, None
-
-
-def _release_cluster_slots(base_url, timeout=2.0):
-    """Send release request to llama-server /slots to free cached context and GPU VRAM."""
-    clean_base = base_url[:-3] if base_url.endswith("/v1") else base_url
-    released = 0
-    try:
-        req = urllib.request.Request(
-            f"{clean_base}/slots",
-            headers={"User-Agent": "AI-Factory/1.0", "Authorization": "Bearer sk-dummy"},
-            method="GET",
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if resp.status == 200:
-                data = json.loads(resp.read().decode("utf-8"))
-                if isinstance(data, list):
-                    for slot in data:
-                        if isinstance(slot, dict) and "id" in slot:
-                            slot_id = slot["id"]
-                            rel_url = f"{clean_base}/slots/{slot_id}?action=release"
-                            try:
-                                post_req = urllib.request.Request(
-                                    rel_url,
-                                    data=b"{}",
-                                    headers={"Content-Type": "application/json", "Authorization": "Bearer sk-dummy"},
-                                    method="POST",
-                                )
-                                with urllib.request.urlopen(post_req, timeout=timeout) as r:
-                                    if r.status == 200:
-                                        released += 1
-                            except Exception:
-                                pass
-    except Exception:
-        pass
-    return released
-
-
 def _get_side_session_artifacts(cwd):
     """Enumerate all side-agent JSON and Markdown session files."""
     af_dir = os.path.join(cwd, ".aider_factory")
     candidates = [
         ("Helper Config Session", os.path.join(af_dir, ".helper_session.json")),
-        ("Helper Terminal Session", os.path.join(af_dir, ".helper_terminal_session.json")),
+        (
+            "Helper Terminal Session",
+            os.path.join(af_dir, ".helper_terminal_session.json"),
+        ),
         ("Oracle Session", os.path.join(af_dir, ".oracle_session.json")),
         ("Oracle Cost Ledger", os.path.join(af_dir, ".oracle_session.json.costs.json")),
         ("Oracle Debate Session", os.path.join(af_dir, ".oracle_debate_session.json")),
@@ -906,14 +965,31 @@ def _get_side_session_artifacts(cwd):
         for s in sorted(os.listdir(sess_root)):
             s_dir = os.path.join(sess_root, s)
             if os.path.isdir(s_dir):
-                candidates.append((f"Session '{s}' Oracle", os.path.join(s_dir, ".oracle_session.json")))
-                candidates.append((f"Session '{s}' Debate", os.path.join(s_dir, ".oracle_debate_session.json")))
+                candidates.append(
+                    (
+                        f"Session '{s}' Oracle",
+                        os.path.join(s_dir, ".oracle_session.json"),
+                    )
+                )
+                candidates.append(
+                    (
+                        f"Session '{s}' Debate",
+                        os.path.join(s_dir, ".oracle_debate_session.json"),
+                    )
+                )
+                vault_dir = os.path.join(s_dir, "chat_history")
+                if os.path.isdir(vault_dir):
+                    for vf in os.listdir(vault_dir):
+                        if vf.startswith(".oracle_") or vf.startswith(".debate_"):
+                            candidates.append((f"Session '{s}' Vault '{vf}'", os.path.join(vault_dir, vf)))
 
     found = []
     for label, p in candidates:
         if os.path.exists(p):
             turns = None
-            size_kb = max(1, os.path.getsize(p) // 1024) if os.path.getsize(p) > 0 else 0
+            size_kb = (
+                max(1, os.path.getsize(p) // 1024) if os.path.getsize(p) > 0 else 0
+            )
             if p.endswith(".json") and not p.endswith(".costs.json"):
                 try:
                     with open(p, "r", encoding="utf-8") as fh:
@@ -924,7 +1000,15 @@ def _get_side_session_artifacts(cwd):
                             turns = len(content["messages"])
                 except Exception:
                     pass
-            found.append({"label": label, "path": p, "size_kb": size_kb, "turns": turns, "mtime": os.path.getmtime(p)})
+            found.append(
+                {
+                    "label": label,
+                    "path": p,
+                    "size_kb": size_kb,
+                    "turns": turns,
+                    "mtime": os.path.getmtime(p),
+                }
+            )
     return found
 
 
@@ -944,25 +1028,38 @@ def _clear_side_session_by_name(cwd, target_name, is_global=False, forever=False
         if alias in ("helper", "config"):
             targets_to_delete.append(os.path.join(af_dir, ".helper_session.json"))
         elif alias in ("terminal", "term"):
-            targets_to_delete.append(os.path.join(af_dir, ".helper_terminal_session.json"))
+            targets_to_delete.append(
+                os.path.join(af_dir, ".helper_terminal_session.json")
+            )
         elif alias == "oracle":
-            targets_to_delete.extend([
-                os.path.join(af_dir, ".oracle_session.json"),
-                os.path.join(af_dir, ".oracle_session.json.costs.json"),
-            ])
+            targets_to_delete.extend(
+                [
+                    os.path.join(af_dir, ".oracle_session.json"),
+                    os.path.join(af_dir, ".oracle_session.json.costs.json"),
+                ]
+            )
         elif alias == "debate":
-            targets_to_delete.extend([
-                os.path.join(af_dir, ".oracle_debate_session.json"),
-                os.path.join(af_dir, ".debate_aider_history.md"),
-            ])
+            targets_to_delete.extend(
+                [
+                    os.path.join(af_dir, ".oracle_debate_session.json"),
+                    os.path.join(af_dir, ".debate_aider_history.md"),
+                ]
+            )
         else:
             # Check for session-scoped sidecars: sessions/<name>/.oracle_*
             sess_dir = os.path.join(af_dir, "sessions", target_name.strip())
-            targets_to_delete.extend([
-                os.path.join(sess_dir, ".oracle_session.json"),
-                os.path.join(sess_dir, ".oracle_session.json.costs.json"),
-                os.path.join(sess_dir, ".oracle_debate_session.json"),
-            ])
+            targets_to_delete.extend(
+                [
+                    os.path.join(sess_dir, ".oracle_session.json"),
+                    os.path.join(sess_dir, ".oracle_session.json.costs.json"),
+                    os.path.join(sess_dir, ".oracle_debate_session.json"),
+                ]
+            )
+            vault_dir = os.path.join(sess_dir, "chat_history")
+            if os.path.isdir(vault_dir):
+                for vf in os.listdir(vault_dir):
+                    if vf.startswith(".oracle_") or vf.startswith(".debate_"):
+                        targets_to_delete.append(os.path.join(vault_dir, vf))
 
         existing_targets = [p for p in targets_to_delete if os.path.exists(p)]
         if existing_targets and not forever:
@@ -977,9 +1074,13 @@ def _clear_side_session_by_name(cwd, target_name, is_global=False, forever=False
 
     p_info = " across registered projects" if is_global else ""
     if total_deleted > 0:
-        print(f"🧹 Successfully cleared {total_deleted} side-agent session file(s) for '{target_name}'{p_info}.")
+        print(
+            f"🧹 Successfully cleared {total_deleted} side-agent session file(s) for '{target_name}'{p_info}."
+        )
     else:
-        print(f"No side-agent session artifacts found matching '{target_name}'{p_info}.")
+        print(
+            f"No side-agent session artifacts found matching '{target_name}'{p_info}."
+        )
 
 
 def _status(cwd, is_global=False):
@@ -1009,12 +1110,23 @@ def _status(cwd, is_global=False):
                 s_dir = os.path.join(sess_root, item)
                 if os.path.isdir(s_dir):
                     sessions.append(item)
-                    mtime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(s_dir)))
+                    mtime = time.strftime(
+                        "%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(s_dir))
+                    )
                     chat_file = os.path.join(s_dir, ".aider.chat.history.md")
-                    size_str = f"{os.path.getsize(chat_file) // 1024} KB" if os.path.exists(chat_file) else "empty"
+                    hist_dir = os.path.join(s_dir, "chat_history")
+                    if os.path.isdir(hist_dir) and any(f.startswith(".aider.chat.history_") for f in os.listdir(hist_dir)):
+                        total_size = sum(os.path.getsize(os.path.join(hist_dir, f)) for f in os.listdir(hist_dir) if os.path.isfile(os.path.join(hist_dir, f)))
+                        size_str = f"{total_size // 1024} KB (isolated)"
+                    elif os.path.exists(chat_file):
+                        size_str = f"{os.path.getsize(chat_file) // 1024} KB"
+                    else:
+                        size_str = "empty"
                     yml_file = os.path.join(s_dir, "session.yml")
                     yml_status = "paired" if os.path.exists(yml_file) else "no config"
-                    print(f"  - {item:<26} (Modified: {mtime}, History: {size_str}, Config: {yml_status})")
+                    print(
+                        f"  - {item:<26} (Modified: {mtime}, History: {size_str}, Config: {yml_status})"
+                    )
         if not sessions:
             print("  (None active)")
 
@@ -1023,43 +1135,46 @@ def _status(cwd, is_global=False):
         side_artifacts = _get_side_session_artifacts(proj)
         if side_artifacts:
             for art in side_artifacts:
-                mtime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(art["mtime"]))
-                turn_str = f", {art['turns']} turn(s)" if art["turns"] is not None else ""
-                print(f"  - {art['label']:<26} ({art['size_kb']} KB{turn_str}, Modified: {mtime})")
+                mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(art["mtime"]))
+                turn_str = (
+                    f", {art['turns']} turn(s)" if art["turns"] is not None else ""
+                )
+                print(
+                    f"  - {art['label']:<26} ({art['size_kb']} KB{turn_str}, Modified: {mtime})"
+                )
         else:
             print("  (No active side-agent sessions)")
 
         for ep in _get_cluster_endpoints(proj):
             all_endpoints.add(ep)
 
-    # 3. Cluster Inference Endpoints & Slots
-    print("\n[3] Remote Inference Cluster & KV Slots:")
+    # 3. Cluster Inference Endpoints
+    print("\n[3] Remote Inference Cluster Endpoints:")
     if all_endpoints:
         for ep in sorted(list(all_endpoints)):
-            total_slots, active_slots, slots_url = _probe_cluster_slots(ep)
-            if total_slots is not None:
-                print(f"  - {ep:<30} ONLINE ({active_slots}/{total_slots} slots active via {slots_url})")
-            else:
-                try:
-                    req = urllib.request.Request(f"{ep}/models", headers={"Authorization": "Bearer sk-dummy"}, method="GET")
-                    with urllib.request.urlopen(req, timeout=1.0) as r:
-                        status = "ONLINE" if r.status == 200 else f"HTTP {r.status}"
-                except Exception:
-                    status = "OFFLINE / Unreachable"
-                print(f"  - {ep:<30} {status} (slots API not supported)")
+            try:
+                req = urllib.request.Request(
+                    f"{ep}/models",
+                    headers={"Authorization": "Bearer sk-dummy"},
+                    method="GET",
+                )
+                with urllib.request.urlopen(req, timeout=1.0) as r:
+                    status = "ONLINE" if r.status == 200 else f"HTTP {r.status}"
+            except Exception:
+                status = "OFFLINE / Unreachable"
+            print(f"  - {ep:<30} {status}")
     else:
         print("  (No remote endpoints configured)")
     print()
 
 
 def _clear_side_sessions(cwd, is_global=False, forever=False):
-    """Surgically clear side-agent session files and release cluster slots."""
+    """Surgically clear side-agent session files."""
     projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
     if not projects:
         projects = [os.path.abspath(cwd)]
 
     deleted_total = 0
-    all_endpoints = set()
 
     for proj in projects:
         artifacts = _get_side_session_artifacts(proj)
@@ -1071,20 +1186,9 @@ def _clear_side_sessions(cwd, is_global=False, forever=False):
                 deleted_total += 1
             except OSError:
                 pass
-        for ep in _get_cluster_endpoints(proj):
-            all_endpoints.add(ep)
 
     scope_str = " across all registered workspaces" if is_global else ""
     print(f"🧹 Cleared {deleted_total} side-agent session file(s){scope_str}.")
-
-    released_total = 0
-    for ep in all_endpoints:
-        rel = _release_cluster_slots(ep)
-        if rel > 0:
-            print(f"  - Released {rel} slot(s) on {ep}")
-            released_total += rel
-    if released_total > 0:
-        print(f"✅ Released {released_total} remote cluster inference slot(s).")
 
 
 def main():
@@ -1100,7 +1204,7 @@ def main():
     _register_project(cwd)
 
     # Parse repo map options and flags
-    map_tokens = 4096
+    map_tokens = 2048
     if "--map-tokens" in args:
         try:
             idx = args.index("--map-tokens")
@@ -1116,15 +1220,21 @@ def main():
                     pass
 
     if "--repo-map" in args:
-        _generate_repo_maps(cwd, map_tokens=map_tokens, target="source", is_global=is_global)
+        _generate_repo_maps(
+            cwd, map_tokens=map_tokens, target="source", is_global=is_global
+        )
         sys.exit(0)
 
     if "--repo-map-tests" in args:
-        _generate_repo_maps(cwd, map_tokens=map_tokens, target="tests", is_global=is_global)
+        _generate_repo_maps(
+            cwd, map_tokens=map_tokens, target="tests", is_global=is_global
+        )
         sys.exit(0)
 
     if "--repo-map-all" in args:
-        _generate_repo_maps(cwd, map_tokens=map_tokens, target="all", is_global=is_global)
+        _generate_repo_maps(
+            cwd, map_tokens=map_tokens, target="all", is_global=is_global
+        )
         sys.exit(0)
 
     # Parse session management flags
@@ -1136,10 +1246,15 @@ def main():
         try:
             idx = args.index("--clear-side-session")
             target = args[idx + 1]
-            _clear_side_session_by_name(cwd, target, is_global=is_global, forever=forever)
+            _clear_side_session_by_name(
+                cwd, target, is_global=is_global, forever=forever
+            )
             sys.exit(0)
         except (IndexError, ValueError):
-            print("Error: --clear-side-session requires a target name (e.g. helper, terminal, oracle, debate, <session_name>).", file=sys.stderr)
+            print(
+                "Error: --clear-side-session requires a target name (e.g. helper, terminal, oracle, debate, <session_name>).",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
     if "--clear-side-sessions" in args:
@@ -1180,7 +1295,11 @@ def main():
             i += 1
             continue
 
-        if arg.endswith(".yml") or arg.endswith(".yaml") or os.path.isfile(os.path.join(cwd, arg)):
+        if (
+            arg.endswith(".yml")
+            or arg.endswith(".yaml")
+            or os.path.isfile(os.path.join(cwd, arg))
+        ):
             config_file = arg
         elif not arg.startswith("-"):
             session_name = arg
@@ -1255,7 +1374,7 @@ def helper_cli():
     """Global 'aider-helper' CLI entry point."""
     ensure_aider_installed()
     import argparse
-    
+
     epilog_text = """
 Environment Variables for Custom Models:
   You can customize the model and endpoint used by aider-helper at any time.
@@ -1276,47 +1395,88 @@ Environment Variables for Custom Models:
     parser = argparse.ArgumentParser(
         description="aider-helper: Your lifetime AI Factory configuration assistant.",
         epilog=epilog_text,
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command")
-    
+
     # Bootstrap command
     subparsers.add_parser("bootstrap", help="Bootstrap a new workspace configuration.")
-    
+
     # Query command (default)
     query_parser = subparsers.add_parser(
-        "query", 
+        "query",
         help="Query or modify configurations.",
         epilog=epilog_text,
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    query_parser.add_argument("instruction", nargs="?", help="The instruction or question for the helper.")
-    query_parser.add_argument("--file", "-f", default=None, help="Target configuration YAML file.")
-    query_parser.add_argument("--context", "-c", default="", help="Comma-separated extra context files.")
-    query_parser.add_argument("--ask", "-a", action="store_true", help="Conversational mode (no file writing).")
-    query_parser.add_argument("--terminal", "-t", action="store_true", help="Terminal agent mode (strips YAML config context).")
-    query_parser.add_argument("--clear", action="store_true", help="Wipe the active helper session history.")
-    query_parser.add_argument("--master", "-m", action="store_true", help="Master mode: loads the skills reference documents into context.")
-    query_parser.add_argument("--expert", "-e", action="store_true", help="Expert mode: loads both the skills reference and the full Factory Service Manual into context.")
-    query_parser.add_argument("--repo-map", "-r", action="store_true", help="Repository Map mode: loads the static repository map (.aider_factory/static_repo_map.md) into context.")
-    
+    query_parser.add_argument(
+        "instruction", nargs="?", help="The instruction or question for the helper."
+    )
+    query_parser.add_argument(
+        "--file", "-f", default=None, help="Target configuration YAML file."
+    )
+    query_parser.add_argument(
+        "--context", "-c", default="", help="Comma-separated extra context files."
+    )
+    query_parser.add_argument(
+        "--ask",
+        "-a",
+        action="store_true",
+        help="Conversational mode (no file writing).",
+    )
+    query_parser.add_argument(
+        "--terminal",
+        "-t",
+        action="store_true",
+        help="Terminal agent mode (strips YAML config context).",
+    )
+    query_parser.add_argument(
+        "--clear", action="store_true", help="Wipe the active helper session history."
+    )
+    query_parser.add_argument(
+        "--master",
+        "-m",
+        action="store_true",
+        help="Master mode: loads the skills reference documents into context.",
+    )
+    query_parser.add_argument(
+        "--expert",
+        "-e",
+        action="store_true",
+        help="Expert mode: loads both the skills reference and the full Factory Service Manual into context.",
+    )
+    query_parser.add_argument(
+        "--repo-map",
+        "-r",
+        action="store_true",
+        help="Repository Map mode: loads the static repository map (.aider_factory/static_repo_map.md) into context.",
+    )
+
     # Parse args
     args, unknown = parser.parse_known_args()
-    
+
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, os.path.join(pkg_dir, "python"))
     os.environ["AI_FACTORY_PKG_DIR"] = pkg_dir
-    
-    from bootstrap import run_bootstrap, run_query, clear_helper_session
-    
+
+    from bootstrap import clear_helper_session, run_bootstrap, run_query
+
     if args.command == "bootstrap":
         run_bootstrap(".")
     else:
-        terminal_val = getattr(args, "terminal", False) or ("--terminal" in sys.argv or "-t" in sys.argv)
+        terminal_val = getattr(args, "terminal", False) or (
+            "--terminal" in sys.argv or "-t" in sys.argv
+        )
         clear_val = getattr(args, "clear", False) or ("--clear" in sys.argv)
-        master_val = getattr(args, "master", False) or ("--master" in sys.argv or "-m" in sys.argv)
-        expert_val = getattr(args, "expert", False) or ("--expert" in sys.argv or "-e" in sys.argv)
-        repo_map_val = getattr(args, "repo_map", False) or ("--repo-map" in sys.argv or "-r" in sys.argv)
+        master_val = getattr(args, "master", False) or (
+            "--master" in sys.argv or "-m" in sys.argv
+        )
+        expert_val = getattr(args, "expert", False) or (
+            "--expert" in sys.argv or "-e" in sys.argv
+        )
+        repo_map_val = getattr(args, "repo_map", False) or (
+            "--repo-map" in sys.argv or "-r" in sys.argv
+        )
 
         if clear_val:
             clear_helper_session(terminal_mode=terminal_val)
@@ -1327,20 +1487,49 @@ Environment Variables for Custom Models:
         if getattr(args, "instruction", None):
             instruction_parts.append(args.instruction)
         if unknown:
-            instruction_parts.extend([u for u in unknown if u not in ("--terminal", "-t", "--ask", "-a", "--clear", "--master", "-m", "--expert", "-e", "--repo-map", "-r")])
+            instruction_parts.extend(
+                [
+                    u
+                    for u in unknown
+                    if u
+                    not in (
+                        "--terminal",
+                        "-t",
+                        "--ask",
+                        "-a",
+                        "--clear",
+                        "--master",
+                        "-m",
+                        "--expert",
+                        "-e",
+                        "--repo-map",
+                        "-r",
+                    )
+                ]
+            )
         instruction = " ".join(instruction_parts)
-        
+
         file_val = getattr(args, "file", None)
         context_val = getattr(args, "context", "")
-        ask_val = getattr(args, "ask", False) or ("--ask" in sys.argv or "-a" in sys.argv)
-        
+        ask_val = getattr(args, "ask", False) or (
+            "--ask" in sys.argv or "-a" in sys.argv
+        )
+
         if not instruction:
             parser.print_help()
             sys.exit(0)
-            
-        run_query(instruction, file_val, context_val, ask_val, terminal_mode=terminal_val, master_mode=master_val, expert_mode=expert_val, repo_map=repo_map_val)
+
+        run_query(
+            instruction,
+            file_val,
+            context_val,
+            ask_val,
+            terminal_mode=terminal_val,
+            master_mode=master_val,
+            expert_mode=expert_val,
+            repo_map=repo_map_val,
+        )
 
 
 if __name__ == "__main__":
     main()
-

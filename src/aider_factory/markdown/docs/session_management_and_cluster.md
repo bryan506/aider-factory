@@ -1,30 +1,49 @@
-# Session Management, Cold-Storage Caching & Cluster Resource Management
+# Session Management & Cold-Storage Caching
 
-The `aider-factory` framework provides an enterprise-grade session lifecycle, cold-storage archiving, and cluster management subsystem designed for deterministic task resumption, multi-workspace isolation, and zero-leakage GPU inference slot management.
+The `aider-factory` framework provides an enterprise-grade session lifecycle and cold-storage archiving subsystem designed for deterministic task resumption and multi-workspace isolation.
 
 ---
 
-## 1. Local Workspace Session Sandboxing & Paired Configuration
+## 1. Executive Overview & Foundational Invariants
 
-Every session in `aider-factory` is self-contained within `.aider_factory/sessions/<slug>/`, pinned to the workspace repository root:
+The session management subsystem forms the persistence and resource control backbone of the AI Factory pipeline. It guarantees strict workspace isolation, non-destructive safety backups, and DAG node state isolation across local and remote environments.
+
+### Foundational Invariants
+- **Local Workspace Sandboxing**: Every session is strictly self-contained within `.aider_factory/sessions/<slug>/`, pinned to the workspace repository root.
+- **DAG Node State Isolation (Vaulting)**: Concurrent or sequential tasks within a phase isolate their conversational context by vaulting state files (`.aider.chat.history.md`, `.oracle_session.json`, etc.) into a `chat_history/` subdirectory using a `history_stem`, preventing cross-task state bleed unless explicitly shared.
+- **Safety-by-Default Cold-Storage**: Destructive session operations are non-destructive by default. Before removing active session files, the workspace's `.aider_factory` directory is synchronized to the user's cold-storage cache directory.
+- **Append-Only KV-Cache Persistence**: Side-agents (`aider-helper`, `aider-oracle`) maintain persistent sessions mathematically optimized for Prefix Caching on local inference servers, appending heavy documents once to achieve 100% KV cache hits on subsequent turns.
+- **Global Workspace Registry**: Projects are auto-registered in a global `registry.json` (`~/.config/aider_factory/registry.json`) to allow managing sessions across multiple repositories from any directory.
+
+---
+
+## 2. System Topology & Lifecycle Flowcharts
+
+### Workspace Session Topology
 
 ```text
 .aider_factory/
 ├── .env.yml                        # Global DAG fallback configuration
 ├── .helper_session.json            # Configuration assistant KV history
 ├── .helper_terminal_session.json   # Terminal assistant KV history
-├── .oracle_session.json            # Knowledge Oracle multi-turn LLM context
-├── .oracle_session.json.costs.json # Oracle cumulative cost accounting ledger
-├── .oracle_debate_session.json     # Refereed escalation debate context
-├── .debate_aider_history.md        # Architect debate turn history
+├── temp/                           # Ephemeral storage (e.g., apply_agent specs)
+├── logs/
+│   ├── chat_history/               # Timestamped Aider chat archives
+│   ├── llm_history/                # Timestamped raw LLM I/O archives
+│   ├── oracle_history/             # Timestamped Oracle RAG retrieval archives
+│   └── <config>_run_<time>.log     # Master OSTee execution logs
 └── sessions/
     ├── default/
     │   ├── session.yml             # Paired YAML pipeline configuration
-    │   ├── .aider.chat.history.md  # Multi-turn conversational history
-    │   ├── .aider.input.history    # Terminal prompt history (arrow-up recall)
-    │   ├── .oracle_session.json    # Session-scoped Oracle context
+    │   ├── .aider.chat.history.md  # Active multi-turn conversational history
+    │   ├── .aider.input.history    # Active terminal prompt history
+    │   ├── .oracle_session.json    # Active Session-scoped Oracle context
     │   ├── .oracle_session.json.costs.json
-    │   └── .oracle_debate_session.json
+    │   ├── .oracle_debate_session.json
+    │   ├── .debate_aider_history.md
+    │   └── chat_history/           # Vaulted DAG node states
+    │       ├── .aider.chat.history_job1_<stem>.md
+    │       └── .oracle_session_job1_<stem>.json
     ├── feature_auth/
     │   ├── session.yml
     │   └── ...
@@ -32,17 +51,9 @@ Every session in `aider-factory` is self-contained within `.aider_factory/sessio
         └── session.yml
 ```
 
-### Session Name Sanitization
-Session names passed via CLI (e.g. `aider-factory "Refactor / Auth Service"`) are sanitized into safe directory slugs:
-```python
-slug = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', target_session)
-```
+### Session Lifecycle & KV-Cache Restoration Flowchart
 
----
-
-## 2. Session Lifecycle & KV-Cache Restoration Flowchart
-
-```
+```text
                        ┌────────────────────────────────────────────────────────┐
                        │  User runs: aider-factory refactor_ohlcv               │
                        └───────────────────────────┬────────────────────────────┘
@@ -64,7 +75,71 @@ slug = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', target_session)
   └────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### What is Restored vs. What is Refreshed
+### Task State Vaulting & Lifecycle Flowchart
+
+```text
+                       ┌────────────────────────────────────────────────────────┐
+                       │  Task Execution Triggered (orchestrate.py:run_task)    │
+                       └───────────────────────────┬────────────────────────────┘
+                                                   │
+                                      Is history_stem defined?
+                                     (shared_history == false)
+                                     ┌─────────────┴─────────────┐
+                                    YES                          NO
+                                     │                           │
+                   ┌─────────────────┴───────────────┐           │
+                   │ _swap_in_state(history_stem)    │           │
+                   │ Moves vaulted files to active   │           │
+                   └─────────────────┬───────────────┘           │
+                                     │                           │
+  ┌──────────────────────────────────┴───────────────────────────┴─────────────────────────────────┐
+  │  1. Execute Task Node (Aider / Oracle / Validate)                                              │
+  │  2. Archive Histories to .aider_factory/logs/ (chat_history, llm_history, oracle_history)      │
+  └──────────────────────────────────┬───────────────────────────┬─────────────────────────────────┘
+                                     │                           │
+                   ┌─────────────────┴───────────────┐           │
+                   │ _swap_out_state(history_stem)   │           │
+                   │ Moves active files to vault     │           │
+                   └─────────────────────────────────┘           │
+                                                             Complete
+```
+
+---
+
+## 3. Technical Mechanics & Deep-Dive Logic
+
+### Session Name Sanitization
+Session names passed via CLI (e.g. `aider-factory "Refactor / Auth Service"`) are deterministically sanitized into safe directory slugs before any disk operations:
+```python
+slug = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', target_session)
+```
+
+### DAG State Vaulting & Isolation
+To prevent context contamination between sequential or parallel tasks (e.g., `job1` vs `job2`), `orchestrate.py` implements a state vaulting mechanism.
+1. **`history_stem` Generation**: Derived from the task type and file stem (e.g., `job1_main`). If `shared_history` is true, the stem is `None`.
+2. **`_swap_in_state`**: Before task execution, active state files (`.aider.chat.history.md`, `.oracle_session.json`, etc.) are cleared, and matching files from `chat_history/<filename>_<stem>` are copied into the active root.
+3. **`_swap_out_state`**: After execution, active state files are moved back into the `chat_history/` vault, preserving the exact KV-cache prefix for that specific node's future iterations.
+
+### Headless Application & Chat Parsing (`apply_agent.py`)
+The `aider-apply` CLI executes headless Aider passes by extracting specifications directly from chat histories.
+1. **Chat Parsing**: `parse_chat_history()` scans `.aider.chat.history.md` using `TOKEN_ANCHOR_RE` (`(?m)^>\s*Tokens:\s*[\d\.]+[kKMG]?\s*sent...`) to isolate conversational turns.
+2. **Sanitization**: It strips reasoning blocks (`<thinking-content-...>`, `<think>`) and tool artifacts to extract pure architectural directives.
+3. **Headless Execution**: It generates a temporary `active_spec.md` in `.aider_factory/temp/` and invokes Aider with `--yes-always`, `--auto-commits`, and `--message-file`, streaming the resulting git diff.
+
+### Cost Accounting & Token Tracking (`cost_tracker.py`)
+Financial telemetry is tracked globally and per-session.
+1. **Sidecar Ledgers**: Cumulative costs are persisted in `.costs.json` sidecars (e.g., `.oracle_session.json.costs.json`).
+2. **In-Memory Tracking**: `_PROCESS_SESSION_COST` aggregates costs during active execution.
+3. **Formatting**: `litellm_cost_line()` emits standardized strings (`Tokens: X sent, Y received. Cost: $A message, $B session`) to `stderr`, which are later intercepted by the `OSTee` multiplexer.
+
+### Cold-Storage Backup Engine Mechanics
+The backup root is resolved according to the XDG Base Directory Specification (`$XDG_CACHE_HOME/aider_factory_cache/<project_name>/.aider_factory/`), defaulting to `~/.cache/aider_factory_cache/<project_name>/.aider_factory/` when `$XDG_CACHE_HOME` is unset.
+
+1. **Primary (`rsync -a`)**: If `rsync` is installed, `_backup_workspace_cache` executes atomic, delta transfers preserving permissions, timestamps, and symlinks without the `--delete` flag. This allows the cache to accumulate historical sessions over time.
+2. **Fallback (`shutil.copytree`)**: If `rsync` is unavailable, the engine falls back to `shutil.copytree(..., dirs_exist_ok=True)`.
+
+### State Restoration vs. Refresh Logic
+When a session resumes, state is strictly bifurcated:
 
 | Component | What is Restored (Preserved) | What is Refreshed (Fresh) |
 | :--- | :--- | :--- |
@@ -73,28 +148,15 @@ slug = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', target_session)
 | **Knowledge Oracle** | • Multi-turn debate context & RAG history | • Vector store queries fresh chunks against latest code |
 | **Task Retry Loops** | • Conversation memory is retained across attempts (no clobbering) | • Fresh test failure logs are passed to the next loop attempt |
 
----
-
-## 3. Safety-by-Default Cold-Storage Backup Engine
-
-Destructive session operations in `aider-factory` are non-destructive by default. Before removing any active session files or sidecar artifacts, the workspace's `.aider_factory` directory is synchronized to the user's cold-storage cache directory.
-
-### Cache Directory Resolution
-The backup root is resolved according to the XDG Base Directory Specification:
-* `$XDG_CACHE_HOME/aider_factory_cache/<project_name>/.aider_factory/`
-* Defaults to `~/.cache/aider_factory_cache/<project_name>/.aider_factory/` when `$XDG_CACHE_HOME` is unset.
-
-### Transfer Mechanics (`rsync` with `shutil` Fallback)
-1. **Primary (`rsync -a`):** If `rsync` is installed, `_backup_workspace_cache` executes atomic, delta transfers preserving permissions, timestamps, and symlinks without the `--delete` flag. This allows the cache to accumulate historical sessions over time.
-2. **Fallback (`shutil.copytree`):** If `rsync` is unavailable, the engine falls back to `shutil.copytree(..., dirs_exist_ok=True)`.
+### Static Repository Map Generation
+`aider-factory` generates static, token-budgeted repository maps using ephemeral ignore files (`.aiderignore_source`, `.aiderignore_tests`), ensuring the main `.aiderignore` is never mutated. This provides a stable AST reference for the LLM context window.
 
 ---
 
-## 4. Session Invocations, Clearing & Permanent Deletion (`--forever`)
-
-To bypass the cold-storage backup and permanently delete files, pass the `--forever` flag.
+## 4. Exhaustive CLI & Parameter Reference
 
 ### Unified Command Matrix & Flag Permutations
+To bypass the cold-storage backup and permanently delete files, pass the `--forever` flag to any clearing command.
 
 | Action | Local Command | Global Command (`--global` / `-g`) | Disk Artifact Path | Behavior & Invariants |
 | :--- | :--- | :--- | :--- | :--- |
@@ -102,11 +164,12 @@ To bypass the cold-storage backup and permanently delete files, pass the `--fore
 | **Start with Explicit Config** | `aider-factory <cfg.yml> <name>`<br>`aider-factory <name> <cfg.yml>` | — | `.aider_factory/sessions/<name>/session.yml` | Freezes and pairs `<cfg.yml>` to the session directory as `session.yml`. |
 | **Resume Paired Config** | `aider-factory <name>` | — | `.aider_factory/sessions/<name>/session.yml` | If no YAML is passed, automatically loads and executes the session's existing `session.yml`. |
 | **Auto-Archived Unnamed Run** | `aider-factory`<br>`aider-factory .env.yml` | — | `.aider_factory/sessions/session_YYYYMMDD_HHMMSS/` | Generates a timestamped session folder, clones active `.env.yml` into it, and saves conversation. |
+| **Headless Apply** | `aider-apply <files> --session <name>` | — | `.aider_factory/temp/active_spec.md` | Parses chat history to extract specs, then runs headless Aider to apply diffs. |
 | **List All Sessions** | `aider-factory --list-sessions` | `aider-factory --list-sessions -g` | Scans `.aider_factory/sessions/` | Prints session slugs, timestamps, sizes (KB), and config pairing status (`paired` vs `no config`). |
 | **Inspect System Status** | `aider-factory --status` | `aider-factory --status -g` | Dynamic scan | Reports active sessions, side-agent memory, and remote inference cluster slots. |
 | **Clear Specific Session** | `aider-factory --clear-session <name>`<br>`... --forever` | `aider-factory --clear-session <proj>/<name> -g`<br>`... --forever` | Deletes `.aider_factory/sessions/<slug>/` | Backs up to `~/.cache/aider_factory_cache/<project>/` by default before deleting. Use `--forever` to purge permanently without cache. |
 | **Clear All Sessions** | `aider-factory --clear-all`<br>`... --forever` | `aider-factory --clear-all -g`<br>`... --forever` | Deletes `.aider_factory/sessions/` | Backs up all sessions to cache by default before deleting. Supports `--global` (`-g`) and `--forever`. |
-| **Clear All Sidecars + Slots** | `aider-factory --clear-side-sessions`<br>`... --forever` | `aider-factory --clear-side-sessions -g`<br>`... --forever` | Deletes sidecar JSONs and releases slots | Backs up sidecars to cache by default, deletes files, and releases remote cluster inference slots. Supports `--forever`. |
+| **Clear All Sidecars** | `aider-factory --clear-side-sessions`<br>`... --forever` | `aider-factory --clear-side-sessions -g`<br>`... --forever` | Deletes sidecar JSONs | Backs up sidecars to cache by default and deletes files. Supports `--forever`. |
 | **Clear Specific Sidecar** | `aider-factory --clear-side-session <target>`<br>`... --forever` | `aider-factory --clear-side-session <target> -g`<br>`... --forever` | Deletes target sidecar files | Backs up target sidecar to cache by default before deleting. Supports `--forever`. |
 | **Clear Active Oracle Context** | `aider-oracle --clear` | — | Deletes `.oracle_session.json` & `.oracle_debate_session.json` | Respects `ORACLE_SESSION_FILE` and wipes only the active session's Knowledge Oracle and debate history. |
 
@@ -117,26 +180,19 @@ To bypass the cold-storage backup and permanently delete files, pass the `--fore
 * `debate`: Clears `.oracle_debate_session.json` and `.debate_aider_history.md`.
 * `<session_name>`: Clears session-scoped sidecars under `sessions/<session_name>/`.
 
----
-
-## 5. Side-Agent & Helper Persistence Architecture
-
-### The "Append-Only" KV-Cache Persistence Model
-`aider-helper` and `aider-oracle` maintain persistent sessions mathematically optimized for Prefix Caching on local inference servers (llama.cpp, vLLM).
-
-When passing heavy documents (`--master`, `--expert`, `--context`), they are appended once to the persistent `.json` history. Subsequent user turns append short queries, achieving 100% KV cache hits on inference backends.
-
-### Side-Agent Session Files
-- `.helper_session.json` — Configuration assistant conversational state.
-- `.helper_terminal_session.json` — General AI terminal assistant state.
-- `.oracle_session.json` — Regular Knowledge Oracle query state.
-- `.oracle_debate_session.json` — Multi-turn refereed debate context.
+### Repository Map Commands
+* `aider-factory --repo-map`: Generates source-only map (`static_repo_map.md`).
+* `aider-factory --repo-map-tests`: Generates test-only map (`static_repo_map_tests.md`).
+* `aider-factory --repo-map-all`: Generates both maps.
+* `aider-factory --repo-map --map-tokens 8192`: Overrides token budget (default: 4096).
+* `aider-factory --repo-map-all --global`: Generates static maps across all registered workspaces globally.
 
 ---
 
-## 6. Global Workspace Registry (`registry.json`)
+## 5. Configuration Schema & YAML Knobs
 
-To allow managing sessions across multiple repositories from any directory, `aider-factory` maintains a global workspace registry at `~/.config/aider_factory/registry.json`:
+### Global Workspace Registry Schema (`registry.json`)
+Located at `~/.config/aider_factory/registry.json`:
 
 ```json
 {
@@ -147,60 +203,36 @@ To allow managing sessions across multiple repositories from any directory, `aid
 }
 ```
 
-* **Auto-Registration:** Every time `aider-factory` runs inside a directory, that project root is registered in `registry.json`.
-* **Auto-Pruning:** When enumerating projects, deleted or moved directories are automatically pruned from the registry file.
+* **`projects`** (`list[str]`): Array of absolute workspace directory paths.
+* **Auto-Registration Mechanics**: Every time `aider-factory` runs inside a directory, that project root is appended if missing.
+* **Auto-Pruning Mechanics**: When enumerating projects, non-existent or moved directories are pruned from disk automatically.
+
+### Paired Configuration Schema (`session.yml`)
+When a session is created with an explicit configuration (e.g., `aider-factory custom.yml my_session`), the YAML file is cloned into `.aider_factory/sessions/my_session/session.yml`. Resuming this session automatically reloads this paired file, ensuring pipeline execution remains deterministic and isolated from global workspace changes.
+
+#### Critical State Toggles
+* **`toggles.shared_history`** (`bool`): Defaults to `false`. When `true`, disables DAG node state vaulting (`history_stem = None`), forcing all tasks in a phase to share a single `.aider.chat.history.md` file. This risks context contamination but is useful for linear, highly interdependent tasks.
 
 ---
 
-## 7. Diagnostic Status Dashboard (`--status`)
+## 6. Telemetry, Diagnostics & Operational Edge Cases
 
-Run `aider-factory --status` (or `aider-factory --status --global`) to inspect active sessions, side-agent memory, and remote inference server health:
-
-```bash
-aider-factory --status
-aider-factory --status --global
-```
-
-### Dashboard Output Sections
+### Diagnostic Status Dashboard (`--status`)
+Running `aider-factory --status` (or `--status --global`) prints real-time diagnostics:
 1. **Main Aider Sessions**: Lists session names, last modified timestamp, chat history size (KB), and config pairing status (`paired` vs `no config`).
 2. **Side-Agent Sessions & KV Caches**: Reports turn counts, disk sizes, and timestamps for `helper`, `terminal`, `oracle`, and `debate` sessions.
-3. **Remote Inference Cluster & KV Slots**: Queries cluster endpoints (from `endpoints:` in `.env.yml` and environment variables), probing active slots on `llama-server` instances.
+3. **Remote Inference Cluster Endpoints**: Queries configured cluster endpoints to verify ONLINE/OFFLINE health status.
 
----
+### Operational Edge Cases & Mitigations
 
-## 8. Remote Cluster Slot Probing & VRAM Freeing (`/slots`)
+| Edge Case | Failure Mode / Symptom | Mitigation / Behavior |
+| :--- | :--- | :--- |
+| **E2BIG OS Buffer Limit** | `Argument list too long` when passing massive code files or failing test logs to the Oracle CLI. | `oracle_agent.py` automatically writes large prompts to temporary files (`.oracle_prompt_<tmp>.txt`) and executes via the `--file` argument, bypassing kernel limits. |
+| **Missing `rsync` Binary** | System lacks `rsync` utility during session clear operations. | Engine falls back gracefully to Python's `shutil.copytree` with `dirs_exist_ok=True`. |
+| **Unset `$XDG_CACHE_HOME`** | System environment variable for cache root is undefined. | Path resolution defaults safely to `~/.cache/aider_factory_cache/<project>/.aider_factory/`. |
+| **Unsafe CLI Session Names** | Pass arguments with spaces or special characters (e.g. `"Refactor / Auth"`). | Deterministically sanitized via regex `re.sub(r'[^a-zA-Z0-9_\-\.]', '_', name)` before directory creation. |
+| **Corrupted Sidecar JSON** | Invalid JSON syntax in `.oracle_session.json` or `.helper_session.json`. | Exception handled gracefully; sidecar is treated as empty and overwritten on next turn. |
+| **Vault Orphans** | A task crashes mid-execution, leaving active state files un-vaulted. | `_swap_in_state` forcefully clears active files before swapping in the correct vaulted state, ensuring the next task begins with a clean, deterministic prefix. |
 
-When running local inference servers (such as `llama-server`), active sessions hold KV cache memory in allocated server "slots". Over time, stale sessions occupy GPU VRAM.
-
-### How Slot Probing Works (`_probe_cluster_slots`)
-Queries `{base_url}/slots` with a 1.0s timeout:
-* Returns total available slots and currently active processing slots.
-* Surfaces connection state: `ONLINE (0/4 slots active via http://.../slots)`.
-
-### How Slot Release Works (`_release_cluster_slots`)
-When clearing side sessions (`--clear-side-sessions`), `aider-factory` executes a POST request to `{base_url}/slots/{slot_id}?action=release` for every allocated slot on the cluster:
-* Immediately frees the allocated context buffer in GPU VRAM.
-* Resets the server slot state to idle without needing to restart the `systemd` service.
-
----
-
-## 9. Static Repository Map Generation
-
-`aider-factory` generates static, token-budgeted repository maps using ephemeral ignore files, ensuring the main `.aiderignore` is never mutated:
-
-```bash
-# Generate source-only repository map (excludes test directories) -> static_repo_map.md
-aider-factory --repo-map
-
-# Generate test-only repository map (excludes source files) -> static_repo_map_tests.md
-aider-factory --repo-map-tests
-
-# Generate both maps
-aider-factory --repo-map-all
-
-# Override map token budget (default: 4096)
-aider-factory --repo-map --map-tokens 8192
-
-# Generate static maps across all registered workspaces globally
-aider-factory --repo-map-all --global
-```
+### Master Logging & Telemetry Extraction
+The `OSTee` interceptor captures all `stdout/stderr` into `.aider_factory/logs/<config>_run_<time>.log`. Post-execution, `aggregate_costs.py` regex-scans this master log for `COST_PATTERN` (`Tokens: ... Cost: ...`) to compute the exact total run cost, bridging the gap between isolated node executions.

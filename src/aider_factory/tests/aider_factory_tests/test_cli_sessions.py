@@ -88,22 +88,7 @@ class TestCLISessionManagement(unittest.TestCase):
         self.assertIn("Main Aider Sessions", out)
         self.assertIn("Side-Agent Sessions & KV Caches", out)
 
-    @patch("urllib.request.urlopen")
-    def test_probe_and_release_cluster_slots(self, mock_urlopen):
-        mock_response = MagicMock()
-        mock_response.status = 200
-        mock_response.read.return_value = json.dumps([
-            {"id": 0, "is_processing": False, "state": 0},
-            {"id": 1, "is_processing": True, "state": 1},
-        ]).encode("utf-8")
-        mock_urlopen.return_value.__enter__.return_value = mock_response
-
-        total, active, url = cli._probe_cluster_slots("http://192.168.100.1:8080/v1")
-        self.assertEqual(total, 2)
-        self.assertEqual(active, 1)
-
-        released = cli._release_cluster_slots("http://192.168.100.1:8080/v1")
-        self.assertEqual(released, 2)
+    # Removed deprecated test_probe_and_release_cluster_slots
 
     def test_global_registry_registration_and_pruning(self):
         reg_file = os.path.join(self.test_dir, "fake_reg.json")

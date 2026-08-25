@@ -131,7 +131,7 @@ exit 0
         self.assertTrue(toggles["pair_programming"])
         self.assertFalse(toggles["yes_always"])
         self.assertFalse(toggles["auto_accept_architect"])
-        self.assertFalse(toggles["auto_commits"])
+        self.assertTrue(toggles["auto_commits"])
         self.assertTrue(toggles["suggest_shell_commands"])
         self.assertFalse(toggles["detect_urls"])
         self.assertFalse(toggles["disable_playwright"])

@@ -72,8 +72,43 @@ minicheck_model = "openai/minicheck-flan-t5-large"
 node1_rerank_model = "qwen3-reranker-4b-gpu:LATEST"
 router_rerank_model = "qwen3-reranker-4b:LATEST"
 
-# Tiny 1x1 transparent PNG in base64 to test vision capabilities efficiently
-tiny_image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+import base64
+import struct
+import zlib
+
+def generate_sample_png(width=128, height=128) -> str:
+    """Generate a valid, non-degenerate 128x128 RGB PNG in base64 without external dependencies.
+    Prevents vision model patch division hangs caused by 1x1 images."""
+    raw_data = bytearray()
+    for y in range(height):
+        raw_data.append(0)  # Filter type None
+        for x in range(width):
+            r = (x * 2) % 256
+            g = (y * 2) % 256
+            b = 180
+            raw_data.extend((r, g, b))
+
+    def chunk(tag, data):
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    idat = zlib.compress(bytes(raw_data), level=6)
+    png_bytes = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", idat)
+        + chunk(b"IEND", b"")
+    )
+    return base64.b64encode(png_bytes).decode("ascii")
+
+
+sample_image_b64 = generate_sample_png(128, 128)
+
 def get_vision_payload(model_name):
     return {
         "model": model_name,
@@ -81,78 +116,135 @@ def get_vision_payload(model_name):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "ping"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{tiny_image_b64}"}}
-                ]
+                    {
+                        "type": "text",
+                        "text": "Describe the pattern and colors in this image in one brief sentence.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{sample_image_b64}"
+                        },
+                    },
+                ],
             }
         ],
-        "max_tokens": 5
+        "max_tokens": 25,
     }
+
 
 def get_rerank_payload(model_name):
     return {
         "model": model_name,
-        "query": "ping",
-        "documents": ["hello", "world"],
+        "query": "What is the capital of France?",
+        "documents": [
+            "Paris is the capital city of France.",
+            "Tokyo is the capital city of Japan.",
+        ],
         "top_n": 1,
     }
+
 
 def run_checks():
     results = []
 
     # 1. Node 1 (192.168.100.1:8080) - All Models
-    results.append(probe_post(
-        "Node 1 (Embedding)", 
-        "http://192.168.100.1:8080/v1/embeddings", 
-        {"model": node1_embed_model, "input": ["dimension probe"]}, 
-        "data"
-    ))
-    results.append(probe_post(
-        "Node 1 (Chat)", 
-        "http://192.168.100.1:8080/v1/chat/completions", 
-        {"model": chat_model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5}, 
-        "choices"
-    ))
-    results.append(probe_post(
-        "Node 1 (OCR)", 
-        "http://192.168.100.1:8080/v1/chat/completions", 
-        get_vision_payload(ocr_model), 
-        "choices"
-    ))
-    results.append(probe_post(
-        "Node 1 (Reranker)", 
-        "http://192.168.100.1:8080/v1/rerank", 
-        get_rerank_payload(node1_rerank_model), 
-        "results"
-    ))
+    results.append(
+        probe_post(
+            "Node 1 (Embedding)",
+            "http://192.168.100.1:8080/v1/embeddings",
+            {
+                "model": node1_embed_model,
+                "input": [
+                    "Quantitative finance models and distributed DAG execution engines."
+                ],
+            },
+            "data",
+        )
+    )
+    results.append(
+        probe_post(
+            "Node 1 (Chat)",
+            "http://192.168.100.1:8080/v1/chat/completions",
+            {
+                "model": chat_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Respond with the single word 'READY' if you are operational.",
+                    }
+                ],
+                "max_tokens": 15,
+            },
+            "choices",
+        )
+    )
+    results.append(
+        probe_post(
+            "Node 1 (OCR)",
+            "http://192.168.100.1:8080/v1/chat/completions",
+            get_vision_payload(ocr_model),
+            "choices",
+        )
+    )
+    results.append(
+        probe_post(
+            "Node 1 (Reranker)",
+            "http://192.168.100.1:8080/v1/rerank",
+            get_rerank_payload(node1_rerank_model),
+            "results",
+        )
+    )
 
     # 2. Node 2 (192.168.100.2:8080) - Chat Only
-    results.append(probe_post(
-        "Node 2 (Chat)", 
-        "http://192.168.100.2:8080/v1/chat/completions", 
-        {"model": node2_chat_model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5}, 
-        "choices"
-    ))
+    results.append(
+        probe_post(
+            "Node 2 (Chat)",
+            "http://192.168.100.2:8080/v1/chat/completions",
+            {
+                "model": node2_chat_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Respond with the single word 'READY' if you are operational.",
+                    }
+                ],
+                "max_tokens": 15,
+            },
+            "choices",
+        )
+    )
 
     # 3. Router (192.168.100.2:8081) - Embed & OCR Only
-    results.append(probe_post(
-        "Router (Embedding)", 
-        "http://192.168.100.2:8081/v1/embeddings", 
-        {"model": embed_model, "input": ["dimension probe"]}, 
-        "data"
-    ))
-    results.append(probe_post(
-        "Router (OCR)", 
-        "http://192.168.100.2:8081/v1/chat/completions", 
-        get_vision_payload(ocr_model), 
-        "choices"
-    ))
-    results.append(probe_post(
-        "Router (Reranker)", 
-        "http://192.168.100.2:8081/v1/rerank", 
-        get_rerank_payload(router_rerank_model), 
-        "results"
-    ))
+    results.append(
+        probe_post(
+            "Router (Embedding)",
+            "http://192.168.100.2:8081/v1/embeddings",
+            {
+                "model": embed_model,
+                "input": [
+                    "Quantitative finance models and distributed DAG execution engines."
+                ],
+            },
+            "data",
+        )
+    )
+    results.append(
+        probe_post(
+            "Router (OCR)",
+            "http://192.168.100.2:8081/v1/chat/completions",
+            get_vision_payload(ocr_model),
+            "choices",
+        )
+    )
+    results.append(
+        probe_post(
+            "Router (Reranker)",
+            "http://192.168.100.2:8081/v1/rerank",
+            get_rerank_payload(router_rerank_model),
+            "results",
+        )
+    )
 
     # 4. SearXNG
     results.append(probe_get(

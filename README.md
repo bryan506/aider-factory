@@ -30,6 +30,8 @@ You do not have to buy into a monolithic ecosystem. Each component of `aider-fac
 - **`aider-helper`**: Dual-purpose configuration architect and general AI terminal assistant.
 - **`aider-oracle`**: A blazing-fast local RAG client.
 - **`aider-validate`**: A deterministic fact-checker and quote-sticher for CI/CD.
+
+For a deep dive into the system's architecture and load-bearing rules, see the **[Core Philosophies & Invariants Specification](src/aider_factory/markdown/docs/core_philosophies.md)**.
 - **`aider-research`**: A private metasearch CLI.
 - **`aider-factory`**: The pipeline orchestrator.
 

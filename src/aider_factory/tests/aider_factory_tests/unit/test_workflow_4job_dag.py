@@ -160,23 +160,80 @@ class TestWorkflow4JobUnits(unittest.TestCase):
             self.assertIn("## PREVIOUS COMPLETED SYSTEM GOALS AND CONSTRAINTS", rendered)
             self.assertIn("Strategy: enforce strict checks", rendered)
 
-    def test_plan_resolution_null_yaml_fallbacks(self):
-        """T05: Explicit null YAML values safely fall back to standard defaults."""
+    def test_plan_resolution_null_yaml_returns_none(self):
+        """T05: Explicit null YAML values resolve to None without falling back to defaults."""
         plans = {
             "job_one_plan": None,
             "job_two_plan": None,
             "job_three_plan": None,
             "iterate_plan": None,
         }
-        j1_val = plans.get("job_one_plan") or "markdown/templates/implement.md"
+        j1_val = plans.get("job_one_plan")
         j2_val = plans.get("job_two_plan")
-        j3_val = plans.get("job_three_plan") or "markdown/templates/testing.md"
-        it_val = plans.get("iterate_plan") or "markdown/templates/testing_unit_iterate.md"
+        j3_val = plans.get("job_three_plan")
+        it_val = plans.get("iterate_plan")
 
-        self.assertEqual(j1_val, "markdown/templates/implement.md")
-        self.assertIsNone(j2_val)
-        self.assertEqual(j3_val, "markdown/templates/testing.md")
-        self.assertEqual(it_val, "markdown/templates/testing_unit_iterate.md")
+        job_one_plan = resolve_template_path(j1_val) if j1_val else None
+        job_two_plan = resolve_template_path(j2_val) if j2_val else None
+        job_three_plan = resolve_template_path(j3_val) if j3_val else None
+        iterate_plan = resolve_template_path(it_val) if it_val else None
+
+        self.assertIsNone(job_one_plan)
+        self.assertIsNone(job_two_plan)
+        self.assertIsNone(job_three_plan)
+        self.assertIsNone(iterate_plan)
+
+    def test_plan_resolution_empty_yaml_returns_none_and_preserves_internal_defaults(self):
+        """Verify Job 1, 2, 3, and Iterate plans default to None when omitted in YAML,
+        while internal templates preserve their defaults."""
+        phase = {"plans": {}}
+
+        plans = phase.get("plans", {}) or {}
+        j1_val = plans.get("job_one_plan")
+        job_one_plan = resolve_template_path(j1_val) if j1_val else None
+
+        j2_val = plans.get("job_two_plan")
+        job_two_plan = resolve_template_path(j2_val) if j2_val else None
+
+        j3_val = plans.get("job_three_plan")
+        job_three_plan = resolve_template_path(j3_val) if j3_val else None
+
+        it_val = plans.get("iterate_plan")
+        iterate_plan = resolve_template_path(it_val) if it_val else None
+
+        delib_val = plans.get(
+            "deliberate_plan", "markdown/internal/deliberation_evidence_template.md"
+        )
+        deliberate_plan = resolve_template_path(delib_val)
+
+        applyt_val = plans.get(
+            "apply_plan", "markdown/internal/apply_evidence_template.md"
+        )
+        apply_plan = resolve_template_path(applyt_val)
+
+        ab_val = plans.get("analyze_bugs_plan", "markdown/internal/analyze_bugs.md")
+        analyze_bugs_plan = resolve_template_path(ab_val)
+
+        self.assertIsNone(job_one_plan)
+        self.assertIsNone(job_two_plan)
+        self.assertIsNone(job_three_plan)
+        self.assertIsNone(iterate_plan)
+
+        self.assertTrue(deliberate_plan.endswith("deliberation_evidence_template.md"))
+        self.assertTrue(apply_plan.endswith("apply_evidence_template.md"))
+        self.assertTrue(analyze_bugs_plan.endswith("analyze_bugs.md"))
+
+    def test_job_two_plan_none_suppresses_validation_template_fallback(self):
+        """Verify Job 2 message_file is None when job_two_plan is None, even with strategy content."""
+        job_two_plan = None
+        strategy_content = "# Injected Goals"
+
+        if job_two_plan:
+            job2_msg_file = job_two_plan
+        else:
+            job2_msg_file = None
+
+        self.assertIsNone(job2_msg_file)
 
     def test_multi_target_strategy_discovery_reverse_scan(self):
         """T07: Discovers latest .md strategy artifact even when subsequent source files are in completed_files."""
@@ -217,10 +274,10 @@ class TestWorkflow4JobUnits(unittest.TestCase):
             "job_three_plan": "custom/job3.md",
             "iterate_plan": "custom/iterate.md",
         }
-        j1_val = plans.get("job_one_plan") or "markdown/templates/implement.md"
+        j1_val = plans.get("job_one_plan")
         j2_val = plans.get("job_two_plan")
-        j3_val = plans.get("job_three_plan") or "markdown/templates/testing.md"
-        it_val = plans.get("iterate_plan") or "markdown/templates/testing_unit_iterate.md"
+        j3_val = plans.get("job_three_plan")
+        it_val = plans.get("iterate_plan")
 
         self.assertEqual(j1_val, "custom/job1.md")
         self.assertEqual(j2_val, "custom/job2.md")

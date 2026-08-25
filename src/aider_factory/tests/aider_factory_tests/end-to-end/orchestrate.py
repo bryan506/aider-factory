@@ -6,17 +6,26 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+_python_dir = os.path.dirname(os.path.abspath(__file__))
+if _python_dir not in sys.path:
+    sys.path.insert(0, _python_dir)
+
+import yaml
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
-# Terminal color for the architect's debate turns (24-bit truecolor), matching aider's
-# architect blue #38bdf8 = RGB(56,189,248). Display-only: never added to captured text.
-_ARCH_COLOR = "\033[38;2;56;189;248m"
+# Terminal colors for debate turns (24-bit truecolor). Configurable via the pipeline
+# YAML `colors:` block; run_workflow.py sets the env vars at startup. Hardcoded
+# defaults match the original values: architect teal #38bdf8, oracle rose #d3869b.
+_ARCH_COLOR = os.environ.get("PIPELINE_COLOR_ARCHITECT", "\033[38;2;56;189;248m")
+_ORACLE_COLOR = os.environ.get("PIPELINE_COLOR_ORACLE", "\033[38;2;211;134;155m")
 _RESET = "\033[0m"
 
 
@@ -37,11 +46,11 @@ class Task:
     depends_on: list[str] = field(default_factory=list)
 
     # Model Routing
-    model: str = "openai/minimax-179b-80k:latest"
-    editor_model: str = "ollama/qwen3-coder-64k:latest"
+    model: str = "gemini/gemini-3.6-flash"
+    editor_model: str = "gemini/gemini-2.5-flash"
     fallback_editor_model: Optional[str] = None  # Escalation model for attempt > 0
-    architect_api_base: Optional[str] = "http://localhost:11435/v1"
-    editor_api_base: Optional[str] = "http://localhost:11434"
+    architect_api_base: Optional[str] = None
+    editor_api_base: Optional[str] = None
 
     status: TaskStatus = TaskStatus.PENDING
     test_cmd: Optional[str] = None
@@ -71,11 +80,104 @@ class Task:
     soft_fail: bool = False  # Apply node: loop exhaustion is a soft success (a downstream finalize is the authority)
     final_check: bool = False  # Code apply: after the iterate loop, re-run test_cmd ONCE and return its true pass/fail (the loop never verifies its own last edit; code mode has no finalize authority)
 
+    # Aider Runtime & KV-Cache Flags
+    map_tokens: Optional[int] = None
+    map_refresh: Optional[str] = None
+    map_multiplier_no_files: Optional[float] = None
+    max_chat_history_tokens: Optional[int] = None
+    yes_always: Optional[bool] = None
+    auto_accept_architect: Optional[bool] = None
+    auto_commits: Optional[bool] = None
+    suggest_shell_commands: Optional[bool] = None
+    detect_urls: Optional[bool] = None
+    disable_playwright: Optional[bool] = None
+    history_stem: Optional[str] = None
+
 
 class AiderFactory:
-    def __init__(self, project_dir: str):
+    def __init__(
+        self,
+        project_dir: str,
+        session_name: Optional[str] = None,
+        session_dir: Optional[str] = None,
+    ):
         self.project_dir = Path(project_dir)
+        self.session_name = session_name or "default"
+        self.session_dir = (
+            Path(session_dir)
+            if session_dir
+            else self.project_dir / ".aider_factory" / "sessions" / self.session_name
+        )
+        self.session_dir.mkdir(parents=True, exist_ok=True)
         self.tasks: dict[str, Task] = {}
+        self.last_test_result: dict[str, bool] = {}
+
+    def _get_state_files(self) -> list[str]:
+        d = str(self.session_dir)
+        return [
+            os.path.join(d, ".aider.chat.history.md"),
+            os.path.join(d, ".aider.input.history"),
+            os.path.join(d, ".aider.llm.history"),
+            os.path.join(d, ".oracle_session.json"),
+            os.path.join(d, ".oracle_session.json.costs.json"),
+            os.path.join(d, ".oracle_debate_session.json"),
+            os.path.join(d, ".debate_aider_history.md"),
+            os.path.join(d, ".oracle_chat.history.md"),
+            os.path.join(d, ".pair_capture.log"),
+        ]
+
+    def _get_vault_path(self, active_path: str, stem: str) -> str:
+        vault_dir = os.path.join(str(self.session_dir), "chat_history")
+        base = os.path.basename(active_path)
+        mapping = {
+            ".aider.chat.history.md": f".aider.chat.history_{stem}.md",
+            ".aider.input.history": f".aider.input.history_{stem}",
+            ".aider.llm.history": f".aider.llm.history_{stem}",
+            ".oracle_session.json": f".oracle_session_{stem}.json",
+            ".oracle_session.json.costs.json": f".oracle_session_{stem}.json.costs.json",
+            ".oracle_debate_session.json": f".oracle_debate_session_{stem}.json",
+            ".debate_aider_history.md": f".debate_aider_history_{stem}.md",
+            ".oracle_chat.history.md": f".oracle_chat.history_{stem}.md",
+            ".pair_capture.log": f".pair_capture_{stem}.log",
+        }
+        return os.path.join(vault_dir, mapping.get(base, f"{base}_{stem}"))
+
+    def _swap_in_state(self, stem: str):
+        import shutil
+        active_files = self._get_state_files()
+        for f in active_files:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+        for active_path in active_files:
+            vault_path = self._get_vault_path(active_path, stem)
+            if os.path.exists(vault_path):
+                try:
+                    shutil.copy2(vault_path, active_path)
+                except OSError:
+                    pass
+
+    def _swap_out_state(self, stem: str):
+        import shutil
+        vault_dir = os.path.join(str(self.session_dir), "chat_history")
+        os.makedirs(vault_dir, exist_ok=True)
+        active_files = self._get_state_files()
+        for active_path in active_files:
+            vault_path = self._get_vault_path(active_path, stem)
+            if os.path.exists(active_path):
+                try:
+                    shutil.copy2(active_path, vault_path)
+                except OSError:
+                    pass
+            else:
+                # Sync deletions from Active Stage to Vault
+                if os.path.exists(vault_path):
+                    try:
+                        os.remove(vault_path)
+                    except OSError:
+                        pass
 
     def add_task(self, task: Task):
         self.tasks[task.id] = task
@@ -89,11 +191,20 @@ class AiderFactory:
         )
 
     def _run_oracle_job(self, task: Task) -> bool:
-        """Run oracle_agent.py in programmatic job mode via the bash wrapper (which uses
-        the aider venv interpreter that has litellm/lancedb). Failure is non-fatal so the
-        remaining per-document jobs still run; the task is just marked FAILED."""
+        """Run oracle_agent.py in programmatic job mode directly via the active interpreter."""
         job = task.oracle or {}
-        oracle = os.path.join(self.project_dir, ".aider_factory", "bash", "oracle")
+
+        # Resolve script path relative to this file
+        pkg_python_dir = os.path.dirname(os.path.abspath(__file__))
+        oracle_script = os.path.join(pkg_python_dir, "oracle_agent.py")
+
+        import sys
+
+        if os.path.exists(oracle_script):
+            cmd = [sys.executable, oracle_script]
+        else:
+            oracle = os.path.join(self.project_dir, ".aider_factory", "bash", "oracle")
+            cmd = [oracle] if os.path.exists(oracle) else ["aider-oracle"]
 
         # Reuse an existing output instead of re-running the oracle job (e.g.
         # when iterating on the downstream validation/fix loop only). No model call
@@ -131,7 +242,7 @@ class AiderFactory:
             f"'{env.get('ORACLE_COLLECTION')}' -> {job.get('out')}"
         )
         try:
-            proc = subprocess.run([oracle], env=env, cwd=self.project_dir)
+            proc = subprocess.run(cmd, env=env, cwd=self.project_dir)
         except Exception as e:
             log.error(f"❌ ORACLE JOB EXCEPTION [{task.id}]: {e} (continuing)")
             return False
@@ -144,17 +255,28 @@ class AiderFactory:
         return False
 
     def _run_validate(self, task: "Task") -> bool:
-        """Evidence grounding audit (deterministic, no Aider). Runs the auditor via
-        the bash/validate wrapper. The audit always SUCCEEDS
-        as a DAG node — any ungrounded quotes are recorded in the report, which the
-        Tier-2 (post_validate) task keys off. Non-fatal on error."""
+        """Evidence grounding audit (deterministic, no Aider). Runs the auditor directly.
+        The audit always SUCCEEDS as a DAG node — any ungrounded quotes are recorded in the
+        report, which the Tier-2 (post_validate) task keys off. Non-fatal on error."""
         v = task.validate or {}
-        validate = os.path.join(self.project_dir, ".aider_factory", "bash", "validate")
+
+        pkg_python_dir = os.path.dirname(os.path.abspath(__file__))
+        validate_script = os.path.join(pkg_python_dir, "validator.py")
+
+        import sys
+
+        if os.path.exists(validate_script):
+            base_cmd = [sys.executable, validate_script]
+        else:
+            validate = os.path.join(
+                self.project_dir, ".aider_factory", "bash", "validate"
+            )
+            base_cmd = [validate] if os.path.exists(validate) else ["aider-validate"]
+
         env = os.environ.copy()
         if task.rag_env:
             env.update(task.rag_env)
-        cmd = [
-            validate,
+        cmd = base_cmd + [
             "--file",
             str(v.get("review", "")),
             "--source",
@@ -269,20 +391,47 @@ class AiderFactory:
         return text.strip()
 
     def _aider_ask_turn(
-        self, task: "Task", message: str, read_files: list, label: str = ""
+        self,
+        task: "Task",
+        message: str,
+        read_files: list,
+        label: str = "",
+        history_file: str = None,
     ) -> str:
         """One architect turn in ASK mode: no edits, no shell, no commits. STREAMS the
         turn live to the terminal while capturing it. The global config's architect:true
         is overridden per-invocation via AIDER_ARCHITECT=false + --edit-format ask.
 
         Streaming is stdout-only (observability); it is NOT added to any model context."""
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        root = str(self.project_dir)
+
+        # Resolve config paths: prioritize .aider_factory/ then fall back to root
+        local_aider_factory_conf = os.path.join(
+            root, ".aider_factory", ".aider.conf.yml"
+        )
+        root_aider_conf = os.path.join(root, ".aider.conf.yml")
+        aider_conf = (
+            local_aider_factory_conf
+            if os.path.exists(local_aider_factory_conf)
+            else (root_aider_conf if os.path.exists(root_aider_conf) else None)
+        )
+
+        local_aider_factory_settings = os.path.join(
+            root, ".aider_factory", ".aider.model.settings.yml"
+        )
+        root_aider_settings = os.path.join(root, ".aider.model.settings.yml")
+        aider_settings = (
+            local_aider_factory_settings
+            if os.path.exists(local_aider_factory_settings)
+            else (root_aider_settings if os.path.exists(root_aider_settings) else None)
+        )
+
+        chat_hist = os.path.join(str(self.session_dir), ".aider.chat.history.md")
+        input_hist = os.path.join(str(self.session_dir), ".aider.input.history")
+        llm_hist = os.path.join(str(self.session_dir), ".aider.llm.history")
+
         cmd = [
             "aider",
-            "--config",
-            os.path.join(root, ".aider.conf.yml"),
-            "--model-settings-file",
-            os.path.join(root, ".aider.model.settings.yml"),
             "--no-check-model-accepts-settings",
             "--no-show-model-warnings",
             "--model",
@@ -291,10 +440,35 @@ class AiderFactory:
             "ask",  # ask coder: cannot edit or run shell
             "--no-auto-commits",
             "--no-pretty",
-            "--yes-always",  # stream ON (no --no-stream)
+            "--no-suggest-shell-commands",
+            "--no-detect-urls",
+            "--yes-always",
+            "--auto-accept-architect",
+            "--map-tokens",
+            "0",
+            "--map-refresh",
+            "manual",
+            "--map-multiplier-no-files",
+            "0",
+            "--max-chat-history-tokens",
+            "1000000",
+            "--restore-chat-history",
+            "--chat-history-file",
+            chat_hist,
+            "--input-history-file",
+            input_hist,
+            "--llm-history-file",
+            llm_hist,
             "--message",
             message,
         ]
+        if aider_conf:
+            cmd.extend(["--config", aider_conf])
+        if aider_settings:
+            cmd.extend(["--model-settings-file", aider_settings])
+        if history_file:
+            cmd.extend(["--restore-chat-history", "--chat-history-file", history_file])
+
         for rf in read_files or []:
             if not rf:
                 continue
@@ -303,6 +477,9 @@ class AiderFactory:
                 cmd.extend(["--read", rf])
         env = os.environ.copy()
         env["AIDER_ARCHITECT"] = "false"  # override config architect:true for this turn
+        env["PYTHONHASHSEED"] = (
+            "0"  # Ensure deterministic set iteration for perfect prefix caching
+        )
         if task.architect_api_base:
             env["OPENAI_API_BASE"] = task.architect_api_base
             env["OPENAI_API_KEY"] = "sk-dummy"
@@ -316,6 +493,7 @@ class AiderFactory:
                 cmd,
                 cwd=self.project_dir,
                 env=env,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -359,63 +537,145 @@ class AiderFactory:
                 stderr=subprocess.STDOUT,
                 text=True,
             )
-            return p.returncode == 0, p.stdout or ""
+            passed = p.returncode == 0
+            self.last_test_result[gate_cmd] = passed
+            return passed, p.stdout or ""
         except Exception as e:
+            self.last_test_result[gate_cmd] = False
             return False, f"(gate error: {e})"
 
     def _oracle_turn(
-        self, task: "Task", d: dict, arch_text: str, turn: int, label: str = ""
+        self,
+        task: "Task",
+        d: dict,
+        arch_text: str,
+        turn: int,
+        label: str = "",
+        pre_assess_prompt: str = None,
     ) -> str:
         """One oracle turn via the existing client. Ends with a VERDICT line. The reply is
         printed live to the terminal (observability only; not added to any model context)."""
         oracle = os.path.join(self.project_dir, ".aider_factory", "bash", "oracle")
+        if not os.path.exists(oracle):
+            oracle = "aider-oracle"
         env = {**os.environ, **(task.rag_env or {})}
+        # Route the oracle to a debate-specific session file (survives apply-phase cleanup).
+        _sf = d.get("oracle_session_file")
+        if _sf:
+            env["ORACLE_SESSION_FILE"] = _sf
         # Prevent re-retrieving the LanceDB chunks after turn 0 to save tokens, since
         # the session state carries the context forward.
         mode = d.get("retrieve_mode", "no_retrieve") if turn == 0 else "no_retrieve"
 
         # The oracle's judging role differs by debate mode: grounding cites verbatim source
         # for quotes; code cites reference code/patterns for a fix. Both end with a VERDICT line.
-        if d.get("mode") == "code":
+        if pre_assess_prompt:
+            prompt = pre_assess_prompt
+            # Code mode: append the full file contents to the pre-assessment
+            # prompt so the oracle sees the same source files the architect
+            # reads via --read.
+            if d.get("mode") == "code" and not turn:
+                _files = []
+                for _rf in d.get("read_files") or []:
+                    _full = (
+                        _rf
+                        if os.path.isabs(_rf)
+                        else os.path.join(self.project_dir, _rf)
+                    )
+                    if os.path.isfile(_full):
+                        try:
+                            with open(_full, encoding="utf-8") as _fh:
+                                _files.append(f"File: {_rf}\n```\n{_fh.read()}\n```")
+                        except Exception:
+                            pass
+                if _files:
+                    prompt += (
+                        "\n\n<project_files>\n"
+                        + "\n\n".join(_files)
+                        + "\n</project_files>"
+                    )
+        elif d.get("mode") == "code":
             # Build code context block: failure log + full file contents.
-            # Included on EVERY turn so the oracle always has the source code
-            # available for judgment (it cannot read the files itself).
             _ctx = []
             _fl = d.get("failure_log")
             if _fl:
-                _ctx.append("## Failing test output\n```\n" + _fl[-4000:] + "\n```")
-            for _rf in d.get("read_files") or []:
-                _full = (
-                    _rf if os.path.isabs(_rf) else os.path.join(self.project_dir, _rf)
+                _ctx.append(
+                    "<failing_test_output>\n```\n"
+                    + _fl[-4000:]
+                    + "\n```\n</failing_test_output>"
                 )
-                if os.path.isfile(_full):
-                    try:
-                        with open(_full, encoding="utf-8") as _fh:
-                            _ctx.append(f"## {_rf}\n```\n{_fh.read()}\n```")
-                    except Exception:
-                        pass
+
+            # Pass the full file contents ONLY on Turn 1 to warm up Oracle's KV cache.
+            if not turn:
+                _files = []
+                for _rf in d.get("read_files") or []:
+                    _full = (
+                        _rf
+                        if os.path.isabs(_rf)
+                        else os.path.join(self.project_dir, _rf)
+                    )
+                    if os.path.isfile(_full):
+                        try:
+                            with open(_full, encoding="utf-8") as _fh:
+                                _files.append(f"File: {_rf}\n```\n{_fh.read()}\n```")
+                        except Exception:
+                            pass
+                if _files:
+                    _ctx.append(
+                        "<project_files>\n" + "\n\n".join(_files) + "\n</project_files>"
+                    )
             _ctx_block = ("\n\n" + "\n\n".join(_ctx)) if _ctx else ""
 
             prompt = (
-                "You are the Knowledge Oracle advising a software Architect who is debugging a "
-                "failing test suite. Judge the Architect's PROPOSAL against the failing test output "
-                "and the code files below (target + test + context), plus any retrieved reference "
-                "code/documentation. Cite the exact evidence (file + snippet) that supports or "
-                "refutes the fix; do not endorse APIs that do not appear in the provided code or "
-                "references. End with EXACTLY one line: 'VERDICT: AGREE' if the fix is sound and "
-                "grounded, or 'VERDICT: OBJECT - <specific reason>' if not."
+                "You are the Knowledge Oracle advising the Architect agent. "
+                "Judge the Architect's PROPOSAL against the provided context "
+                "and files below. Cite exact evidence (file + snippet) that "
+                "supports or refutes the proposal; do not endorse APIs or "
+                "patterns absent from the provided code or references. "
+                "End with EXACTLY one line: 'VERDICT: AGREE' if the proposal "
+                "is sound and grounded, or 'VERDICT: OBJECT - <specific reason>' "
+                "if not."
                 + _ctx_block
-                + "\n\n## Architect's analysis and PROPOSAL\n"
+                + "\n\n<architect_proposal>\n"
                 + (arch_text or "")
+                + "\n</architect_proposal>"
             )
         else:
+            _file_ctx = []
+            if not turn:
+                for _rf in d.get("read_files") or []:
+                    _full = (
+                        _rf
+                        if os.path.isabs(_rf)
+                        else os.path.join(self.project_dir, _rf)
+                    )
+                    if os.path.isfile(_full):
+                        try:
+                            with open(_full, encoding="utf-8") as _fh:
+                                _file_ctx.append(f"File: {_rf}\n```\n{_fh.read()}\n```")
+                        except Exception:
+                            pass
+            _file_block = (
+                (
+                    "\n\n<project_files>\n"
+                    + "\n\n".join(_file_ctx)
+                    + "\n</project_files>"
+                )
+                if _file_ctx
+                else ""
+            )
+
             prompt = (
-                "You are the Knowledge Oracle reviewing the Architect's analysis and PROPOSAL below. "
-                "Judge it against the knowledge base. You OWN the source of truth: when you object to "
-                "or agree on a fix, CITE the exact verbatim text (copied character-for-character from "
-                "the source) the quote should be. End with EXACTLY one line: 'VERDICT: AGREE' if you "
-                "concur, or 'VERDICT: OBJECT - <specific reason>' if not.\n\n"
+                "You are the Knowledge Oracle reviewing the Architect's analysis "
+                "and PROPOSAL below. Judge it against the knowledge base and "
+                "provided context. Cite exact evidence from the source material "
+                "to support or refute the proposal. "
+                "End with EXACTLY one line: 'VERDICT: AGREE' if you concur, "
+                "or 'VERDICT: OBJECT - <specific reason>' if not."
+                + _file_block
+                + "\n\n<architect_proposal>\n"
                 + (arch_text or "")
+                + "\n</architect_proposal>"
             )
 
         # Write prompt to a temp file instead of passing as a CLI arg to avoid
@@ -456,20 +716,24 @@ class AiderFactory:
                 os.unlink(prompt_file.name)
             except OSError:
                 pass
-        out = (p.stdout or "").strip()
+        out = re.sub(r"\033\[[0-9;]*m", "", (p.stdout or "")).strip()
         # Surface the oracle's retrieval status from stderr (always, not just on failure).
         # The oracle prints "[oracle] N source chunk(s) ..." to stderr on every call.
         _stderr = (p.stderr or "").strip()
         _rag_line = ""
+        _cost_line = ""
         for _sl in _stderr.splitlines():
             if "[oracle]" in _sl and "source chunk" in _sl:
                 _rag_line = _sl.strip()
-                break
-        print(f"\n┌── oracle {label} ──", flush=True)
+            if "Cost:" in _sl and "message," in _sl:
+                _cost_line = _sl.strip()
+        print(f"\n{_ORACLE_COLOR}┌── oracle {label} ──", flush=True)
         if _rag_line:
             print(f"  {_rag_line}", flush=True)
         print(out or "(no output)", flush=True)
-        print("└──", flush=True)
+        if _cost_line:
+            print(f"  {_cost_line}", flush=True)
+        print(f"└──{_RESET}", flush=True)
         if not out:
             tail = " | ".join(_stderr.splitlines()[-3:])
             log.warning(
@@ -483,6 +747,32 @@ class AiderFactory:
         import deliberate
 
         d = task.deliberate or {}
+        # Ensure the Oracle model is explicitly set in the environment for the sub-agent
+        if task.rag_env and "ORACLE_AGENT_MODEL" in task.rag_env:
+            os.environ["ORACLE_AGENT_MODEL"] = task.rag_env["ORACLE_AGENT_MODEL"]
+
+        # Early exit: if the previous round already reached agreement, skip this round.
+        # The DAG statically pre-builds all rounds at parse time; this runtime check
+        # prevents wasted rounds after consensus (mirrors the CLI debate's early exit).
+        prior_verdict_path = d.get("prior_verdict")
+        if prior_verdict_path and os.path.isfile(prior_verdict_path):
+            prior_state = deliberate.verdict_status(prior_verdict_path)
+            if prior_state in ("agreed", "clean"):
+                # Copy the prior verdict to this round's path so the downstream
+                # task (which references this round's verdict) finds the content.
+                verdict_path = d.get("verdict")
+                if verdict_path:
+                    import shutil
+
+                    os.makedirs(
+                        os.path.dirname(os.path.abspath(verdict_path)), exist_ok=True
+                    )
+                    shutil.copy(prior_verdict_path, verdict_path)
+                log.info(
+                    f"⏩ DELIBERATION [{task.id}] skipped — prior round already agreed or clean."
+                )
+                return True
+
         template, issue = d.get("template"), d.get("issue")
         verdict_path, ledger_path = d.get("verdict"), d.get("ledger")
         gate_cmd, max_turns = d.get("gate_cmd"), int(d.get("loops", 3))
@@ -562,7 +852,11 @@ class AiderFactory:
 
         # Seed with the real failure; short-circuit if the gate is already green.
         if gate_present:
-            ok, gate_out = self._gate_run(task, gate_cmd)
+            if self.last_test_result.get(gate_cmd) is True:
+                ok = True
+                gate_out = "Gate already passed in preceding task."
+            else:
+                ok, gate_out = self._gate_run(task, gate_cmd)
             if ok:
                 led = deliberate.new_ledger(issue_id)
                 led["state"] = "clean"
@@ -613,36 +907,85 @@ class AiderFactory:
         # verbatim citations the architect must reuse to converge).
         history = ""
 
-        oracle_session = os.path.join(
-            self.project_dir, ".aider_factory", ".oracle_session.json"
+        # Debate-specific session file: separate from the main .oracle_session.json
+        # so the apply phase's cleanup does not destroy cross-round oracle context.
+        oracle_debate_session = os.path.join(
+            str(self.session_dir), ".oracle_debate_session.json"
         )
-        if os.path.exists(oracle_session):
-            try:
-                os.remove(oracle_session)
-            except OSError:
-                pass
+        d["oracle_session_file"] = oracle_debate_session
+        oracle_debate_cost_sidecar = oracle_debate_session + ".costs.json"
+
+        debate_aider_history = os.path.join(
+            str(self.session_dir), ".debate_aider_history.md"
+        )
+
+        # Clear debate context: always on round 1 (fresh sequence), or every round
+        # when pass_round_history is off (each cluster of loops gets a clean slate).
+        _first_round = d.get("round_idx", 1) == 1
+        _clear = not d.get("pass_round_history", False) or _first_round
+        if _clear:
+            for _f in [
+                oracle_debate_session,
+                oracle_debate_cost_sidecar,
+                debate_aider_history,
+            ]:
+                if os.path.exists(_f):
+                    try:
+                        os.remove(_f)
+                    except OSError:
+                        pass
 
         log.info(f"🗣️  DELIBERATION [{task.id}] -> up to {max_turns} turn(s)")
+        _reads = d.get("read_files") or ([issue] if issue else [])
+
+        # --- Oracle turn 0: pre-assessment before the architect speaks ---
+        _orc0_prompt = (
+            "You are the Knowledge Oracle. Assess the following using the "
+            "provided context, evidence, and any retrieved reference material. "
+            "Provide your expert analysis before the Architect responds."
+            "\n\n" + seed
+        )
+        last_oracle = self._oracle_turn(
+            task,
+            d,
+            "",
+            turn=0,
+            label="turn 0 (pre-assessment)",
+            pre_assess_prompt=_orc0_prompt,
+        )
+        deliberate.record_turn(ledger, -1, "oracle", last_oracle, verdict=None)
+        transcript.append(
+            f"\n## Turn 0 — Oracle (pre-assessment)\n\n{(last_oracle or '').strip()}\n"
+        )
+
         for turn in range(max_turns):
-            arch_msg = (
-                seed
-                + (
-                    "\n\n## Debate so far (the Oracle's cited verbatim text is the source of "
-                    "truth — reuse it; do not re-litigate points it already settled)\n"
-                    + history
-                    if history
-                    else ""
+            if turn == 0:
+                arch_msg = (
+                    seed + f"\n\n## Oracle Pre-Assessment\n{last_oracle}\n\n"
+                    "Address the issue above. The Oracle has provided an initial "
+                    "assessment — build on it or counter it with evidence. "
+                    "End with EXACTLY one line:\n"
+                    "PROPOSAL: <one-line concrete resolution>"
                 )
-                + "\n\nReason about the root cause and the concrete fix. Address every oracle "
-                "objection across the debate above. End with EXACTLY one line:\n"
-                "PROPOSAL: <one-line concrete resolution>"
-            )
-            # Read files handed to the architect turn: the debate may specify them (code mode
-            # passes the source + failing test); grounding defaults to the issue report.
-            _reads = d.get("read_files") or ([issue] if issue else [])
+            else:
+                # Delta-only prompts: we only pass objections and metadata!
+                arch_msg = (
+                    f"The Oracle reviewed your proposal and responded:\n\n"
+                    f"{last_oracle}\n\n"
+                    f"Please address the Oracle's objections and refine your proposal. "
+                    f"End with EXACTLY one line:\n"
+                    f"PROPOSAL: <one-line concrete resolution>"
+                )
+
+            # Send prompt using our robust, non-interactive Ask turn with history restoration
             arch_text = self._aider_ask_turn(
-                task, arch_msg, _reads, label=f"turn {turn + 1}/{max_turns}"
+                task,
+                arch_msg,
+                _reads,
+                label=f"turn {turn + 1}/{max_turns}",
+                history_file=debate_aider_history,
             )
+
             last_proposal = arch_text or last_proposal
             pline = deliberate.proposal_line(arch_text) or "(no PROPOSAL line)"
             log.info(f"   turn {turn + 1} architect → {pline[:160]}")
@@ -657,8 +1000,9 @@ class AiderFactory:
                 f"\n## Turn {turn + 1} — Architect\n\n{(arch_text or '').strip()}\n"
             )
 
+            # Oracle Turn (turn variable is passed so it knows whether to skip file loading)
             last_oracle = self._oracle_turn(
-                task, d, arch_text, turn, label=f"turn {turn + 1}/{max_turns}"
+                task, d, arch_text, turn + 1, label=f"turn {turn + 1}/{max_turns}"
             )
             verdict = deliberate.oracle_verdict(last_oracle)
             log.info(
@@ -669,7 +1013,7 @@ class AiderFactory:
                 f"\n## Turn {turn + 1} — Oracle\n\n{(last_oracle or '').strip()}\n"
             )
 
-            # Grow the shared memory for the next architect turn.
+            # Grow the shared memory transcript
             history += (
                 f"\n### Turn {turn + 1} — Architect proposed\n{pline}\n"
                 f"### Turn {turn + 1} — Oracle replied\n{(last_oracle or '').strip()}\n"
@@ -685,18 +1029,13 @@ class AiderFactory:
         ledger["state"] = state
         ledger["quote_baseline"] = quote_baseline
         deliberate.save_ledger(ledger_path, ledger)
-        if os.path.exists(oracle_session):
-            try:
-                os.remove(oracle_session)
-            except OSError:
-                pass
-
         actionable = deliberate.write_verdict(
             verdict_path,
             state,
             gate_present,
             last_proposal,
             draft_mode=d.get("draft_mode", False),
+            oracle_response=last_oracle,
         )
 
         # Human-readable transcript of the full back-and-forth (observability only;
@@ -714,7 +1053,9 @@ class AiderFactory:
         # Archive the oracle transcript before the next aider task deletes it.
         # The aider session setup (line 780) removes .oracle_chat.history.md, so
         # if we don't archive here, the debate's retrieved chunks are lost.
-        _ot = os.path.join(self.project_dir, ".aider_factory", ".oracle_chat.history.md")
+        _ot = os.path.join(
+            self.project_dir, ".aider_factory", ".oracle_chat.history.md"
+        )
         if os.path.exists(_ot):
             import datetime
             import shutil
@@ -729,6 +1070,21 @@ class AiderFactory:
             except Exception:
                 pass
 
+        # Clean up debate working files — but preserve them when
+        # pass_round_history is True so the next round's oracle and architect
+        # can resume from the prior round's accumulated context.
+        if not d.get("pass_round_history", False):
+            for _df in [
+                oracle_debate_session,
+                oracle_debate_cost_sidecar,
+                debate_aider_history,
+            ]:
+                if os.path.exists(_df):
+                    try:
+                        os.remove(_df)
+                    except OSError:
+                        pass
+
         log.info(
             f"🗣️  DELIBERATION [{task.id}] -> {state} "
             f"({'ACTIONABLE' if actionable else 'held for human'}) -> {verdict_path}"
@@ -736,6 +1092,16 @@ class AiderFactory:
         return True
 
     def run_task(self, task: Task) -> bool:
+        if task.history_stem:
+            self._swap_in_state(task.history_stem)
+
+        try:
+            return self._execute_task_node(task)
+        finally:
+            if task.history_stem:
+                self._swap_out_state(task.history_stem)
+
+    def _execute_task_node(self, task: Task) -> bool:
         # Edit-node self-gate: a task that applies a deliberation verdict runs only when
         # that verdict is an agreed, gate-backed resolution; otherwise hold for a human.
         if task.verdict_gate:
@@ -793,37 +1159,104 @@ class AiderFactory:
             max_outer_loops = 1
 
         for attempt in range(max_outer_loops):
-            # Wipe Aider's history files to ensure a 100% clean directory between loops
-            chat_hist = os.path.join(
-                self.project_dir, ".aider_factory", ".aider.chat.history.md"
+            chat_hist = os.path.join(str(self.session_dir), ".aider.chat.history.md")
+            input_hist = os.path.join(str(self.session_dir), ".aider.input.history")
+            llm_hist = os.path.join(str(self.session_dir), ".aider.llm.history")
+            oracle_session = os.path.join(str(self.session_dir), ".oracle_session.json")
+            oracle_cost_sidecar = os.path.join(
+                str(self.session_dir), ".oracle_session.json.costs.json"
             )
-            input_hist = os.path.join(
-                self.project_dir, ".aider_factory", ".aider.input.history"
+            oracle_debate_session = os.path.join(
+                str(self.session_dir), ".oracle_debate_session.json"
             )
-            oracle_session = os.path.join(
-                self.project_dir, ".aider_factory", ".oracle_session.json"
+            debate_aider_history = os.path.join(
+                str(self.session_dir), ".debate_aider_history.md"
             )
             oracle_transcript = os.path.join(
-                self.project_dir, ".aider_factory", ".oracle_chat.history.md"
+                str(self.session_dir), ".oracle_chat.history.md"
             )
-            for f in [chat_hist, input_hist, oracle_session, oracle_transcript]:
+            _pair_capture = os.path.join(str(self.session_dir), ".pair_capture.log")
+            # Retain chat history and input history across attempts, clear transient sidecars
+            for f in [
+                oracle_session,
+                oracle_cost_sidecar,
+                oracle_transcript,
+                _pair_capture,
+            ]:
                 if os.path.exists(f):
                     os.remove(f)
 
+            root = str(self.project_dir)
+
+            # Resolve config paths: prioritize .aider_factory/ then fall back to root
+            local_aider_factory_conf = os.path.join(
+                root, ".aider_factory", ".aider.conf.yml"
+            )
+            root_aider_conf = os.path.join(root, ".aider.conf.yml")
+            base_aider_conf = (
+                local_aider_factory_conf
+                if os.path.exists(local_aider_factory_conf)
+                else (root_aider_conf if os.path.exists(root_aider_conf) else None)
+            )
+
+            # Deterministically compile session-scoped .aider.conf.yml merging base config with task toggles
+            session_aider_conf = os.path.join(str(self.session_dir), ".aider.conf.yml")
+            conf_data = {}
+            if base_aider_conf and os.path.exists(base_aider_conf):
+                try:
+                    with open(base_aider_conf, "r", encoding="utf-8") as f:
+                        conf_data = yaml.safe_load(f) or {}
+                except Exception as e:
+                    log.warning(f"⚠️ Could not load base config {base_aider_conf}: {e}")
+
+            if task.map_tokens is not None:
+                conf_data["map-tokens"] = task.map_tokens
+            if task.map_refresh is not None:
+                conf_data["map-refresh"] = task.map_refresh
+            if task.map_multiplier_no_files is not None:
+                conf_data["map-multiplier-no-files"] = task.map_multiplier_no_files
+            if task.max_chat_history_tokens is not None:
+                conf_data["max-chat-history-tokens"] = str(task.max_chat_history_tokens)
+
+            if task.yes_always is not None:
+                conf_data["yes-always"] = bool(task.yes_always)
+            if task.auto_accept_architect is not None:
+                conf_data["auto-accept-architect"] = bool(task.auto_accept_architect)
+            if task.auto_commits is not None:
+                conf_data["auto-commits"] = bool(task.auto_commits)
+            if task.suggest_shell_commands is not None:
+                conf_data["suggest-shell-commands"] = bool(task.suggest_shell_commands)
+            if task.detect_urls is not None:
+                conf_data["detect-urls"] = bool(task.detect_urls)
+            if task.disable_playwright is not None:
+                conf_data["disable-playwright"] = bool(task.disable_playwright)
+
+            try:
+                with open(session_aider_conf, "w", encoding="utf-8") as f:
+                    yaml.safe_dump(conf_data, f)
+                aider_conf = session_aider_conf
+            except Exception as e:
+                log.warning(
+                    f"⚠️ Could not write session config {session_aider_conf}: {e}"
+                )
+                aider_conf = base_aider_conf
+
+            local_aider_factory_settings = os.path.join(
+                root, ".aider_factory", ".aider.model.settings.yml"
+            )
+            root_aider_settings = os.path.join(root, ".aider.model.settings.yml")
+            aider_settings = (
+                local_aider_factory_settings
+                if os.path.exists(local_aider_factory_settings)
+                else (
+                    root_aider_settings if os.path.exists(root_aider_settings) else None
+                )
+            )
+
             cmd = [
                 "aider",
-                "--config",
-                os.path.join(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    ".aider.conf.yml",
-                ),
                 "--no-check-model-accepts-settings",
                 "--no-show-model-warnings",
-                "--model-settings-file",
-                os.path.join(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    ".aider.model.settings.yml",
-                ),
                 "--model",
                 task.model,
                 "--editor-model",
@@ -831,7 +1264,56 @@ class AiderFactory:
                 task.fallback_editor_model
                 if (attempt > 0 and task.fallback_editor_model)
                 else task.editor_model,
+                "--restore-chat-history",
+                "--chat-history-file",
+                chat_hist,
+                "--input-history-file",
+                input_hist,
+                "--llm-history-file",
+                llm_hist,
             ]
+            if aider_conf:
+                cmd.extend(["--config", aider_conf])
+            if aider_settings:
+                cmd.extend(["--model-settings-file", aider_settings])
+
+            # Runtime & KV-cache flags (overrides .aider.conf.yml defaults)
+            if task.map_tokens is not None:
+                cmd.extend(["--map-tokens", str(task.map_tokens)])
+            if task.map_refresh is not None:
+                cmd.extend(["--map-refresh", str(task.map_refresh)])
+            if task.map_multiplier_no_files is not None:
+                cmd.extend(
+                    ["--map-multiplier-no-files", str(task.map_multiplier_no_files)]
+                )
+            if task.max_chat_history_tokens is not None:
+                cmd.extend(
+                    ["--max-chat-history-tokens", str(task.max_chat_history_tokens)]
+                )
+
+            if task.auto_commits is not None:
+                cmd.append(
+                    "--auto-commits" if task.auto_commits else "--no-auto-commits"
+                )
+            if task.auto_accept_architect is not None:
+                cmd.append(
+                    "--auto-accept-architect"
+                    if task.auto_accept_architect
+                    else "--no-auto-accept-architect"
+                )
+            if task.suggest_shell_commands is not None:
+                cmd.append(
+                    "--suggest-shell-commands"
+                    if task.suggest_shell_commands
+                    else "--no-suggest-shell-commands"
+                )
+            if task.detect_urls is not None:
+                cmd.append("--detect-urls" if task.detect_urls else "--no-detect-urls")
+
+            if task.yes_always:
+                cmd.append("--yes-always")
+            if task.disable_playwright:
+                cmd.append("--disable-playwright")
 
             # Determine if we should use the message file or check test failures.
             # We use the plan (message_file) only on the first attempt.
@@ -853,6 +1335,7 @@ class AiderFactory:
                 test_proc = subprocess.Popen(
                     task.test_cmd,
                     shell=True,
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,  # Combine stderr into stdout
                     text=True,
@@ -882,6 +1365,7 @@ class AiderFactory:
 
                 test_proc.wait()  # Wait for the process to finish
                 out = "".join(output_lines)
+                self.last_test_result[task.test_cmd] = test_proc.returncode == 0
 
                 if test_proc.returncode == 0:
                     log.info(
@@ -963,6 +1447,27 @@ class AiderFactory:
 
             # Inject the correct endpoints for the specific machine (Strix vs 7900XT)
             env = os.environ.copy()
+
+            # Enforce toggle overrides via environment variables
+            if task.yes_always is not None:
+                env["AIDER_YES_ALWAYS"] = "true" if task.yes_always else "false"
+            if task.disable_playwright is not None:
+                env["AIDER_DISABLE_PLAYWRIGHT"] = (
+                    "true" if task.disable_playwright else "false"
+                )
+            if task.auto_accept_architect is not None:
+                env["AIDER_AUTO_ACCEPT_ARCHITECT"] = (
+                    "true" if task.auto_accept_architect else "false"
+                )
+            if task.auto_commits is not None:
+                env["AIDER_AUTO_COMMITS"] = "true" if task.auto_commits else "false"
+            if task.suggest_shell_commands is not None:
+                env["AIDER_SUGGEST_SHELL_COMMANDS"] = (
+                    "true" if task.suggest_shell_commands else "false"
+                )
+            if task.detect_urls is not None:
+                env["AIDER_DETECT_URLS"] = "true" if task.detect_urls else "false"
+
             if task.architect_api_base:
                 env["OPENAI_API_BASE"] = task.architect_api_base
                 env["OPENAI_API_KEY"] = "sk-dummy"
@@ -980,7 +1485,18 @@ class AiderFactory:
                     log.info(
                         f"🤝 STARTING INTERACTIVE PAIR-PROGRAMMING [{task.id}] -> Arch: {task.architect_api_base} | Ed: {current_editor}"
                     )
-                    process = subprocess.Popen(cmd, env=env, cwd=self.project_dir)
+                    # Wrap Aider in `script` so prompt_toolkit sees a real PTY
+                    # while all output (stdout + stderr) is captured to a file.
+                    # The finally block parses the capture for cost lines and
+                    # emits them to stdout (-> tee -> log -> aggregate_costs.py).
+                    # This captures every cost source: main session, /run
+                    # debates, and oracle turns — no sidecars or chat history.
+                    cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
+                    process = subprocess.Popen(
+                        ["script", "-qfe", "-c", cmd_str, _pair_capture],
+                        env=env,
+                        cwd=self.project_dir,
+                    )
                     while True:
                         try:
                             process.wait()
@@ -999,7 +1515,20 @@ class AiderFactory:
                     shell=True,
                     cwd=self.project_dir,
                     env=env,
+                    stdin=subprocess.PIPE,
                 )
+
+                try:
+                    # Send 'd\n' (Don't ask again) to gracefully reject mid-run interactive prompts
+                    # like "Add file to the chat?" or "Run shell command?", preventing the LLM from
+                    # getting distracted and dropping commits. For prompts without a (D) option
+                    # (e.g. "Create new file?"), 'd' is invalid, triggering an EOFError on the
+                    # next read which safely accepts the default [Yes].
+                    process.stdin.write(b"d\n")
+                    process.stdin.flush()
+                    process.stdin.close()
+                except Exception:
+                    pass
 
                 # Wait for Aider to finish
                 process.wait()
@@ -1035,12 +1564,26 @@ class AiderFactory:
 
                     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     history_dir = os.path.join(
-                        self.project_dir, ".aider_factory", "markdown", "chat_history"
+                        self.project_dir, ".aider_factory", "logs", "chat_history"
                     )
                     os.makedirs(history_dir, exist_ok=True)
 
                     archive_name = f"{stamp}_{task.id}.md"
                     shutil.copy(chat_hist, os.path.join(history_dir, archive_name))
+
+                # Archive raw LLM history before cleanup
+                if os.path.exists(llm_hist):
+                    import datetime
+                    import shutil
+
+                    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    llm_hist_dir = os.path.join(
+                        self.project_dir, ".aider_factory", "logs", "llm_history"
+                    )
+                    os.makedirs(llm_hist_dir, exist_ok=True)
+
+                    archive_name = f"{stamp}_{task.id}.llm.log"
+                    shutil.copy(llm_hist, os.path.join(llm_hist_dir, archive_name))
 
                 # Archive the Oracle side-agent transcript before cleanup
                 if os.path.exists(oracle_transcript):
@@ -1060,8 +1603,13 @@ class AiderFactory:
                         os.path.join(rag_hist_dir, f"{stamp}_{task.id}.md"),
                     )
 
-                # Final cleanup
-                for f in [chat_hist, input_hist, oracle_session, oracle_transcript]:
+                # Final cleanup (keep active chat history in session_dir for resumption)
+                for f in [
+                    oracle_session,
+                    oracle_cost_sidecar,
+                    oracle_transcript,
+                    _pair_capture,
+                ]:
                     if os.path.exists(f):
                         os.remove(f)
 
@@ -1082,6 +1630,7 @@ class AiderFactory:
                     cwd=self.project_dir,
                     env={**os.environ, **(task.rag_env or {})},
                 )
+                self.last_test_result[task.test_cmd] = p.returncode == 0
                 if p.returncode == 0:
                     log.info(f"✅ TASK SUCCESS [{task.id}]: final test check passed.")
                     return True

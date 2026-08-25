@@ -6,10 +6,16 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
+_python_dir = os.path.dirname(os.path.abspath(__file__))
+if _python_dir not in sys.path:
+    sys.path.insert(0, _python_dir)
+
 import yaml
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -82,19 +88,98 @@ class Task:
     yes_always: Optional[bool] = None
     auto_accept_architect: Optional[bool] = None
     auto_commits: Optional[bool] = None
+    auto_lint: Optional[bool] = None
+    lint_cmd: Optional[str] = None
     suggest_shell_commands: Optional[bool] = None
     detect_urls: Optional[bool] = None
     disable_playwright: Optional[bool] = None
+    history_stem: Optional[str] = None
 
 
 class AiderFactory:
-    def __init__(self, project_dir: str, session_name: Optional[str] = None, session_dir: Optional[str] = None):
+    def __init__(
+        self,
+        project_dir: str,
+        session_name: Optional[str] = None,
+        session_dir: Optional[str] = None,
+    ):
         self.project_dir = Path(project_dir)
         self.session_name = session_name or "default"
-        self.session_dir = Path(session_dir) if session_dir else self.project_dir / ".aider_factory" / "sessions" / self.session_name
+        self.session_dir = (
+            Path(session_dir)
+            if session_dir
+            else self.project_dir / ".aider_factory" / "sessions" / self.session_name
+        )
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.tasks: dict[str, Task] = {}
         self.last_test_result: dict[str, bool] = {}
+
+    def _get_state_files(self) -> list[str]:
+        d = str(self.session_dir)
+        return [
+            os.path.join(d, ".aider.chat.history.md"),
+            os.path.join(d, ".aider.input.history"),
+            os.path.join(d, ".aider.llm.history"),
+            os.path.join(d, ".oracle_session.json"),
+            os.path.join(d, ".oracle_session.json.costs.json"),
+            os.path.join(d, ".oracle_debate_session.json"),
+            os.path.join(d, ".debate_aider_history.md"),
+            os.path.join(d, ".oracle_chat.history.md"),
+            os.path.join(d, ".pair_capture.log"),
+        ]
+
+    def _get_vault_path(self, active_path: str, stem: str) -> str:
+        vault_dir = os.path.join(str(self.session_dir), "chat_history")
+        base = os.path.basename(active_path)
+        mapping = {
+            ".aider.chat.history.md": f".aider.chat.history_{stem}.md",
+            ".aider.input.history": f".aider.input.history_{stem}",
+            ".aider.llm.history": f".aider.llm.history_{stem}",
+            ".oracle_session.json": f".oracle_session_{stem}.json",
+            ".oracle_session.json.costs.json": f".oracle_session_{stem}.json.costs.json",
+            ".oracle_debate_session.json": f".oracle_debate_session_{stem}.json",
+            ".debate_aider_history.md": f".debate_aider_history_{stem}.md",
+            ".oracle_chat.history.md": f".oracle_chat.history_{stem}.md",
+            ".pair_capture.log": f".pair_capture_{stem}.log",
+        }
+        return os.path.join(vault_dir, mapping.get(base, f"{base}_{stem}"))
+
+    def _swap_in_state(self, stem: str):
+        import shutil
+        active_files = self._get_state_files()
+        for f in active_files:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+        for active_path in active_files:
+            vault_path = self._get_vault_path(active_path, stem)
+            if os.path.exists(vault_path):
+                try:
+                    shutil.copy2(vault_path, active_path)
+                except OSError:
+                    pass
+
+    def _swap_out_state(self, stem: str):
+        import shutil
+        vault_dir = os.path.join(str(self.session_dir), "chat_history")
+        os.makedirs(vault_dir, exist_ok=True)
+        active_files = self._get_state_files()
+        for active_path in active_files:
+            vault_path = self._get_vault_path(active_path, stem)
+            if os.path.exists(active_path):
+                try:
+                    shutil.copy2(active_path, vault_path)
+                except OSError:
+                    pass
+            else:
+                # Sync deletions from Active Stage to Vault
+                if os.path.exists(vault_path):
+                    try:
+                        os.remove(vault_path)
+                    except OSError:
+                        pass
 
     def add_task(self, task: Task):
         self.tasks[task.id] = task
@@ -110,12 +195,13 @@ class AiderFactory:
     def _run_oracle_job(self, task: Task) -> bool:
         """Run oracle_agent.py in programmatic job mode directly via the active interpreter."""
         job = task.oracle or {}
-        
+
         # Resolve script path relative to this file
         pkg_python_dir = os.path.dirname(os.path.abspath(__file__))
         oracle_script = os.path.join(pkg_python_dir, "oracle_agent.py")
-        
+
         import sys
+
         if os.path.exists(oracle_script):
             cmd = [sys.executable, oracle_script]
         else:
@@ -175,17 +261,20 @@ class AiderFactory:
         The audit always SUCCEEDS as a DAG node — any ungrounded quotes are recorded in the
         report, which the Tier-2 (post_validate) task keys off. Non-fatal on error."""
         v = task.validate or {}
-        
+
         pkg_python_dir = os.path.dirname(os.path.abspath(__file__))
         validate_script = os.path.join(pkg_python_dir, "validator.py")
-        
+
         import sys
+
         if os.path.exists(validate_script):
             base_cmd = [sys.executable, validate_script]
         else:
-            validate = os.path.join(self.project_dir, ".aider_factory", "bash", "validate")
+            validate = os.path.join(
+                self.project_dir, ".aider_factory", "bash", "validate"
+            )
             base_cmd = [validate] if os.path.exists(validate) else ["aider-validate"]
-            
+
         env = os.environ.copy()
         if task.rag_env:
             env.update(task.rag_env)
@@ -319,7 +408,9 @@ class AiderFactory:
         root = str(self.project_dir)
 
         # Resolve config paths: prioritize .aider_factory/ then fall back to root
-        local_aider_factory_conf = os.path.join(root, ".aider_factory", ".aider.conf.yml")
+        local_aider_factory_conf = os.path.join(
+            root, ".aider_factory", ".aider.conf.yml"
+        )
         root_aider_conf = os.path.join(root, ".aider.conf.yml")
         aider_conf = (
             local_aider_factory_conf
@@ -345,6 +436,10 @@ class AiderFactory:
             "aider",
             "--no-check-model-accepts-settings",
             "--no-show-model-warnings",
+            "--no-check-update",
+            "--no-show-release-notes",
+            "--no-notifications",
+            "--no-analytics",
             "--model",
             task.model,
             "--edit-format",
@@ -448,7 +543,7 @@ class AiderFactory:
                 stderr=subprocess.STDOUT,
                 text=True,
             )
-            passed = (p.returncode == 0)
+            passed = p.returncode == 0
             self.last_test_result[gate_cmd] = passed
             return passed, p.stdout or ""
         except Exception as e:
@@ -500,13 +595,21 @@ class AiderFactory:
                         except Exception:
                             pass
                 if _files:
-                    prompt += "\n\n<project_files>\n" + "\n\n".join(_files) + "\n</project_files>"
+                    prompt += (
+                        "\n\n<project_files>\n"
+                        + "\n\n".join(_files)
+                        + "\n</project_files>"
+                    )
         elif d.get("mode") == "code":
             # Build code context block: failure log + full file contents.
             _ctx = []
             _fl = d.get("failure_log")
             if _fl:
-                _ctx.append("<failing_test_output>\n```\n" + _fl[-4000:] + "\n```\n</failing_test_output>")
+                _ctx.append(
+                    "<failing_test_output>\n```\n"
+                    + _fl[-4000:]
+                    + "\n```\n</failing_test_output>"
+                )
 
             # Pass the full file contents ONLY on Turn 1 to warm up Oracle's KV cache.
             if not turn:
@@ -524,7 +627,9 @@ class AiderFactory:
                         except Exception:
                             pass
                 if _files:
-                    _ctx.append("<project_files>\n" + "\n\n".join(_files) + "\n</project_files>")
+                    _ctx.append(
+                        "<project_files>\n" + "\n\n".join(_files) + "\n</project_files>"
+                    )
             _ctx_block = ("\n\n" + "\n\n".join(_ctx)) if _ctx else ""
 
             prompt = (
@@ -556,7 +661,15 @@ class AiderFactory:
                                 _file_ctx.append(f"File: {_rf}\n```\n{_fh.read()}\n```")
                         except Exception:
                             pass
-            _file_block = ("\n\n<project_files>\n" + "\n\n".join(_file_ctx) + "\n</project_files>") if _file_ctx else ""
+            _file_block = (
+                (
+                    "\n\n<project_files>\n"
+                    + "\n\n".join(_file_ctx)
+                    + "\n</project_files>"
+                )
+                if _file_ctx
+                else ""
+            )
 
             prompt = (
                 "You are the Knowledge Oracle reviewing the Architect's analysis "
@@ -792,7 +905,8 @@ class AiderFactory:
                     )
 
         ledger = deliberate.new_ledger(issue_id)
-        last_proposal, state = "", "continue"
+        last_proposal = seed if d.get("draft_mode") else ""
+        state = "continue"
         transcript = [f"# Deliberation transcript — {issue_id}\n"]
         # Accumulated debate memory fed to EVERY architect turn (each architect turn is a
         # fresh process with no chat memory). Architect side = its PROPOSAL line only (the
@@ -946,7 +1060,9 @@ class AiderFactory:
         # Archive the oracle transcript before the next aider task deletes it.
         # The aider session setup (line 780) removes .oracle_chat.history.md, so
         # if we don't archive here, the debate's retrieved chunks are lost.
-        _ot = os.path.join(self.project_dir, ".aider_factory", ".oracle_chat.history.md")
+        _ot = os.path.join(
+            self.project_dir, ".aider_factory", ".oracle_chat.history.md"
+        )
         if os.path.exists(_ot):
             import datetime
             import shutil
@@ -983,6 +1099,16 @@ class AiderFactory:
         return True
 
     def run_task(self, task: Task) -> bool:
+        if task.history_stem:
+            self._swap_in_state(task.history_stem)
+
+        try:
+            return self._execute_task_node(task)
+        finally:
+            if task.history_stem:
+                self._swap_out_state(task.history_stem)
+
+    def _execute_task_node(self, task: Task) -> bool:
         # Edit-node self-gate: a task that applies a deliberation verdict runs only when
         # that verdict is an agreed, gate-backed resolution; otherwise hold for a human.
         if task.verdict_gate:
@@ -1040,18 +1166,10 @@ class AiderFactory:
             max_outer_loops = 1
 
         for attempt in range(max_outer_loops):
-            chat_hist = os.path.join(
-                str(self.session_dir), ".aider.chat.history.md"
-            )
-            input_hist = os.path.join(
-                str(self.session_dir), ".aider.input.history"
-            )
-            llm_hist = os.path.join(
-                str(self.session_dir), ".aider.llm.history"
-            )
-            oracle_session = os.path.join(
-                str(self.session_dir), ".oracle_session.json"
-            )
+            chat_hist = os.path.join(str(self.session_dir), ".aider.chat.history.md")
+            input_hist = os.path.join(str(self.session_dir), ".aider.input.history")
+            llm_hist = os.path.join(str(self.session_dir), ".aider.llm.history")
+            oracle_session = os.path.join(str(self.session_dir), ".oracle_session.json")
             oracle_cost_sidecar = os.path.join(
                 str(self.session_dir), ".oracle_session.json.costs.json"
             )
@@ -1064,15 +1182,11 @@ class AiderFactory:
             oracle_transcript = os.path.join(
                 str(self.session_dir), ".oracle_chat.history.md"
             )
-            _pair_capture = os.path.join(
-                str(self.session_dir), ".pair_capture.log"
-            )
+            _pair_capture = os.path.join(str(self.session_dir), ".pair_capture.log")
             # Retain chat history and input history across attempts, clear transient sidecars
             for f in [
                 oracle_session,
                 oracle_cost_sidecar,
-                oracle_debate_session,
-                debate_aider_history,
                 oracle_transcript,
                 _pair_capture,
             ]:
@@ -1082,7 +1196,9 @@ class AiderFactory:
             root = str(self.project_dir)
 
             # Resolve config paths: prioritize .aider_factory/ then fall back to root
-            local_aider_factory_conf = os.path.join(root, ".aider_factory", ".aider.conf.yml")
+            local_aider_factory_conf = os.path.join(
+                root, ".aider_factory", ".aider.conf.yml"
+            )
             root_aider_conf = os.path.join(root, ".aider.conf.yml")
             base_aider_conf = (
                 local_aider_factory_conf
@@ -1115,6 +1231,10 @@ class AiderFactory:
                 conf_data["auto-accept-architect"] = bool(task.auto_accept_architect)
             if task.auto_commits is not None:
                 conf_data["auto-commits"] = bool(task.auto_commits)
+            if task.auto_lint is not None:
+                conf_data["auto-lint"] = bool(task.auto_lint)
+            if task.lint_cmd is not None:
+                conf_data["lint-cmd"] = task.lint_cmd
             if task.suggest_shell_commands is not None:
                 conf_data["suggest-shell-commands"] = bool(task.suggest_shell_commands)
             if task.detect_urls is not None:
@@ -1127,7 +1247,9 @@ class AiderFactory:
                     yaml.safe_dump(conf_data, f)
                 aider_conf = session_aider_conf
             except Exception as e:
-                log.warning(f"⚠️ Could not write session config {session_aider_conf}: {e}")
+                log.warning(
+                    f"⚠️ Could not write session config {session_aider_conf}: {e}"
+                )
                 aider_conf = base_aider_conf
 
             local_aider_factory_settings = os.path.join(
@@ -1137,13 +1259,19 @@ class AiderFactory:
             aider_settings = (
                 local_aider_factory_settings
                 if os.path.exists(local_aider_factory_settings)
-                else (root_aider_settings if os.path.exists(root_aider_settings) else None)
+                else (
+                    root_aider_settings if os.path.exists(root_aider_settings) else None
+                )
             )
 
             cmd = [
                 "aider",
                 "--no-check-model-accepts-settings",
                 "--no-show-model-warnings",
+                "--no-check-update",
+                "--no-show-release-notes",
+                "--no-notifications",
+                "--no-analytics",
                 "--model",
                 task.model,
                 "--editor-model",
@@ -1170,16 +1298,36 @@ class AiderFactory:
             if task.map_refresh is not None:
                 cmd.extend(["--map-refresh", str(task.map_refresh)])
             if task.map_multiplier_no_files is not None:
-                cmd.extend(["--map-multiplier-no-files", str(task.map_multiplier_no_files)])
+                cmd.extend(
+                    ["--map-multiplier-no-files", str(task.map_multiplier_no_files)]
+                )
             if task.max_chat_history_tokens is not None:
-                cmd.extend(["--max-chat-history-tokens", str(task.max_chat_history_tokens)])
+                cmd.extend(
+                    ["--max-chat-history-tokens", str(task.max_chat_history_tokens)]
+                )
 
             if task.auto_commits is not None:
-                cmd.append("--auto-commits" if task.auto_commits else "--no-auto-commits")
+                cmd.append(
+                    "--auto-commits" if task.auto_commits else "--no-auto-commits"
+                )
+            if task.auto_lint is not None:
+                cmd.append(
+                    "--auto-lint" if task.auto_lint else "--no-auto-lint"
+                )
+            if task.lint_cmd is not None:
+                cmd.extend(["--lint-cmd", task.lint_cmd])
             if task.auto_accept_architect is not None:
-                cmd.append("--auto-accept-architect" if task.auto_accept_architect else "--no-auto-accept-architect")
+                cmd.append(
+                    "--auto-accept-architect"
+                    if task.auto_accept_architect
+                    else "--no-auto-accept-architect"
+                )
             if task.suggest_shell_commands is not None:
-                cmd.append("--suggest-shell-commands" if task.suggest_shell_commands else "--no-suggest-shell-commands")
+                cmd.append(
+                    "--suggest-shell-commands"
+                    if task.suggest_shell_commands
+                    else "--no-suggest-shell-commands"
+                )
             if task.detect_urls is not None:
                 cmd.append("--detect-urls" if task.detect_urls else "--no-detect-urls")
 
@@ -1238,7 +1386,7 @@ class AiderFactory:
 
                 test_proc.wait()  # Wait for the process to finish
                 out = "".join(output_lines)
-                self.last_test_result[task.test_cmd] = (test_proc.returncode == 0)
+                self.last_test_result[task.test_cmd] = test_proc.returncode == 0
 
                 if test_proc.returncode == 0:
                     log.info(
@@ -1325,13 +1473,23 @@ class AiderFactory:
             if task.yes_always is not None:
                 env["AIDER_YES_ALWAYS"] = "true" if task.yes_always else "false"
             if task.disable_playwright is not None:
-                env["AIDER_DISABLE_PLAYWRIGHT"] = "true" if task.disable_playwright else "false"
+                env["AIDER_DISABLE_PLAYWRIGHT"] = (
+                    "true" if task.disable_playwright else "false"
+                )
             if task.auto_accept_architect is not None:
-                env["AIDER_AUTO_ACCEPT_ARCHITECT"] = "true" if task.auto_accept_architect else "false"
+                env["AIDER_AUTO_ACCEPT_ARCHITECT"] = (
+                    "true" if task.auto_accept_architect else "false"
+                )
             if task.auto_commits is not None:
                 env["AIDER_AUTO_COMMITS"] = "true" if task.auto_commits else "false"
+            if task.auto_lint is not None:
+                env["AIDER_AUTO_LINT"] = "true" if task.auto_lint else "false"
+            if task.lint_cmd is not None:
+                env["AIDER_LINT_CMD"] = task.lint_cmd
             if task.suggest_shell_commands is not None:
-                env["AIDER_SUGGEST_SHELL_COMMANDS"] = "true" if task.suggest_shell_commands else "false"
+                env["AIDER_SUGGEST_SHELL_COMMANDS"] = (
+                    "true" if task.suggest_shell_commands else "false"
+                )
             if task.detect_urls is not None:
                 env["AIDER_DETECT_URLS"] = "true" if task.detect_urls else "false"
 
@@ -1382,8 +1540,20 @@ class AiderFactory:
                     shell=True,
                     cwd=self.project_dir,
                     env=env,
-                    stdin=subprocess.DEVNULL,
+                    stdin=subprocess.PIPE,
                 )
+
+                try:
+                    # Send 'd\n' (Don't ask again) to gracefully reject mid-run interactive prompts
+                    # like "Add file to the chat?" or "Run shell command?", preventing the LLM from
+                    # getting distracted and dropping commits. For prompts without a (D) option
+                    # (e.g. "Create new file?"), 'd' is invalid, triggering an EOFError on the
+                    # next read which safely accepts the default [Yes].
+                    process.stdin.write(b"d\n")
+                    process.stdin.flush()
+                    process.stdin.close()
+                except Exception:
+                    pass
 
                 # Wait for Aider to finish
                 process.wait()
@@ -1462,8 +1632,6 @@ class AiderFactory:
                 for f in [
                     oracle_session,
                     oracle_cost_sidecar,
-                    oracle_debate_session,
-                    debate_aider_history,
                     oracle_transcript,
                     _pair_capture,
                 ]:
@@ -1487,7 +1655,7 @@ class AiderFactory:
                     cwd=self.project_dir,
                     env={**os.environ, **(task.rag_env or {})},
                 )
-                self.last_test_result[task.test_cmd] = (p.returncode == 0)
+                self.last_test_result[task.test_cmd] = p.returncode == 0
                 if p.returncode == 0:
                     log.info(f"✅ TASK SUCCESS [{task.id}]: final test check passed.")
                     return True

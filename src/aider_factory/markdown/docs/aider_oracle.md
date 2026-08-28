@@ -101,6 +101,8 @@ The Knowledge Oracle provides both a search/query interface and a full-featured 
 | `--clear` | None | Wipes active session files (`.oracle_session.json`, `.oracle_debate_session.json`, transcripts). |
 | `--list` | None | Lists all available LanceDB tables in the active `ORACLE_RAG_DB_DIR`. |
 
+> **Auto-Validation Trigger:** While `--claims-only` can be invoked manually as a flag, the Oracle also runs this validation *automatically* on every standard generation if the `ORACLE_CLAIMS_ONLY=1` environment variable is exported.
+
 ### LanceDB Database Maintenance Interface
 
 | Maintenance Flag | Arguments | Operational Behavior |

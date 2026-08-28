@@ -67,7 +67,7 @@ COST_PATTERN = re.compile(
     re.IGNORECASE,
 )
 ```
-Tokens with metric suffixes (`k`, `M`) are mathematically expanded (e.g., $1.5\text{k} \rightarrow 1500$). The total run cost is the exact sum of all matched `msg` (message) costs.
+Tokens with metric suffixes (`k`, `M`) are stripped of commas and mathematically expanded (e.g., $1.5\text{k} \rightarrow 1500$). The total run cost is the exact sum of all matched `msg` (message) costs.
 
 ### 3.3 Session Cost Accumulation (`cost_tracker.py`)
 The `cost_tracker.py` module maintains the cumulative session cost across multiple invocations. It reads and writes to a sidecar file (`.oracle_session.json.costs.json`) and formats token counts and USD costs deterministically.

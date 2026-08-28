@@ -89,6 +89,7 @@ class RAGChunk(LanceModel):
 ### Multi-Format Processing
 - **AST-Aware Code Chunking**: Code files are parsed using `tree-sitter-language-pack`. AST nodes are chunked by structural boundaries (functions, classes, methods). If a single AST node exceeds `code_chunk_size` (default: 2000 chars), the engine falls back to line-level splitting with 3-line overlap while preserving the AST symbol metadata (`_text_split_fallback`).
 - **Docling Multi-Format Extraction**: Digital PDFs, Office files (`.docx`, `.pptx`, `.xlsx`), HTML, and AsciiDoc are processed via `docling_runner.py` in an isolated subprocess (`uv run --isolated --with docling>=2.0.0`). Preserves document structural headers (`# Document Metadata`), author attribution, and embedded Markdown tables.
+- **Smart Docling Routing**: When `use_docling: true` and `docling_do_ocr: false` are set, the engine performs a rapid pre-check on PDFs using PyMuPDF (`fitz`). If the PDF lacks a meaningful embedded text layer (i.e., it is a pure scanned image), the pipeline automatically bypasses Docling and routes the document directly to the Vision OCR engine. This prevents Docling from hanging or failing silently on pure scans.
 - **Vision OCR & CER Gate**: Scanned documents and raw images are rasterized to PNGs via PyMuPDF (`fitz`) at 150 DPI. OCR vision requests run sequentially or in parallel (`ocr_parallel: 8`). Character Error Rate (CER) is computed on normalized alphanumeric text:
   $$\text{CER}(\text{ref}, \text{hyp}) = \frac{\text{LevenshteinDistance}(\text{ref}_{\text{alphanumeric}}, \text{hyp}_{\text{alphanumeric}})}{\text{Length}(\text{ref}_{\text{alphanumeric}})}$$
   If CER $> \text{cer\_threshold}$ (0.05), page OCR is retried up to `ocr_max_retries` (default: 2). If CER remains $> 0.40$ on digital PDFs, the engine falls back to the embedded PDF text layer.
@@ -99,6 +100,28 @@ class RAGChunk(LanceModel):
   4. **Headless Playwright Fallback**: Launches headless Chromium via Playwright for JavaScript SPAs.
   5. **Deterministic Naming**: Output files are written to `.aider_factory/markdown/lanceDB/<collection>/<domain>_<path_stem>.md` (or `.pdf`) and incrementally indexed.
 - **Atomic Fenced Code Block Chunking**: Documents and OCR sidecars are processed via a semantic chunker that preserves the opening and closing fences of oversized Markdown code blocks (` ``` ` or `~~~`), preventing mid-block fracturing that confuses language models.
+
+### The Multimodal Trade-off: Docling vs. Vision LLMs
+The pipeline offers a binary architectural choice for document extraction, controlled by the `use_docling` YAML toggle:
+1. **Structural Parsing (`use_docling: true`)**: Uses Docling/PyMuPDF. Mathematically perfect for dense text, layouts, and tables. **Trade-off:** It is blind to the *meaning* of images/diagrams, replacing them with `<!-- image -->` tags. Because text embedding models cannot "see" images, these diagrams are effectively invisible to RAG retrieval. (Recommended for standard code/docs).
+2. **Vision-Language Models (`use_docling: false`)**: Rasterizes every page to an image and sends it to the configured `ocr_agent`. The VLM "reads" the page and writes textual descriptions of diagrams/flowcharts, converting visual knowledge into searchable text tokens. **Trade-off:** Slower ingestion and minor text degradation/hallucinations on dense paragraphs. (Recommended for highly visual textbooks or slide decks).
+
+### Configuring Local Vision Models (`llama.cpp`)
+The AI Factory is completely decoupled from any specific Vision model. It sends standard OpenAI-compatible image payloads to the `ocr_api_base`. To use advanced local OCR models via `llama-server`:
+
+1. **The Vision Projector (`mmproj`)**: Local VLMs require *two* files. You must configure your `llama-server` (e.g., in `models.ini`) to load both the main model and the vision projector:
+   ```ini
+   [unlimited-ocr:latest]
+   model = /path/to/Unlimited-OCR-Q4_K_M.gguf
+   mmproj = /path/to/mmproj-Unlimited-OCR-F16.gguf
+   ```
+2. **Prompt Tuning**: Different models require highly specific instruction prompts. You must override the `ocr_prompt` in your `.env.yml` to match the model's training:
+
+| Model Family | Recommended `ocr_prompt` Override in `.env.yml` |
+| :--- | :--- |
+| **GLM-OCR** / **Qwen2-VL** | `"Extract text, tables, math, code, and documentation into clean Markdown. Preserve all structural integrity."` (Default) |
+| **Unlimited-OCR** / **DeepSeek-OCR** | `"<|grounding|>Convert the document to markdown."` |
+| **Plain Text (Unlimited-OCR)** | `"Free OCR."` (Extracts raw text without layout/bounding boxes) |
 
 ### Memory Bounds & Compaction
 - **Buffered Streaming Ingestion (`FLUSH_CHUNK_THRESHOLD`)**: To cap RAM usage during large codebase builds, chunks are buffered in memory and flushed to LanceDB once the queue reaches `FLUSH_CHUNK_THRESHOLD = 2000` chunks. This writes partial progress to disk so unexpected interruptions do not lose previously processed documents.

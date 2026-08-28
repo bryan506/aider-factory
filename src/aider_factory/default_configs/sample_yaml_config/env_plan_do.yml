@@ -52,10 +52,10 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         vectordb_overwrite: false # rewrite all documents to lanceDB
         ocr_prompt: "Extract text, tables, math, code, and documentation into clean Markdown. Preserve all structural integrity."
         query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: " # important for embedder chunk retrieval
-        chunk_size_chars: 800 # Max characters per text chunk
-        chunk_overlap_chars: 100  # Overlap characters on consecutive chunks
-        recall_k: 30 # Number of Stage 1 dense vector candidates before ranking
-        top_k: 5 # Number of Stage 2 semantic chunks returned to prompt context
+        chunk_size_chars: 1500 # Max characters per text chunk
+        chunk_overlap_chars: 300  # Overlap characters on consecutive chunks
+        recall_k: 75 # Number of Stage 1 vector candidates before ranking
+        top_k: 20  # Number of Stage 2 chunks returned to prompt context
         cer_threshold: 0.05 # OCR Character Error Rate before text fallback
         ocr_max_retries: 2  # Number of OCR attempts on transient failures
         ocr_parallel: 8 # Number of parallel OCR workers (1 per page)

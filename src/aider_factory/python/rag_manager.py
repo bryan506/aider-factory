@@ -547,7 +547,7 @@ def _ocr_image(png_path, model_id, api_base, prompt_text, max_tokens=2048, timeo
     raise last_err
 
 
-def _chunk(markdown_text, chunk_size_chars=800, chunk_overlap_chars=100):
+def _chunk(markdown_text, chunk_size_chars=1500, chunk_overlap_chars=300):
     """Header-aware, then size-capped — but fenced code blocks are atomic (never split
     mid-block), so code inside vignettes/READMEs/papers stays intact."""
     from langchain_text_splitters import (
@@ -646,8 +646,8 @@ def ingest(
     embed_model,
     embed_backend="sentence-transformers",
     embed_api_base=None,
-    chunk_size_chars=800,
-    chunk_overlap_chars=100,
+    chunk_size_chars=1500,
+    chunk_overlap_chars=300,
     ocr_api_base=None,
     ocr_agent=None,
     ocr_prompt=DEFAULT_OCR_PROMPT,
@@ -1163,7 +1163,7 @@ def _from_config(yaml_path):
         embed_api_base=embed_api_base,
         ocr_api_base=endpoints.get("ocr_api_base"),
         ocr_agent=phase_models.get("ocr_agent", ""),
-        ocr_prompt=DEFAULT_OCR_PROMPT,
+        ocr_prompt=phase_rag.get("ocr_prompt", DEFAULT_OCR_PROMPT),
         overwrite=phase_rag.get("vectordb_overwrite", False),
         cer_threshold=0.05,
         ocr_max_retries=2,

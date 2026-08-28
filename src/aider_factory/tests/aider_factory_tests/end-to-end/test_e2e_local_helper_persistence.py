@@ -138,6 +138,10 @@ class TestE2ELocalHelperPersistence(unittest.TestCase):
         with open(session_file, "r", encoding="utf-8") as f:
             turn_1_data = json.load(f)
         self.assertEqual(len(turn_1_data), 3)  # System + User + Assistant
+        # Verify master mode captured both skills and reference schema
+        turn_1_prompt = turn_1_data[1]["content"]
+        self.assertIn("<skills_reference>", turn_1_prompt)
+        self.assertIn("<reference_schema>", turn_1_prompt)
 
         # Turn 2: Follow-up question (should hit warm prefix cache)
         t0 = time.perf_counter()

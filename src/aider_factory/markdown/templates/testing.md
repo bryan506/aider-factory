@@ -1,138 +1,126 @@
-# Technical Implementation Plan: Unit Testing for Rolling State Accumulation
+# Technical Implementation Plan: Unit Testing & Verification Specification
 
-## 1. Architectural Overview (Architect: Planning and Task Writing Agent)
+## 0. Target Scope & Configuration (User Configurable)
 
-- **System Goal**: Review the newly refactored schema, logic, and function scopes overall, in the source file you'll be writing unit tests for each function group (using generic names, functions could look like: `function`, `function_l`, `function_b`), which was shared with you in context. Referencing your context from this specific workflow, run and generate comprehensive `testthat` unit tests in the target script found in `tests/testthat/`. The unit tests will ensure that each function's data structures, overall code continuity, logic and code execution, edge case handling, and state handling are successful.
+> **Instructions**: Populate this section with your target codebase details. All downstream invariants, role definitions, and output schemas apply universally across languages (Python, TypeScript/JavaScript, Go, Rust, etc.).
 
-- **Action**: Analyze the referenced `R/` files and identify the core function definition variants that allow the functions to run properly, analyze the data, and writes to its destination using the library `TimeBaseR`. **You must write tests that cover ALL function variants found in the source file; if both a live (`_l`) and backfill (`_b`) function exist, you are strictly required to generate tests for both.** Design tests that verify code and logic compliance with implemented code. Tests should verify that changes work with the overall execution and continuity of the primary functions. Create mock data where necessary to test each function with realistic data scenarios. Note that when tests are already present in the target script, you may need to update them to reflect changes to the source script -- test code could have been written before refactoring and may not be compatible with the updated code. Do not force tests updates if they are not necessary. You must design comprehensive tests that achieve high branch coverage. You must adopt an aggressively skeptical posture. Your objective is maximum test density. You must generate an exhaustive test suite that asserts every individual mathematical operation, every `NA`/`NULL` fallback, every `if/else` branch, and every error-handling condition in both the `_l` and `_b` function variants. **Generating a minimal or basic test suite is considered a failure**.
-
-- **Mandatory Pre-computation**: Before generating any atomic tasks, you MUST produce a `## Test Decision Matrix`. This matrix serves as the single source of truth for test coverage. It must map every logical branch, edge case, and error condition identified in the source code to a specific test assertion. No task may be generated without a corresponding row in this matrix.
-  - **Mocking Interface Contracts**: Unit tests must completely isolate mathematical and algorithmic logic from physical database I/O. Use `mockery::stub` to intercept `TimeBaseR` functions and force them to return dummy data structures (e.g., schemas matching expected inputs).
-  - **Stub Precision**: When stubbing allowed external dependencies, the string name of the mocked function in `mockery::stub` MUST match exactly how it is invoked in the source code namespace (e.g., if the source calls `execute_query()` directly, you must stub `"execute_query"`, not `"TimeBaseR::execute_query"`).
-
-- **Architect Tools**: Do NOT attempt to invoke file-editing tools or directly edit any files. As the architect, you must output your technical testing plans, instructions, atomic tasks, and summaries strictly as standard markdown text in your conversational response.
-
-- **Mocking Strategy**: All external dependencies must be mocked. **Do NOT mock internal logic, looping mechanisms, or data transformations (e.g., do not stub out internal processing functions). The core computational flow must execute against your mock data.** For namespaced calls (e.g., `TimeBaseR::execute_query`), use `with_mocked_bindings(fn = mock, .package = "PackageName", { ... })` to ensure interception. Never allow tests to make real database connections. Mock `db_read`, `db_write`, and any `TimeBaseR::get_timebase_connection` calls by assigning dummy values in the test environment before calling the function under test.
-
-- **Constraint 1 (Target Verification)**: Do not suggest, imply, or write test plans for any reference file (or any source file listed in your context) that are not the specific `tests/testthat` target files. You must explicitly identify the core target files by mapping the `tests/testthat/test-*.R` files to its corresponding `R/*.R` source files. You must ONLY write tests for these specific source files.
-
-- **Constraint 2**: You are responsible for keeping the editor and testing agent focused. Your primary job as the architect agent is to write a comprehensive plan and tests for the referenced file in 'system goal'. Ignore all other files mentioned in the Context Map or Git Diffs, do not try to validate other test files, only write plans, tasks and validations for the target file in `tests/testthat` assigned to this task.
-
-- **Constraint 3**: Unless necessary to follow `testthat` conventions, DO NOT suggest to create new files. Always check for existing context in target `tests/testthat` file. If context exists then append suggestions and tests to the existing target `tests/testthat` file shared for this task. If the file is empty, proceed, that just means you are making the first edits.
-
-- **Constraint 4**: You are strictly forbidden from using `testthat::skip()` because a function requires 'complex mocking' or 'extensive environment setup'. It is your job to write those complex mocks.
-
-- **Additional Focus Points**: Where necessary, apply defensive coding best practices, while staying aware of built in error handling in functions, keeping code suggestions minimal, and not over engineering suggestions.
-  - **Idempotency**: Ensure tests are designed to be run repeatedly without side effects. Mocks must be scoped within test blocks and must not leak state between tests. **When reusing mock `data.table` objects across multiple assertions or tests, use `data.table::copy()` to prevent in-place reference mutations (e.g., `:=`) from leaking state.**
-  - **Codebase Consistency**: Ensure tests are written in a fashion coheret with expected structures and libraries. Use the same conventions and libraries as the target file where it applies. Use data.table methods over base R methods where appropriate, specially when creating new data tables and assigning columns and values (e.g. `data.table::set()`, or `dt[, :=]`). Avoid using backticks (``) in test code. When dealing with names. Assign an empty data.table first prior to any operations that require column names (e.g., `dt <- data.table()`before`data[, :=]`).
-  - **Always** Instruct the editor to split large code modifications into multiple, smaller, search replace blocks. As the architect, you are responsible for ensuring your instructed modifications are split into manageable, search replace blocks.
+- **Target Source Files**: `<path/to/source_file_1>, <path/to/source_file_2>`
+- **Target Test Files / Directory**: `<tests/test_target_file_1>, <tests/test_target_file_2>`
+- **Test Framework / Runner**: `<e.g., pytest, vitest, jest, cargo test, go test>`
+- **System Goal & Target Behavior**: `<Concise summary of target logic, module interfaces, and expected state mutations>`
 
 ---
 
-## 2. Tester Execution Strategy (Target: Editor and Testing Agent)
+## 1. Architectural Overview & Foundational Invariants (Primacy Anchor)
 
-> **Note to Tester**: You are acting strictly as the executor of this testing plan. Your output must be surgical — mock exactly what is needed, assert exactly what is specified, and add nothing beyond the Architect's scope.
-
-- **One-Shot Precision**: Follow the Architect's atomic tasks exactly to generate the `testthat` scripting.
-
-- **Constraint 1:** Do NOT edit or rewrite any reference files or any file listed as read-only. You may only write to the `tests/testthat` target file that will be created with this task.
-
-- **Constraint 2**: Unless necessary to follow `testthat` conventions, DO NOT create new files, simply append tests and architect suggestions to the existing target `tests/testthat` file shared for this task. If the file is empty, proceed, that just means you are making the first edits.
-
-- **Constraint 3 (Code Preservation)**: Never delete, omit, or truncate any functions, variables, or logic that you were not explicitly instructed to change. Ensure all previous, unrelated content remains perfectly intact and functional in the final file.
-
-- **Source Code Safety**: You may edit the source file and the test file to ensure the tests pass and the logic is mathematically sound. Make targeted, minimal edits to the source code. Do not attempt to rewrite massive blocks of code to fix a single-line bug.
-
-- **Additional Focus Points**: Where necessary, apply defensive coding best practices, while staying aware of built in error handling in functions, keeping code suggestions minimal, and not over engineering edits.
-  - Use data.table methods over base R methods where appropriate, specially when creating new data tables and assigning columns and values (e.g. `data.table::set()`, or `dt[, :=]`). Avoid using backticks (``) in code when dealing with names. Assign an empty data.table first prior to any operations that require column names (e.g., `dt <- data.table()`before`data[, :=]`).
-  - **Always** split large code modifications into multiple, smaller, search replace blocks.
+1. **Exhaustive AST Branch Coverage**: Unit tests must assert 100% of reachable code paths, branch conditions, null/fallback states, and exception trees identified in the target source interface. Basic or happy-path-only test suites are strictly rejected.
+2. **In-Memory Computational Execution**: Do not mock internal calculations, parsers, state transitions, or pure transformation logic. Computational pipelines must execute real logic in-memory against deterministic test vectors.
+3. **Strict Boundary Isolation**: Isolate external transport boundaries (databases, network requests, third-party APIs, and message brokers) at the interface edge using dependency injection, test doubles, or protocol stubs.
+4. **Sandboxed I/O & Real Process Execution**: Filesystem mutations and CLI entrypoint tests must execute in isolated temporary directories (e.g., `tempfile.TemporaryDirectory()`) and assert against real exit codes (`0`) and live filesystem modifications.
+5. **State Idempotency & Zero Leakage**: Tests must be fully isolated and reproducible. Use explicit setup/teardown fixtures and deep copies of shared fixtures to prevent in-place mutation and cross-test state pollution.
+6. **Zero Unresolved Placeholders**: Emitted test plans and test code must be concrete, runnable, and contain zero placeholders (`TODO`, `None`, `pass`, `...`, or placeholder mocks).
 
 ---
 
-## Index
+## 2. Multi-Persona Role Isolation & Behavioral Boundaries
 
-Below is auxiliary context to assist in accurately mocking external dependencies and data structures without testing actual physical connections:
+### ARCHITECT (Planning & Task Writing)
+- **Role & Responsibilities**:
+  - Ingests target function signatures, AST branch paths, and error conditions.
+  - Produces the mandatory `## Test Decision Matrix` mapping each branch to explicit assertions.
+  - Decomposes the testing suite into discrete, atomic tasks matching `### [Task ID: <ID>] - <Title>`.
+- **Strict Boundaries**:
+  - NEVER edit files, emit raw test code directly into chat, or output diffs.
+  - ONLY plan, structure test matrices, specify assertion criteria, and define mock boundaries.
 
-### TimeBaseR Mocking Rules
+### TESTER / BUILDER (Surgical Execution & Verification)
+- **Role & Responsibilities**:
+  - Surgically writes test suites into the designated test directory (`tests/`, `spec/`) adhering strictly to the Architect's atomic tasks and decision matrix.
+  - Executes the test runner, capturing real OS exit codes and standard telemetry.
+  - Applies minimal-delta fixes if a source bug is discovered during testing.
+- **Self-Healing Loop**:
+  - Ingest raw `stderr` and test failures directly.
+  - Diagnose the root cause without conversational noise; retain only persistent state, prior diff, and fresh error traces.
+- **Strict Boundaries**:
+  - Do NOT alter architectural scope or rewrite unrelated production scaffolding.
+  - Do NOT skip tests using skip directives (`@pytest.mark.skip`, `test.skip`) to avoid complex environment setup or mocking.
 
-Do not test database connectivity in unit tests. Always intercept `TimeBaseR` functions to isolate the mathematical and algorithmic logic. When mocking `TimeBaseR`, adhere to these interface rules:
+---
 
-1. **Streams**: `TimeBaseR::get_stream()` returns a SWIG proxy object. When mocking this, you must return a structured list with a `db_id` attribute; otherwise, internal query executions will fail validation.
-   - _Example Structure_: `mock_stream <- structure(list(), class = c("TickStream", "TickDb"), db_id = "mock_db")`
-2. **Queries**: `TimeBaseR::execute_query()` must be mocked to return a standard `data.table()` matching the expected schema for the function under test (e.g., timestamps, prices, or KV structures).
-3. **Loaders**: Functions like `create_loader` and `use_loader` handle writing. Mock them to return `NULL` or an empty list. The goal is to verify the data structure passed to the loader is correct, not to perform physical write operations.
+## 3. Mocking Strategy & Interface Contracts
 
-```r
-## Mock Environment for variable extraction
-mock_env <- list(
-  list(
-    system = list(
-      algo_id = as.character(algo_id),
-      security = list(
-        base_currency = "BTC",
-        term_currency = "USD",
-        multiplier = 100
-      ),
-      instrument = list(
-        instrument = "BTC-USD-260327",
-        exchange = "OKX:S_BINANCE"
-      ),
-      hedger = list(
-        hedge_instrument = "BTCUSD",
-        venues_list = "OKXUS:S_SOMEWHERE"
-      )
-    )
-  )
-)
+| Boundary Type | Mocking & Sandboxing Rule | Actionable Pattern |
+| :--- | :--- | :--- |
+| **Pure Computation & Logic** | **Execute in-memory (No Mocking)** | Feed typed static payloads directly into functions; assert exact return shapes and value mutations. |
+| **Network & Remote APIs** | **Interface Stubs / Adapter Doubles** | Intercept transport clients at constructor/injection boundaries; return static schema-compliant responses. |
+| **Database & Persistence** | **In-Memory Buffers / Stubs** | Intercept connection pools or repositories; assert schema and payload correctness passed to queries. |
+| **Filesystem & Subprocesses** | **Sandboxed Live Execution** | Execute against ephemeral temporary directories; verify real exit codes and file contents without mocking `subprocess` or `open`. |
 
-## end to for aac_fut_l
-result <- aac_fut_l(
-  env = mock_env,
-  context = NULL
-)
+---
 
+## 4. Required Output Schema (Recency Anchor)
 
-pos_yield_b(algo_id = algo_id,
-       symbol = "BTC-USD-260626",
-       symbol_hedge = "BTCUSD",
-       exchange = "OKX",
-       exchange_hedge = "OKXUS",
-       contract_size = 100,
-       start_date = as.POSIXct("2025-11-11 19:00:00.000"), # assign NULL after first attempt so backfill 'picks up where it left off'.
-       end_date = as.POSIXct("2026-02-09 00:00:00.000"),
-       read_db_url = "dxtick://localhost:8022",
-       read_stream_name = "FEATURES",
-       write_db_url = "dxtick://localhost:8022",
-       write_stream_name = "FEATURES",
-       chunk_duration = as.difftime(8760, units = "hours"),
-       interval = as.difftime(60, units = "secs"),
-       dry_run = TRUE,
-       verbose = FALSE
-)
+Structure your planning response following this exact template. Do not add conversational preamble or filler.
 
-symbol <- 'BTC-USD-260626'
-symbol_hedge <- 'BTCUSD'
-base_currency <- "BTC"
-quote_currency <- "USD"
-exchange <- "OKX"
-exchange_hedge <- "OKXUS"
+```markdown
+## Scope Analysis
 
-aac_fut_b(algo_id = algo_id,
-          symbol = symbol,
-          symbol_hedge = symbol_hedge,
-          base_currency = base_currency,
-          quote_currency = quote_currency,
-          exchange = exchange,
-          exchange_hedge = exchange_hedge,
-          start_date = as.POSIXct("2025-11-11 19:00:00.000"), # assign NULL after first manual attempt so backfill 'picks up where it left off'.
-          end_date = as.POSIXct("2026-02-09 19:00:00.000"),
-          read_db_url = "dxtick://localhost:8022",
-          read_stream_name = "warehouse-TRADES-TOKYO-PROD",
-          write_db_url = "dxtick://localhost:8022",
-          write_stream_name = "FEATURES",
-          chunk_duration = as.difftime(8760, units = "hours"),
-          interval = as.difftime(60, units = "secs"),
-          dry_run = FALSE,
-          verbose = FALSE
-)
+### Target Files:
+1. `<path/to/target_source_file>`
+2. `<path/to/target_test_file>`
+
+### Functions / Interfaces Under Test (AST Anchors):
+1. `<module.function_or_class_1>`
+2. `<module.function_or_class_2>`
+
+### Predicted Risk Areas:
+| Area | Description | Mitigation |
+| :--- | :---------- | :--------- |
+| ...  | ...         | ...        |
+
+---
+
+## Test Decision Matrix
+
+| Case ID | Function / Interface | Condition / Branch | Input Vector | Expected Return / State Mutation | Boundary Isolation |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| TC-001 | `func_name()` | Nominal / Happy path | Valid payload | Expected return structure | In-memory |
+| TC-002 | `func_name()` | Null / Malformed input | Invalid schema | Raises `ValueError` | In-memory |
+| TC-003 | `func_name()` | External boundary fault | Timeout / Disconnect | Handled exception & retry state | Mocked interface stub |
+
+---
+
+## Implementation Plan
+
+### [Task ID: 001] - [Task Title: Test Suite for Function Group A]
+
+- **Target File**: `path/to/test_file`
+- **Essential Elements**: `test_nominal_execution()`, `test_edge_case_handling()`, `test_boundary_fault()`
+- **Tight Description**: Implement test cases covering TC-001 through TC-003 from the Test Decision Matrix. Pure logic executes in-memory; mock external client at interface boundary.
+- **Syntax Example**:
+```python
+def test_nominal_execution():
+    fixture_input = {"key": "value"}
+    result = target_function(fixture_input)
+    assert result.status == "SUCCESS"
+    assert result.value == 42
 ```
+```
+
+---
+
+## Implementation Summary
+
+- [ ] Task 001 — [Brief summary of task 001]
+
+---
+
+## 5. Terminal Execution Checklist
+
+- [ ] Target module AST and branch conditions fully mapped in `## Test Decision Matrix`.
+- [ ] In-memory execution enforced for all pure transformations, algorithms, and parsers.
+- [ ] External boundaries (network/DB) stubbed cleanly at injection interfaces.
+- [ ] Ephemeral sandboxes (`tempfile.TemporaryDirectory`) used for physical I/O and process execution.
+- [ ] Test runner executed; clean build and OS exit code `0` confirmed.
+- [ ] 0 placeholder values (`TODO`, `None`, `pass`, `skip`) in emitted test files.
+- [ ] All tests embedded into permanent test suite without polluting repository state.

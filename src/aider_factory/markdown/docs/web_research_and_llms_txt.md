@@ -91,6 +91,9 @@ re.findall(r'\[.*?\]\((https?://[^\s\)]+|/[^\s\)]+|[^\s\)]+\.md|[^\s\)]+\.html|[
 ```
 Relative URLs are automatically resolved against the manifest's base URL using `urllib.parse.urljoin`.
 
+### Sitemap Regex Filtering (`--grep`)
+When harvesting URLs via `--sitemap`, the pipeline supports powerful pre-ingestion filtering using `--grep` and `--grep-exclude`. These flags compile the provided strings as case-insensitive regular expressions (`re.IGNORECASE`), allowing flexible, pattern-based inclusion or exclusion of massive sitemaps before they reach the ingestion engine.
+
 ### Headless Playwright JIT Provisioning
 For Single-Page Applications (SPAs) where Trafilatura yields $< 100$ bytes, `rag_web.py` falls back to Playwright. If the Chromium binary is missing, it catches the `Executable doesn't exist` exception and executes:
 ```python

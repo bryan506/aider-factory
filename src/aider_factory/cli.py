@@ -104,6 +104,31 @@ TEST_CAMEL_RE = re.compile(
 )
 
 
+def _ensure_git_repo(cwd: str):
+    """Ensure git repository is initialized with default user config for Aider."""
+    git_dir = os.path.join(cwd, ".git")
+    if not os.path.exists(git_dir):
+        try:
+            subprocess.run(["git", "init"], cwd=cwd, capture_output=True, check=False)
+            subprocess.run(
+                ["git", "config", "user.name", "AI Factory"],
+                cwd=cwd,
+                capture_output=True,
+                check=False,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "factory@aider.local"],
+                cwd=cwd,
+                capture_output=True,
+                check=False,
+            )
+            subprocess.run(
+                ["git", "add", "-A"], cwd=cwd, capture_output=True, check=False
+            )
+        except Exception:
+            pass
+
+
 def _is_test_path(rel_path: str) -> bool:
     """Classify whether a normalized relative path is a test file or inside a test directory."""
     clean_path = rel_path.replace("\\", "/").strip("/")
@@ -290,6 +315,7 @@ def _generate_repo_maps(cwd, map_tokens=2048, target="all", is_global=False):
         projects = [os.path.abspath(cwd)]
 
     for proj in projects:
+        _ensure_git_repo(proj)
         af_dir = os.path.join(proj, ".aider_factory")
         os.makedirs(af_dir, exist_ok=True)
         p_name = os.path.basename(proj)
@@ -576,6 +602,7 @@ def init_user_project(cwd=None):
         cwd = os.getcwd()
     _register_project(cwd)
     _load_env_files(cwd)
+    _ensure_git_repo(cwd)
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
     default_configs_dir = os.path.join(pkg_dir, "default_configs")
 
@@ -658,9 +685,9 @@ def init_user_project(cwd=None):
             content = f.read()
 
         # Standardized dynamic instantiation
-        content = content.replace('name: "My Project"', f'name: "{sensible_name}"')
-        content = content.replace(
-            'working_directory: "/path/to/project"', f'working_directory: "{cwd}"'
+        content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{sensible_name}"', content)
+        content = re.sub(
+            r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd}"', content
         )
 
         # Quickstart: Auto-discover a target file and context file
@@ -696,13 +723,14 @@ def init_user_project(cwd=None):
             if context_file:
                 break
 
-        content = content.replace(
-            "target_files: []", f'target_files:\n        - "{target_file}"'
+        content = re.sub(
+            r"target_files:\s*\[\]", lambda _: f'target_files:\n        - "{target_file}"', content
         )
         if context_file:
-            content = content.replace(
-                "context_files_job: []",
-                f'context_files_job:\n        - "{context_file}"',
+            content = re.sub(
+                r"context_files_job:\s*\[\]",
+                lambda _: f'context_files_job:\n        - "{context_file}"',
+                content,
             )
 
         # Quickstart: Auto-discover cluster configuration
@@ -714,34 +742,41 @@ def init_user_project(cwd=None):
 
             cluster_config = _discover_cluster_config()
             if cluster_config:
-                content = content.replace(
-                    'architect_api_base: "http://192.168.100.2:8080/v1"',
-                    f'architect_api_base: "{cluster_config["architect_api_base"]}"',
+                content = re.sub(
+                    r'architect_api_base:\s*".*?"',
+                    lambda _: f'architect_api_base: "{cluster_config["architect_api_base"]}"',
+                    content,
                 )
-                content = content.replace(
-                    'editor_api: "http://192.168.100.1:8080/v1"',
-                    f'editor_api: "{cluster_config["editor_api"]}"',
+                content = re.sub(
+                    r'editor_api:\s*".*?"',
+                    lambda _: f'editor_api: "{cluster_config["editor_api"]}"',
+                    content,
                 )
-                content = content.replace(
-                    'rag_agent_api: "http://192.168.100.1:8080/v1"',
-                    f'rag_agent_api: "{cluster_config["rag_agent_api"]}"',
+                content = re.sub(
+                    r'rag_agent_api:\s*".*?"',
+                    lambda _: f'rag_agent_api: "{cluster_config["rag_agent_api"]}"',
+                    content,
                 )
                 if "architect_agent" in cluster_config:
-                    content = content.replace(
-                        'architect_agent: "gemini/gemini-3.6-flash"',
-                        f'architect_agent: "{cluster_config["architect_agent"]}"',
+                    content = re.sub(
+                        r'architect_agent:\s*".*?"',
+                        lambda _: f'architect_agent: "{cluster_config["architect_agent"]}"',
+                        content,
                     )
-                    content = content.replace(
-                        'editor_agent: "gemini/gemini-2.5-flash"',
-                        f'editor_agent: "{cluster_config["editor_agent"]}"',
+                    content = re.sub(
+                        r'editor_agent:\s*".*?"',
+                        lambda _: f'editor_agent: "{cluster_config["editor_agent"]}"',
+                        content,
                     )
-                    content = content.replace(
-                        'editor_agent_test: "gemini/gemini-2.5-flash"',
-                        f'editor_agent_test: "{cluster_config["editor_agent"]}"',
+                    content = re.sub(
+                        r'editor_agent_test:\s*".*?"',
+                        lambda _: f'editor_agent_test: "{cluster_config["editor_agent"]}"',
+                        content,
                     )
-                    content = content.replace(
-                        'editor_agent_test_fallback: "gemini/gemini-2.5-flash"',
-                        f'editor_agent_test_fallback: "{cluster_config["architect_agent"]}"',
+                    content = re.sub(
+                        r'editor_agent_test_fallback:\s*".*?"',
+                        lambda _: f'editor_agent_test_fallback: "{cluster_config["architect_agent"]}"',
+                        content,
                     )
         except Exception:
             pass
@@ -775,6 +810,27 @@ def init_user_project(cwd=None):
         src_conventions = os.path.join(pkg_dir, "markdown", "CONVENTIONS.md")
         if os.path.exists(src_conventions):
             shutil.copy(src_conventions, local_conventions)
+
+    # 6. Copy markdown templates and examples into .aider_factory/markdown/ if missing (non-destructive)
+    pkg_markdown_dir = os.path.join(pkg_dir, "markdown")
+    local_markdown_dir = os.path.join(local_aider_factory_dir, "markdown")
+    if os.path.isdir(pkg_markdown_dir):
+        if not os.path.exists(local_markdown_dir):
+            shutil.copytree(pkg_markdown_dir, local_markdown_dir)
+        else:
+            for root, dirs, files in os.walk(pkg_markdown_dir):
+                rel_path = os.path.relpath(root, pkg_markdown_dir)
+                dst_root = (
+                    local_markdown_dir
+                    if rel_path == "."
+                    else os.path.join(local_markdown_dir, rel_path)
+                )
+                os.makedirs(dst_root, exist_ok=True)
+                for f in files:
+                    src_file = os.path.join(root, f)
+                    dst_file = os.path.join(dst_root, f)
+                    if not os.path.exists(dst_file):
+                        shutil.copy2(src_file, dst_file)
 
 
 def ensure_aider_installed():

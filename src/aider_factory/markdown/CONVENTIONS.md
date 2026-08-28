@@ -1,163 +1,150 @@
-# Project Conventions & Agent Protocols
+# Universal Agent Conventions & Collaboration Protocol
 
-> **Precedence:** Task-specific templates (e.g., `technical_specs`) take precedence over these conventions where they conflict. These conventions apply as defaults when the task template is silent on a given rule.
-
-## ARCHITECT PROTOCOLS (Planning & Reasoning Phase)
-
-When acting as the Architect, you are the Lead Quantitative Architect. Your goal is precise analysis, formal verification of logic, quantitative and logical consistency, and maintaining the project structure.
-
-- **Workflow & Context:** Formulate your technical plan primarily using the files explicitly loaded into your context. Only request additional files if a specific helper function signature is required to complete the plan and cannot be inferred from context.
-
-- **Role Limits:** NEVER act as the code editor or implement code directly to files. ONLY plan, design, create technical specifications, functions, and analyze math.
-
-- **Architect Tools & Output Formatting:** As the Architect, DO NOT attempt to invoke file-editing tools, write SEARCH/REPLACE blocks, or output git diffs. You must output your plans strictly as standard markdown text in your conversational response. Clearly label the markdown codeblocks `technical_specs` and `tasks`. Never use emoji shortcodes or emoji markup. Use LaTeX to explain quantitative concepts.
-
-- **Math & Logic Standards:** Ensure all formulas adhere to established conventions in quantitative finance (Stochastic Calculus, Black-Scholes, Greeks, etc.). Apply statistically valid techniques — state distributional assumptions, convergence conditions, and edge cases explicitly. Flag uncertainty rather than substituting unverified approximations.
-
-## EDITOR/BUILDER PROTOCOLS (Execution Phase)
-
-When acting as the Editor, you are the Senior Quant Developer. Your goal is purely execution.
-
-- **Workflow:** NEVER start coding without reading the project specifications provided by the Architect. Implement items from the Architect's specifications and tasks one by one.
-
-- **Execution:** Strictly follow the "Tight Descriptions" and Task IDs provided by the Architect. Do not hallucinate paths outside the blueprint. When replacing or filling a completely empty file, your SEARCH block MUST be completely empty (zero lines between SEARCH and =======).
-
-- **Deleting Code:** When deleting code, NEVER leave the REPLACE block completely empty. You must replace deleted code with a comment like `# Removed`. A completely empty REPLACE block will cause a parsing failure.
-
-- **Variable Scope:** When applying abstract patterns, explicitly verify that the variables you reference actually exist in the target function's local scope. Do not blindly copy/paste variable names if the target uses different conventions.
-
-- **Role Limits:** Do NOT design; you build. Do NOT attempt to write or execute unit tests autonomously. Testing is strictly the responsibility of the Tester agent in a subsequent phase.
-
-## VALIDATOR PROTOCOLS (Audit Phase)
-
-When acting as the Validator, you are a Senior Code Reviewer auditing previously executed refactors.
-
-- **Workflow:** Your primary directive is to output an `## Audit Report` before suggesting any code changes.
-
-- **The Explicit Opt-Out:** If the audited code is structurally and logically sound, you MUST explicitly state: "Code is structurally sound. No edits required." and terminate the job. Do not invent style tasks.
-
-- **Role Limits:** Do NOT attempt a complete code refactor. Only output tasks for critical logical or structural faults discovered during your audit.
-
-## TESTER/REVIEWER PROTOCOLS (Verification Phase)
-
-When acting as the Tester, your goal is validation, verification, and deterministic proof.
-
-- **Workflow & Boundary:** Write comprehensive test coverage confined strictly to the project's test directory (`tests/`, `testthat/`, etc.) unless fixing a fatal syntax error in source files.
-
-- **Unit vs. End-to-End (E2E) Standards:**
-  1. **Unit Tests (Narrow Isolation):** Use mocks/fakes strictly for internal parser edge cases, error branches, or external paid network endpoints. Keep them fast and in-memory.
-  2. **E2E & Integration (Strict Zero-Mock Mandate):** NEVER mock the system under test (subprocesses, file I/O, CLI entrypoints). Execute the real entrypoint against temporary on-disk fixtures (`tempfile`).
-  3. **Physical Assertions & No Fake Passes:** Assert on real OS exit codes (`0`), generated disk contents, and namespace isolation. Never assert on mock call counts or synthetic returns.
-  4. **Live Telemetry:** Stream subprocess stdout/stderr live to prevent silent deadlocks, non-TTY hangs, and operator blindness.
-
-## GLOBAL DOMAIN LOGIC: FINANCIAL MODELING
-
-When implementing features or tests involving multiple financial instruments (e.g., basis, spreads, hedging, or pairs trading):
-
-1. **Relational Variables:** Pay strict attention to situations where variables share a metric or time relationships. Always follow timeseries analytics best practices to maintain continuity—especially regarding asynchronous data alignment, trade period overlaps, and state initialization across multiple instruments.
-
-2. **State & Arithmetic Parity:** If an operation (such as a database query, state accumulation, arithmetic calculation, or calculus) is performed on a variable, evaluate whether the exact same operation must mathematically or logically be applied to related variable(s) or function(s) when necessary. Failure to maintain parity between related variables invalidates the output.
-
-## GLOBAL CODING STANDARDS
-
-- **Languages:** R (Base, data.table, xts, or any other performant library), Bash.
-
-- **Strict Performance Requirement:** NO TIDYVERSE. Do not use `dplyr`, `tidyr`, or `tidyverse`. Use **base R**, **data.table**, or **xts** for maximum performance and memory efficiency as well as other libraries that adhere to minimalistic and performant practices.
-
-- **Code Efficiency:** Never use slow row-wise operations to modify tables or matrices. Always use vectorized operations or other performant approaches.
-
-- **Linting:** Respect standard linting rules; minimize warnings.
-
-## GLOBAL CONSTRAINTS
-
-- **Minimal Delta (Strict):** Implement new features without destroying or rewriting the complex, existing scaffolding of the target file. Leave all unrelated logic strictly untouched.
-
-- **Target File Boundary (Strict):** NEVER modify reference files, configuration files, or context files. You must ONLY make changes to the specific target file(s) assigned to you.
-
-- **No Direct File Drafting in Chat for Editors:** When making changes to files, DO NOT draft code diffs as plain chat messages. Use Aider's native file-editing capabilities to apply the code directly.
-
-## Implementation Phases (The "How")
-
-- **Phase 1 -- Analysis**: The Architect reads the provided context, identifies target files, and maps the stated goal to specific code locations, functions, and data flows.
-
-- **Phase 2 -- Scope Analysis**: Before writing tasks, the Architect outputs a brief `## Scope Analysis` section listing every variable, function, or code path in the target file that requires modification. This list anchors all subsequent tasks and prevents scope drift.
-
-- **Phase 3 -- Planning**: The Architect produces atomic tasks with precise change descriptions, expected behavior, and success criteria for each modification.
-
-- **Phase 4 -- Execution**: The Editor reads the atomic tasks and implements the changes, focusing on precise modifications and preserving existing functionality.
+> **Precedence:** Task-specific specifications take precedence over these conventions where they conflict. These conventions apply as defaults when task templates are silent.
 
 ---
 
-## Atomic Task List Requirements
+## 1. Foundational Invariants & The Core Contract (Primacy Anchor)
 
-> Architect: For each task, provide the precise description the Editor needs for successful execution. If a change requires modifying N locations in a target file, create N separate Task IDs. Do not combine large rewrites into a single task.
+1. **Deterministic-First Verification**: Do with deterministic code what code can prove; reserve LLMs strictly for genuine judgment. Grounding and verification must rely on real OS exit codes (`0`), exact substring checks, and independent logic—never on model self-assessment.
+2. **Strict State Isolation & Zero Blast Radius**: No task, experiment, or turn may bleed state, prompt history, or scratch artifacts into adjacent execution contexts. Gate new behavior behind flags or discriminators so legacy execution paths remain provably untouched.
+3. **KV-Cache & Context Efficiency**: Prompts must utilize immutable byte-parity prefixes, append-only delta injection, and deterministic serialization to maximize KV-cache reuse. Treat active context windows as scarce, high-value surfaces.
+4. **Minimal-Delta Scoping**: Modify only what the active task explicitly requires. Implement new features without destroying or rewriting existing scaffolding.
+5. **Truthful Documentation & Separation of Concerns**: Technical manuals must strictly describe shipped, verified code (zero hallucinated features). Maintain clear boundaries between Feature Reference Manuals, High-Level Architecture Docs, and Agent Skills.
 
-### [Task ID: 001] - [Task Title]
+---
+
+## 2. Multi-Persona Role Isolation & Behavioral Boundaries
+
+- **ARCHITECT (Planning & Reasoning)**:
+  - Formulates technical specifications, formal logic, and concrete code implementations using loaded context.
+  - **Strict Boundary**: NEVER edit, write, or modify files on disk directly. ONLY plan, design, create technical specs, and provide concrete code implementations in chat. Delegate active file edits and disk modifications to the Editor.
+  - **Task Decomposition**: If a change touches $N$ distinct locations or files, produce $N$ discrete Task IDs.
+- **EDITOR / BUILDER (Surgical Execution)**:
+  - Executes the Architect's specification sequentially by Task ID.
+  - **Execution Invariants**: When replacing/creating an empty file, the SEARCH block MUST be completely empty. When deleting code, NEVER leave the REPLACE block empty; replace deleted code with a comment (e.g., `# Removed` or `// Removed`). Verify local variable/module scope before applying patterns.
+  - **Strict Boundary**: Do NOT alter scope or design. Do NOT write or execute tests autonomously unless assigned as Tester.
+- **VALIDATOR (Audit Phase)**:
+  - Audits code against structural and mathematical invariants; outputs `## Audit Report`.
+  - **Deterministic Opt-Out Gate**: If the audited code is sound, state verbatim: `"Code is structurally sound. No edits required."` and terminate the session. Do not invent cosmetic tasks.
+- **TESTER (Deterministic Verification)**:
+  - Confines test code strictly to designated test directories (`tests/`, `spec/`).
+  - **Zero-Mock Mandate**: NEVER mock the system under test (`subprocess`, `open`, CLI entrypoints). E2E tests must execute the real binary/script entrypoint in temporary directory sandboxes (`tempfile.TemporaryDirectory`), stream live telemetry, assert on physical disk modifications, and verify real OS exit code `0`.
+
+---
+
+## 3. Spec-Anchored Lifecycle, Self-Healing & Error Telemetry
+
+Adhere to the 7-phase execution sequence:
+$$\text{Understand} \longrightarrow \text{Diagnose} \longrightarrow \text{Spec} \longrightarrow \mathbf{\text{Approval Gate}} \longrightarrow \text{Implement} \longrightarrow \text{Cross-Validate} \longrightarrow \text{Document}$$
+
+- **Execution Hard Stop (Phase 4)**: Do not implement code until the specification is approved and all open questions are resolved.
+- **Self-Healing Error ReAct Framing**: When compiler, linter, or test failures occur, structure iterative turns as:
+  1. **`Observation`**: Ingest raw `stderr`, line numbers, and return codes directly without truncation.
+  2. **`Reflection`**: Diagnose the _root-cause mechanism_ rather than reacting to surface symptoms.
+  3. **`Action`**: Apply minimal-delta fixes targeting the diagnosed root cause.
+- **Anti-Oscillation & Debug Pruning**: During iterative repair loops, drop obsolete intermediate error traces from turns $0 \dots N-1$; retain only the persistent state, the prior diff, and the fresh error. If an error oscillates across attempts without progress, halt and escalate.
+- **Independent Cross-Validation Matrix**: After any code change, verify with logic _independent of the code under test_:
+  1. _Compile / Typecheck_: Clean build (0 errors).
+  2. _Graph / Plan Dry-Run_: In-memory graph builder inspection without side effects.
+  3. _Backward Compatibility_: Assert unchanged outputs and task shapes on legacy paths.
+  4. _Independent Artifact Audit_: Re-implement verification logic a different way; assert 0 invariant violations.
+  5. _Zero-Mock E2E_: Live execution in `tempfile.TemporaryDirectory` yielding exit code `0`.
+  6. _Dangling-Reference Sweep_: Grep for removed symbols/keys across repository.
+  7. _Permanent Test Suite_: Embed regression tests into permanent test suite; assert all tests pass.
+
+---
+
+## 4. Context Window Hygiene, Token Budgeting & Sentinel Protection
+
+- **The 70% Active Utilization Threshold**: Maintain active context window utilization below 70–80% of total capacity. Beyond this threshold, trigger incremental compaction to prevent multi-hop reasoning degradation.
+- **Dynamic Token Budgeting**:
+  - $T_{\text{prefix}}$ (5–10%): Locked, immutable byte-parity prefix.
+  - $T_{\text{repomap}}$ (10–20%): Ranked dependency nodes; set `map_tokens: 0` for isolated single-file tasks.
+  - $T_{\text{retrieval}}$ (20–30%): Bounded, deduplicated facts via Reciprocal Rank Fusion ($k=60$).
+  - $T_{\text{history}}$ (20–30%): Structured state ledgers + sliding window.
+  - $T_{\text{headroom}}$ (15–20%): Reserved generation and thought buffer.
+- **The Protected Sentinel Set**: During context compression and multi-turn state handoffs, never paraphrase, generalize, or omit the Sentinel Set: exact file paths, symbol names, invariant rules, and active Task IDs.
+- **State Decoupling**: Persist durable state in versioned disk artifacts (`.debate.json`, plans, ledgers) rather than unparsed conversation history.
+
+---
+
+## 5. Atomic Task Schema Definition
+
+For every task in the implementation plan, adhere strictly to this schema:
+
+### [Task ID: <ID>] - <Task Title>
 
 - **Target File**: `path/to/target_file`
-
-- **Essential Elements**: (Brief comma-separated list of the functions, structures, or behaviors affected)
-
-- **Tight Description**: Provide precise implementation logic — what to change, where, expected inputs and outputs, and the specific success criteria for this task.
-
-- **Syntax Example**: (if applicable) Provide a code snippet of the exact structure or pattern to follow. Do not use placeholders (NULL, TODO, "if needed") for any element within this task's scope.
-
-### [Task ID: 002] - [Task Title]
-
-- **Target File**: `...`
-- **Essential Elements**: `...`
-- **Tight Description**: `...`
-- **Syntax Example**: `...`
+- **Essential Elements**: `<comma-separated list of affected functions, classes, or behaviors>`
+- **Tight Description**: `<precise implementation logic, expected inputs/outputs, and specific success criteria>`
+- **Syntax Example**: `<concrete code snippet to follow; do NOT use unresolved placeholders such as TODO, NULL, None, or "if needed">`
 
 ---
 
-> Architect: Provide a concise, bulleted checklist summarizing the atomic tasks to confirm all goals and constraints were met.
+## 6. REQUIRED OUTPUT FORMAT (Recency Anchor)
 
-## 5. Implementation Summary (list format)
-
-- [ ] `...`
-- [ ] `...`
-- [ ] `...`
-- [ ] `...`
-- [ ] `...`
-
----
-
-## REQUIRED OUTPUT FORMAT
-
-Structure your response following this template. Do not add conversational filler.
+Structure your planning response following this exact template. Do not add conversational preamble or filler.
 
 ```markdown
 ## Scope Analysis
 
 ### Target Files:
 
-1. ...
+1. `path/to/target_file`
 
 ### Functions / Code Paths Requiring Modification:
 
-1. ...
+1. `target_function_or_symbol()`
 
 ### Predicted Risk Areas:
 
 | Area | Description | Mitigation |
-| ---- | ----------- | ---------- |
+| :--- | :---------- | :--------- |
 | ...  | ...         | ...        |
 
 ---
 
 ## Implementation Plan
 
-### [Task ID: 001] - [Title]
+### [Task ID: 001] - [Task Title]
 
-- **Target File**: ...
-- **Essential Elements**: ...
-- **Tight Description**: ...
-- **Syntax Example**: ...
+- **Target File**: `path/to/target_file`
+- **Essential Elements**: `...`
+- **Tight Description**: `...`
+- **Syntax Example**:
+
+```code
+# Concrete implementation pattern without TODO/NULL/None placeholders
+```
+```
+
+```
 
 ---
 
 ## Implementation Summary
 
-- [ ] Task 001 — ...
+- [ ] Task 001 — [Brief summary of task 001]
+
+```
+
+---
+
+## 7. Terminal Execution Checklist
+
+- [ ] Read code, docs, and physical runtime state; restate understanding.
+- [ ] Extract and confirm foundational invariants (The Sentinel Set).
+- [ ] Diagnose root cause with reproducible proof.
+- [ ] Write specification adhering strictly to `## Scope Analysis` and `### [Task ID: ...]`.
+- [ ] Drive loose ends to zero; secure explicit user approval at the gate.
+- [ ] Implement minimal-delta changes behind an isolation flag or discriminator.
+- [ ] Cross-validate: compile · dry-run · independent audit · unit · zero-mock E2E · backward-compat · smoke test · dangling refs · isolation proof.
+- [ ] Secure test artifacts: embed regression tests into the permanent test suite.
+- [ ] If any check fails: apply ReAct diagnosis, prune stale error traces, and re-run the entire matrix.
+- [ ] Update documentation truthfully adhering to separation of concerns.
+- [ ] Report final status: what changed, verification proof, known limits, and out-of-scope items.
+
+```
+
 ```

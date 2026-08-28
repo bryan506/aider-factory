@@ -117,4 +117,4 @@ phases:
 4. **YAML Parsing Failures:** In Configuration Architect mode, the agent is instructed to return ONLY the updated YAML block. If the agent hallucinates conversational text outside the markdown fences, the deterministic parser in `bootstrap.py` attempts to extract the content between ` ```yaml ` and ` ``` `. If extraction fails, the disk write is safely aborted.
 
 ### Telemetry & Diagnostics
-- **Cost Accounting:** `aider-helper` streams responses via `litellm` and calculates costs per-token. It prints `Tokens: X sent, Y received. Cost: $Z message, $W session` to `stderr` after every turn, aggregating the total session cost in memory.
+- **Cost Accounting:** `aider-helper` queries are fully integrated into the global `cost_tracker.py` engine. It streams responses via `litellm` and calculates costs per-token. It prints `Tokens: X sent, Y received. Cost: $Z message, $W session` to `stderr` after every turn, aggregating the total session cost in memory. This means terminal assistance and configuration costs are tracked just like autonomous pipeline costs.

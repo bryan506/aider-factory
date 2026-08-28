@@ -1,0 +1,29 @@
+name: "My Project"
+
+phases:
+  - name: "Code"
+    models:
+      architect_agent: "gemini/gemini-3.7-flash"
+      editor_agent: "gemini/gemini-3.6-flash"
+      rag_agent: "gemini/gemini-3.6-flash"
+      ranking_agent: "jinaai/jina-reranker-v3.5"
+      embed_model: "gemini/text-embedding-004"
+
+    rag:
+      collection_name: "working_repo_lib"
+      retrieval_mode: top_k
+      embed_backend: "sentence-transformers"
+      query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: "
+      ocr_prompt: "<|grounding|>Convert the document to markdown."
+
+    toggles:
+      pair_programming: true
+
+    files:
+      target_files:
+        - "src/main.py"
+      context_files_job:
+        - "docs/spec.md"
+
+    plans:
+      job_one_plan: "markdown/templates/implement.md"

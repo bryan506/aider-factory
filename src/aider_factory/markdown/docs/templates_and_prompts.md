@@ -59,6 +59,8 @@ The pipeline resolves template paths using a strict 5-priority fallback mechanis
 4. **Global Package Fallback**: Checks the globally installed `aider_factory` site-packages directory using the relative path.
 5. **Global Flat Fallback**: Checks the site-packages root for the basename.
 
+> **Path Prefix Normalization QoL:** To prevent path resolution failures when copying paths directly from repo roots or package trees, `resolve_template_path` automatically strips `.aider_factory/` or `src/aider_factory/` prefixes from input strings before executing the fallback cascade. Users can safely copy-paste raw relative paths from any repository view into their YAML configuration.
+
 **Relative Scoping Differences:**
 - **Phase `plans:` block**: Paths are resolved relative to `.aider_factory/`.
   - *Example*: `"markdown/templates/implement.md"` resolves to `.aider_factory/markdown/templates/implement.md`.

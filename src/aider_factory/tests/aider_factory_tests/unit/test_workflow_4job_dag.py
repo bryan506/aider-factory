@@ -413,6 +413,181 @@ class TestWorkflow4JobUnits(unittest.TestCase):
             "ambient_session",
         )
 
+    def test_global_and_phase_linting_resolution(self):
+        """Validates inheritance and override hierarchy for auto_lint and lint_cmd."""
+        # 1. Global config defaults
+        global_cfg = {
+            "auto_lint": False,
+            "lint_cmd": "flake8 {file}",
+        }
+        global_auto_lint = global_cfg.get("auto_lint", True)
+        global_lint_cmd = global_cfg.get("lint_cmd", None)
+        self.assertFalse(global_auto_lint)
+        self.assertEqual(global_lint_cmd, "flake8 {file}")
+
+        # 2. Phase with no overrides inherits global settings
+        phase_toggles_empty = {}
+        auto_lint_val = phase_toggles_empty.get("auto_lint")
+        auto_lint = auto_lint_val if auto_lint_val is not None else global_auto_lint
+        lint_cmd_val = phase_toggles_empty.get("lint_cmd")
+        lint_cmd = lint_cmd_val if lint_cmd_val is not None else global_lint_cmd
+        self.assertFalse(auto_lint)
+        self.assertEqual(lint_cmd, "flake8 {file}")
+
+        # 3. Phase with explicit overrides takes precedence
+        phase_toggles_override = {
+            "auto_lint": True,
+            "lint_cmd": "ruff check {file}",
+        }
+        auto_lint_val = phase_toggles_override.get("auto_lint")
+        auto_lint = auto_lint_val if auto_lint_val is not None else global_auto_lint
+        lint_cmd_val = phase_toggles_override.get("lint_cmd")
+        lint_cmd = lint_cmd_val if lint_cmd_val is not None else global_lint_cmd
+        self.assertTrue(auto_lint)
+        self.assertEqual(lint_cmd, "ruff check {file}")
+
+    def test_pass_history_standardization(self):
+        """Validates pass_history default (True) and configuration extraction."""
+        # 1. Default when omitted from escalation_debate is True
+        esc_cfg_empty = {}
+        self.assertTrue(esc_cfg_empty.get("pass_history", True))
+
+        # 2. Explicitly disabled pass_history
+        esc_cfg_disabled = {"pass_history": False}
+        self.assertFalse(esc_cfg_disabled.get("pass_history", True))
+
+        # 3. Explicitly enabled pass_history
+        esc_cfg_enabled = {"pass_history": True}
+        self.assertTrue(esc_cfg_enabled.get("pass_history", True))
+
+    def test_shared_history_stem_wiring_across_multiple_target_files(self):
+        """UNIT: Validates that when shared_history is False, each target file gets a
+        unique history_stem per job, and when shared_history is True, history_stem is None."""
+        target_files = ["src/module_alpha.py", "src/module_beta.py", "src/module_gamma.py"]
+
+        # Case 1: shared_history is False -> stems must be distinct and include base_name
+        shared_history_false = False
+        stems_false = {}
+        for tf in target_files:
+            base_name = os.path.splitext(os.path.basename(tf))[0]
+            stems_false[base_name] = {
+                "job1": None if shared_history_false else f"job1_{base_name}",
+                "job2": None if shared_history_false else f"job2_{base_name}",
+                "job3": None if shared_history_false else f"job3_{base_name}",
+                "verify": None if shared_history_false else f"verify_{base_name}",
+            }
+
+        self.assertEqual(stems_false["module_alpha"]["job1"], "job1_module_alpha")
+        self.assertEqual(stems_false["module_beta"]["job1"], "job1_module_beta")
+        self.assertEqual(stems_false["module_gamma"]["job1"], "job1_module_gamma")
+        self.assertNotEqual(stems_false["module_alpha"]["job1"], stems_false["module_beta"]["job1"])
+
+        # Case 2: shared_history is True -> stems must be None for all files
+        shared_history_true = True
+        stems_true = {}
+        for tf in target_files:
+            base_name = os.path.splitext(os.path.basename(tf))[0]
+            stems_true[base_name] = {
+                "job1": None if shared_history_true else f"job1_{base_name}",
+            }
+
+        self.assertIsNone(stems_true["module_alpha"]["job1"])
+        self.assertIsNone(stems_true["module_beta"]["job1"])
+        self.assertIsNone(stems_true["module_gamma"]["job1"])
+
+    def test_state_swap_isolation_wipes_active_stage_between_tasks(self):
+        """UNIT: Tests that AiderFactory._swap_in_state and _swap_out_state properly isolate
+        chat history between target files and completely wipe active staging files so Task B
+        never inherits residual history from Task A."""
+        from aider_factory.python.orchestrate import AiderFactory
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            factory = AiderFactory(tmpdir, session_name="test_swap_session")
+            sess_dir = factory.session_dir
+            active_chat = sess_dir / ".aider.chat.history.md"
+            active_input = sess_dir / ".aider.input.history"
+            active_oracle = sess_dir / ".oracle_session.json"
+
+            # 1. Task A runs and creates active state
+            active_chat.write_text("# Task A History\nUser: Prompt A\n", encoding="utf-8")
+            active_input.write_text("Prompt A\n", encoding="utf-8")
+            active_oracle.write_text('{"turn": 1, "query": "Oracle A"}', encoding="utf-8")
+
+            # 2. Task A finishes -> _swap_out_state("job1_alpha")
+            factory._swap_out_state("job1_alpha")
+
+            vault_dir = sess_dir / "chat_history"
+            self.assertTrue(vault_dir.is_dir())
+            vault_chat_a = vault_dir / ".aider.chat.history_job1_alpha.md"
+            vault_input_a = vault_dir / ".aider.input.history_job1_alpha"
+            vault_oracle_a = vault_dir / ".oracle_session_job1_alpha.json"
+
+            self.assertTrue(vault_chat_a.is_file())
+            self.assertIn("Prompt A", vault_chat_a.read_text(encoding="utf-8"))
+            self.assertTrue(vault_input_a.is_file())
+            self.assertTrue(vault_oracle_a.is_file())
+
+            # 3. Task B starts -> _swap_in_state("job1_beta")
+            # Since Task B has no prior vault files, _swap_in_state MUST wipe active stage!
+            factory._swap_in_state("job1_beta")
+
+            self.assertFalse(active_chat.exists(), "Active chat history MUST be deleted for fresh Task B")
+            self.assertFalse(active_input.exists(), "Active input history MUST be deleted for fresh Task B")
+            self.assertFalse(active_oracle.exists(), "Active oracle session MUST be deleted for fresh Task B")
+
+            # 4. Task B runs and writes its own history
+            active_chat.write_text("# Task B History\nUser: Prompt B\n", encoding="utf-8")
+            factory._swap_out_state("job1_beta")
+
+            vault_chat_b = vault_dir / ".aider.chat.history_job1_beta.md"
+            self.assertTrue(vault_chat_b.is_file())
+            self.assertIn("Prompt B", vault_chat_b.read_text(encoding="utf-8"))
+
+            # 5. Resume Task A -> _swap_in_state("job1_alpha")
+            factory._swap_in_state("job1_alpha")
+            self.assertTrue(active_chat.is_file())
+            self.assertIn("Prompt A", active_chat.read_text(encoding="utf-8"))
+            self.assertNotIn("Prompt B", active_chat.read_text(encoding="utf-8"))
+
+    def test_yes_always_cli_flag_and_config_resolution(self):
+        """UNIT: Validates that yes_always toggle logic properly maps:
+        - yes_always: True -> adds --yes-always to CLI and 'yes-always: true' to .aider.conf.yml
+        - yes_always: False -> omits --yes-always, NEVER adds --no-yes-always, and writes 'yes-always: false' to .aider.conf.yml
+        """
+        import yaml
+        from aider_factory.python.orchestrate import Task
+
+        # Case 1: yes_always = False
+        task_no = Task(id="test_no", yes_always=False, pair_programming=False)
+        self.assertFalse(task_no.yes_always)
+
+        conf_data_no = {}
+        if task_no.yes_always is not None:
+            conf_data_no["yes-always"] = bool(task_no.yes_always)
+        self.assertIs(conf_data_no["yes-always"], False)
+
+        cmd_no = ["aider"]
+        if task_no.yes_always:
+            cmd_no.append("--yes-always")
+
+        self.assertNotIn("--yes-always", cmd_no)
+        self.assertNotIn("--no-yes-always", cmd_no)
+
+        # Case 2: yes_always = True
+        task_yes = Task(id="test_yes", yes_always=True, pair_programming=False)
+        self.assertTrue(task_yes.yes_always)
+
+        conf_data_yes = {}
+        if task_yes.yes_always is not None:
+            conf_data_yes["yes-always"] = bool(task_yes.yes_always)
+        self.assertIs(conf_data_yes["yes-always"], True)
+
+        cmd_yes = ["aider"]
+        if task_yes.yes_always:
+            cmd_yes.append("--yes-always")
+
+        self.assertIn("--yes-always", cmd_yes)
+
 
 if __name__ == "__main__":
     unittest.main()

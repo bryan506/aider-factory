@@ -2,6 +2,7 @@
 import os
 import sys
 import json
+import re
 import shutil
 import subprocess
 import uuid
@@ -25,12 +26,14 @@ PERSONA_PROMPT = (
     "multi-phase DAG pipeline execution configurations (.env.yml files), Aider templates, and active "
     "environment variables.\n\n"
     "You have access to the user's active .env.yml pipeline configuration inside the <active_configuration> "
-    "block. When answering questions about the active pipeline, phases, agents, models, or target files, "
-    "inspect the <active_configuration> block. You communicate with absolute precision, objectivity, and "
-    "technical clarity. You prioritize deterministic, minimal-delta edits to configurations, preserving all "
-    "inline comments and inactive blocks unless explicitly instructed to change them. When asked to modify "
-    "a configuration, apply the requested changes to <active_configuration> and return ONLY the complete, "
-    "updated YAML content inside a markdown code block."
+    "block, and the master reference schema inside the <reference_schema> block. When answering questions "
+    "about the active pipeline, phases, agents, models, or target files, inspect the <active_configuration> "
+    "block. Use <reference_schema> strictly as a read-only guide for valid schema keys and structural options. "
+    "You communicate with absolute precision, objectivity, and technical clarity. You prioritize deterministic, "
+    "minimal-delta edits to configurations, preserving all inline comments and inactive blocks unless explicitly "
+    "instructed to change them. Do NOT copy unused keys, comments, or defaults from <reference_schema> into the "
+    "target configuration unless explicitly requested. When asked to modify a configuration, apply the requested "
+    "changes to <active_configuration> and return ONLY the complete, updated YAML content inside a markdown code block."
 )
 
 TERMINAL_PERSONA_PROMPT = (
@@ -261,36 +264,36 @@ def run_bootstrap(target_dir):
     # 1. Project Identity
     sensible_name = f"{os.path.basename(os.getcwd()).replace('_', ' ').replace('-', ' ').title()} Pipeline"
     cwd = os.getcwd()
-    content = content.replace('name: "My Project"', f'name: "{sensible_name}"')
-    content = content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
+    content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{sensible_name}"', content)
+    content = re.sub(r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd}"', content)
 
     # Auto-discover cluster config and override defaults if present
     cluster_config = _discover_cluster_config()
     if cluster_config:
-        content = content.replace('architect_api_base: "http://192.168.100.2:8080/v1"', f'architect_api_base: "{cluster_config["architect_api_base"]}"')
-        content = content.replace('editor_api: "http://192.168.100.1:8080/v1"', f'editor_api: "{cluster_config["editor_api"]}"')
-        content = content.replace('rag_agent_api: "http://192.168.100.1:8080/v1"', f'rag_agent_api: "{cluster_config["rag_agent_api"]}"')
+        content = re.sub(r'architect_api_base:\s*".*?"', lambda _: f'architect_api_base: "{cluster_config["architect_api_base"]}"', content)
+        content = re.sub(r'editor_api:\s*".*?"', lambda _: f'editor_api: "{cluster_config["editor_api"]}"', content)
+        content = re.sub(r'rag_agent_api:\s*".*?"', lambda _: f'rag_agent_api: "{cluster_config["rag_agent_api"]}"', content)
         if "architect_agent" in cluster_config:
             profile["architect_agent"] = cluster_config["architect_agent"]
             profile["editor_agent"] = cluster_config["editor_agent"]
 
     # 2. Test Framework
-    content = content.replace('test_command_prefix: "docker exec -i --user myuser -w /path/to/project -e RETICULATE_PYTHON=/home/myuser/.venv-rocker/bin/python3 rocker-rstudio"', f'test_command_prefix: "{profile["test_command_prefix"]}"')
-    content = content.replace('test_runner: "Rscript .aider_factory/tests/run_tests.R {file}"', f'test_runner: "{profile["test_runner"]}"')
-    content = content.replace('test_naming_and_path: "tests/testthat/test-{stem}.R"', f'test_naming_and_path: "{profile["test_naming_and_path"]}"')
+    content = re.sub(r'test_command_prefix:\s*".*?"', lambda _: f'test_command_prefix: "{profile["test_command_prefix"]}"', content)
+    content = re.sub(r'test_runner:\s*".*?"', lambda _: f'test_runner: "{profile["test_runner"]}"', content)
+    content = re.sub(r'test_naming_and_path:\s*".*?"', lambda _: f'test_naming_and_path: "{profile["test_naming_and_path"]}"', content)
 
     # 3. Models
-    content = content.replace('architect_agent: "gemini/gemini-3.6-flash"', f'architect_agent: "{profile["architect_agent"]}"')
-    content = content.replace('editor_agent: "gemini/gemini-2.5-flash"', f'editor_agent: "{profile["editor_agent"]}"')
-    content = content.replace('editor_agent_test: "gemini/gemini-2.5-flash"', f'editor_agent_test: "{profile["editor_agent"]}"')
-    content = content.replace('editor_agent_test_fallback: "gemini/gemini-2.5-flash"', f'editor_agent_test_fallback: "{profile["architect_agent"]}"')
+    content = re.sub(r'architect_agent:\s*".*?"', lambda _: f'architect_agent: "{profile["architect_agent"]}"', content)
+    content = re.sub(r'editor_agent:\s*".*?"', lambda _: f'editor_agent: "{profile["editor_agent"]}"', content)
+    content = re.sub(r'editor_agent_test:\s*".*?"', lambda _: f'editor_agent_test: "{profile["editor_agent"]}"', content)
+    content = re.sub(r'editor_agent_test_fallback:\s*".*?"', lambda _: f'editor_agent_test_fallback: "{profile["architect_agent"]}"', content)
 
     # 4. Operating Mode
     if profile["operating_mode"] == "autonomous":
-        content = content.replace('pair_programming: true', 'pair_programming: false')
-        content = content.replace('auto_test: false', 'auto_test: true')
-        content = content.replace('yes_always: false', 'yes_always: true')
-        content = content.replace('auto_accept_architect: false', 'auto_accept_architect: true')
+        content = re.sub(r'pair_programming:\s*true', 'pair_programming: false', content)
+        content = re.sub(r'auto_test:\s*false', 'auto_test: true', content)
+        content = re.sub(r'yes_always:\s*false', 'yes_always: true', content)
+        content = re.sub(r'auto_accept_architect:\s*false', 'auto_accept_architect: true', content)
 
     # 5. File Lists
     def format_yaml_list(items):
@@ -298,29 +301,28 @@ def run_bootstrap(target_dir):
             return "[]"
         return "\n" + "\n".join(f'        - "{item}"' for item in items)
 
-    content = content.replace('target_files: []', f'target_files: {format_yaml_list(profile["target_files"])}')
-    content = content.replace('context_files_job: []', f'context_files_job: {format_yaml_list(profile.get("context_files", []))}')
-    content = content.replace('context_files_test: []', f'context_files_test: {format_yaml_list(profile.get("context_files", []))}')
+    content = re.sub(r'target_files:\s*\[\]', lambda _: f'target_files: {format_yaml_list(profile["target_files"])}', content)
+    content = re.sub(r'context_files_job:\s*\[\]', lambda _: f'context_files_job: {format_yaml_list(profile.get("context_files", []))}', content)
+    content = re.sub(r'context_files_test:\s*\[\]', lambda _: f'context_files_test: {format_yaml_list(profile.get("context_files", []))}', content)
 
     # 6. Knowledge Oracle (RAG)
     if profile["use_rag"]:
-        content = content.replace('collection_name: "working_repo_lib"', f'collection_name: "{profile["rag_collection"]}"')
-        content = content.replace('run_ocr_rag: false', 'run_ocr_rag: true')
-        content = content.replace('grounding_agent: "gemini/gemini-2.5-flash"', 'grounding_agent: ""') # Disabled by default
+        content = re.sub(r'collection_name:\s*".*?"', lambda _: f'collection_name: "{profile["rag_collection"]}"', content)
+        content = re.sub(r'run_ocr_rag:\s*false', 'run_ocr_rag: true', content)
+        content = re.sub(r'grounding_agent:\s*".*?"', 'grounding_agent: ""', content)
         if profile["rag_agent"]:
-            content = content.replace('rag_agent: "gemini/gemini-2.5-flash"', f'rag_agent: "{profile["rag_agent"]}"')
+            content = re.sub(r'rag_agent:\s*".*?"', lambda _: f'rag_agent: "{profile["rag_agent"]}"', content)
         if profile["ocr_agent"]:
-            content = content.replace('ocr_agent: "gemini/gemini-2.5-flash"', f'ocr_agent: "{profile["ocr_agent"]}"')
+            content = re.sub(r'ocr_agent:\s*".*?"', lambda _: f'ocr_agent: "{profile["ocr_agent"]}"', content)
         if profile["embed_model"]:
-            content = content.replace('embed_model: "gemini/text-embedding-004"', f'embed_model: "{profile["embed_model"]}"')
+            content = re.sub(r'embed_model:\s*".*?"', lambda _: f'embed_model: "{profile["embed_model"]}"', content)
         if profile["embed_backend"]:
-            content = content.replace('embed_backend: "sentence-transformers"', f'embed_backend: "{profile["embed_backend"]}"')
+            content = re.sub(r'embed_backend:\s*".*?"', lambda _: f'embed_backend: "{profile["embed_backend"]}"', content)
         if profile["query_prefix"]:
-            content = content.replace('query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: "', f'query_prefix: "{profile["query_prefix"]}"')
+            content = re.sub(r'query_prefix:\s*".*?"', lambda _: f'query_prefix: "{profile["query_prefix"]}"', content)
 
     # Standardize the analyze_bugs template path to use the portable src/aider_factory relative path
-    content = content.replace('template: ".aider_factory/markdown/internal/analyze_bugs.md"', 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"')
-    content = content.replace('template: "markdown/internal/analyze_bugs.md"', 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"')
+    content = re.sub(r'template:\s*"\.?\.?/?(?:aider_factory/)?markdown/internal/analyze_bugs\.md"', 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"', content)
 
     with open(target_yaml_path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -394,8 +396,8 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
                     cwd = os.getcwd()
                     with open(master_env_path, "r", encoding="utf-8") as f:
                         content = f.read()
-                    content = content.replace('name: "My Project"', f'name: "{sensible_name}"')
-                    content = content.replace('working_directory: "/path/to/project"', f'working_directory: "{cwd}"')
+                    content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{sensible_name}"', content)
+                    content = re.sub(r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd}"', content)
                     with open(file_path, "w", encoding="utf-8") as f:
                         f.write(content)
                     print(f"ℹ️ Created configuration file from template: {file_path}")
@@ -423,21 +425,49 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
     persistent_additions = ""
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
-    if not terminal_mode and "<yaml_documentation>" not in history_text:
-        yaml_docs_path = os.path.join(pkg_dir, "markdown", "yaml_docs_sample.md")
+    if not terminal_mode and "<reference_schema>" not in history_text:
+        candidate_ref_schemas = [
+            os.path.join(".aider_factory", "sample_yaml_config", "complete_env.yml"),
+            os.path.join(pkg_dir, "default_configs", "sample_yaml_config", "complete_env.yml"),
+            os.path.join(pkg_dir, "sample_yaml_config", "complete_env.yml"),
+            os.path.join(pkg_dir, "default_configs", "env.yml"),
+        ]
+        ref_schema_path = next((p for p in candidate_ref_schemas if os.path.exists(p)), None)
+        ref_schema_content = ""
+        if ref_schema_path:
+            try:
+                with open(ref_schema_path, "r", encoding="utf-8") as f:
+                    ref_schema_content = f.read()
+            except Exception:
+                pass
+        if ref_schema_content:
+            persistent_additions += f"<reference_schema>\n{ref_schema_content.strip()}\n</reference_schema>\n\n"
+
+    if (master_mode or expert_mode) and "<yaml_documentation>" not in history_text:
+        candidate_yaml_docs = [
+            os.path.join(".aider_factory", "markdown", "docs", "yaml_docs_sample.md"),
+            os.path.join(pkg_dir, "markdown", "docs", "yaml_docs_sample.md"),
+            os.path.join(pkg_dir, "markdown", "yaml_docs_sample.md"),
+        ]
+        yaml_docs_path = next((p for p in candidate_yaml_docs if os.path.exists(p)), None)
         yaml_docs = ""
-        if os.path.exists(yaml_docs_path):
+        if yaml_docs_path:
             try:
                 with open(yaml_docs_path, "r", encoding="utf-8") as f:
                     yaml_docs = f.read()
             except Exception:
                 pass
-        persistent_additions += f"<yaml_documentation>\n{yaml_docs[:15000]}\n</yaml_documentation>\n\n"
+        if yaml_docs:
+            persistent_additions += f"<yaml_documentation>\n{yaml_docs.strip()}\n</yaml_documentation>\n\n"
 
     if (master_mode or expert_mode) and "<skills_reference>" not in history_text:
-        skills_dir = os.path.join(pkg_dir, "markdown", "skills")
+        candidate_skills_dirs = [
+            os.path.join(".aider_factory", "markdown", "skills"),
+            os.path.join(pkg_dir, "markdown", "skills"),
+        ]
+        skills_dir = next((d for d in candidate_skills_dirs if os.path.isdir(d)), None)
         skills_content = ""
-        if os.path.exists(skills_dir) and os.path.isdir(skills_dir):
+        if skills_dir and os.path.isdir(skills_dir):
             for skill_file in sorted(os.listdir(skills_dir)):
                 if skill_file.endswith(".md"):
                     with open(os.path.join(skills_dir, skill_file), "r", encoding="utf-8") as f:
@@ -446,8 +476,14 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
             persistent_additions += f"<skills_reference>\n{skills_content.strip()}\n</skills_reference>\n\n"
 
     if expert_mode and "<factory_service_manual>" not in history_text:
-        manual_path = os.path.join(pkg_dir, "markdown", "factory_service_manual.md")
-        if os.path.exists(manual_path):
+        candidate_paths = [
+            os.path.join(".aider_factory", "markdown", "docs", "factory_service_manual.md"),
+            os.path.join(pkg_dir, "markdown", "docs", "factory_service_manual.md"),
+            os.path.join(os.path.dirname(os.path.dirname(pkg_dir)), "docs", "factory_service_manual.md"),
+            os.path.join(pkg_dir, "markdown", "factory_service_manual.md"),
+        ]
+        manual_path = next((p for p in candidate_paths if os.path.exists(p)), None)
+        if manual_path:
             with open(manual_path, "r", encoding="utf-8") as f:
                 manual_docs = f.read()
             persistent_additions += f"<factory_service_manual>\n{manual_docs}\n</factory_service_manual>\n\n"

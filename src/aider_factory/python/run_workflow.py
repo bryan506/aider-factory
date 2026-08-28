@@ -47,6 +47,9 @@ def _expand_file_list(file_patterns, base_dir):
     if not file_patterns:
         return []
 
+    if isinstance(file_patterns, str):
+        file_patterns = [file_patterns]
+
     expanded = []
     for pat in file_patterns:
         if glob.has_magic(pat):
@@ -187,8 +190,8 @@ def _render_validate_template(
 
 
 def resolve_template_path(path_val, project_directory=None):
-    """Resolves a template path, checking the local project directory first,
-    then falling back to the package's bundled resources."""
+    """Resolves a template path, prioritizing local workspace paths (.aider_factory/ and project root)
+    before falling back to package bundled resources."""
     if not path_val:
         return None
 
@@ -197,41 +200,48 @@ def resolve_template_path(path_val, project_directory=None):
 
     base_proj = str(project_directory or os.getcwd())
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    pkg_dir = os.path.abspath(os.path.join(script_dir, ".."))
 
-    # Strip `.aider_factory/` prefix for fallback checks
+    # Strip `.aider_factory/` or `src/aider_factory/` prefixes
     rel_stripped = path_val
-    if rel_stripped.startswith(".aider_factory/"):
-        rel_stripped = rel_stripped.replace(".aider_factory/", "", 1)
-    elif rel_stripped.startswith(".aider_factory\\"):
-        rel_stripped = rel_stripped.replace(".aider_factory\\", "", 1)
+    for prefix in (
+        ".aider_factory/",
+        ".aider_factory\\",
+        "src/aider_factory/",
+        "src\\aider_factory\\",
+    ):
+        if rel_stripped.startswith(prefix):
+            rel_stripped = rel_stripped[len(prefix) :]
+            break
 
-    # Priority 1: Check exact relative path in project root
-    local_exact = os.path.join(base_proj, path_val)
-    if os.path.exists(local_exact):
-        return local_exact
-
-    # Priority 2: Check under project_root/.aider_factory/ (preserving subfolders if any)
-    local_aider_factory = os.path.join(base_proj, ".aider_factory", rel_stripped)
-    if os.path.exists(local_aider_factory):
-        return local_aider_factory
-
-    # Priority 3: Check flat fallback under project_root/.aider_factory/ (e.g., CONVENTIONS.md)
     flat_filename = os.path.basename(path_val)
-    local_flat = os.path.join(base_proj, ".aider_factory", flat_filename)
-    if os.path.exists(local_flat):
-        return local_flat
 
-    # Priority 4: Fall back to globally packaged site-packages resources
-    pkg_fallback = os.path.join(script_dir, "..", rel_stripped)
-    if os.path.exists(pkg_fallback):
-        return pkg_fallback
+    # Primary Workspace Candidates (Checked first in order of specificity)
+    workspace_candidates = [
+        os.path.join(base_proj, path_val),
+        os.path.join(base_proj, ".aider_factory", rel_stripped),
+        os.path.join(base_proj, ".aider_factory", "markdown", rel_stripped),
+        os.path.join(base_proj, ".aider_factory", flat_filename),
+        os.path.join(base_proj, ".aider_factory", "markdown", flat_filename),
+    ]
 
-    # Priority 5: Fall back to globally packaged site-packages root-level (e.g., packaged CONVENTIONS.md)
-    pkg_flat = os.path.join(script_dir, "..", flat_filename)
-    if os.path.exists(pkg_flat):
-        return pkg_flat
+    for cand in workspace_candidates:
+        if os.path.isfile(cand):
+            return cand
 
-    return local_exact
+    # Package Fallback Candidates (Checked only if workspace has no matching file)
+    pkg_candidates = [
+        os.path.join(pkg_dir, rel_stripped),
+        os.path.join(pkg_dir, "markdown", rel_stripped),
+        os.path.join(pkg_dir, flat_filename),
+        os.path.join(pkg_dir, "markdown", flat_filename),
+    ]
+
+    for cand in pkg_candidates:
+        if os.path.isfile(cand):
+            return cand
+
+    return os.path.join(base_proj, path_val)
 
 
 class OSTee:
@@ -327,9 +337,14 @@ if __name__ in ("__main__", "__test__"):
 
     hist_dir = os.path.join(session_dir, "chat_history")
     if os.path.exists(hist_dir):
-        hist_files = [f for f in os.listdir(hist_dir) if f.startswith(".aider.chat.history_")]
+        hist_files = [
+            f for f in os.listdir(hist_dir) if f.startswith(".aider.chat.history_")
+        ]
         if len(hist_files) > 1:
-            print(f"⚠️  Resuming a multi-file isolated session. Found {len(hist_files)} history files in {hist_dir}.", file=sys.stderr)
+            print(
+                f"⚠️  Resuming a multi-file isolated session. Found {len(hist_files)} history files in {hist_dir}.",
+                file=sys.stderr,
+            )
 
     # Resolve config YAML path (CLI argument takes precedence over environment variable)
     session_yaml = os.path.join(session_dir, "session.yml")
@@ -376,6 +391,8 @@ if __name__ in ("__main__", "__test__"):
         config = yaml.safe_load(f)
 
     project_directory = config.get("working_directory", base_cwd)
+    if not os.path.isdir(str(project_directory)):
+        project_directory = base_cwd
     os.chdir(project_directory)
 
     # Export session environment variables for sub-processes
@@ -389,6 +406,8 @@ if __name__ in ("__main__", "__test__"):
 
     test_command_prefix = config.get("test_command_prefix", "").strip()
     global_max_aider_loops = int(config.get("loop_aider_test", 1))
+    global_auto_lint = config.get("auto_lint", True)
+    global_lint_cmd = config.get("lint_cmd", None)
 
     test_runner = config.get(
         "test_runner", "Rscript .aider_factory/tests/run_tests.R {file}"
@@ -549,9 +568,10 @@ if __name__ in ("__main__", "__test__"):
         auto_commits = auto_commits_val if auto_commits_val is not None else True
 
         auto_lint_val = toggles.get("auto_lint")
-        auto_lint = auto_lint_val if auto_lint_val is not None else True
+        auto_lint = auto_lint_val if auto_lint_val is not None else global_auto_lint
 
-        lint_cmd = toggles.get("lint_cmd")
+        lint_cmd_val = toggles.get("lint_cmd")
+        lint_cmd = lint_cmd_val if lint_cmd_val is not None else global_lint_cmd
 
         suggest_shell_commands_val = toggles.get("suggest_shell_commands")
         suggest_shell_commands = (
@@ -600,7 +620,7 @@ if __name__ in ("__main__", "__test__"):
         esc_cfg = phase.get("escalation_debate", {}) or {}
         debate_loops = esc_cfg.get("loops", 0)
         debate_rounds = esc_cfg.get("rounds", 1)
-        pass_round_history = esc_cfg.get("pass_round_history", esc_cfg.get("pass_history", True))
+        pass_history = esc_cfg.get("pass_history", True)
 
         rag_phase_cfg = phase.get("rag", {}) or {}
         phase_run_ocr_rag = rag_phase_cfg.get("run_ocr_rag", False)
@@ -931,6 +951,7 @@ if __name__ in ("__main__", "__test__"):
         # The escalate (debate->apply) block is SHARED; only its gate/issue/template/env differ.
         for current_file in target_files:
             base_name = os.path.splitext(os.path.basename(current_file))[0]
+
             def _h_stem(job_prefix: str) -> Optional[str]:
                 return None if shared_history else f"{job_prefix}_{base_name}"
 
@@ -1254,7 +1275,7 @@ if __name__ in ("__main__", "__test__"):
                             "draft_mode": True,
                             "read_files": _debate_reads,
                             "round_idx": 1,
-                            "pass_round_history": pass_round_history,
+                            "pass_history": pass_history,
                         }
 
                         _r_depends = _ingest_deps(
@@ -1323,15 +1344,13 @@ if __name__ in ("__main__", "__test__"):
                         )
 
                     if not strategy_file:
-                        default_strat = os.path.join(
-                            str(project_directory),
-                            ".aider_factory",
-                            "markdown",
-                            "oracle_pre_plan",
-                            "strategy_template.md",
+                        default_strat = resolve_template_path(
+                            "markdown/oracle_pre_plan/strategy_template.md",
+                            project_directory=project_directory,
                         )
                         if (
-                            os.path.exists(default_strat)
+                            default_strat
+                            and os.path.exists(default_strat)
                             and os.path.getsize(default_strat) > 0
                         ):
                             strategy_file = default_strat
@@ -1412,7 +1431,7 @@ if __name__ in ("__main__", "__test__"):
                             "draft_mode": True,
                             "read_files": _debate_reads,
                             "round_idx": 1,
-                            "pass_round_history": pass_round_history,
+                            "pass_history": pass_history,
                         }
 
                         _r_depends = _ingest_deps(
@@ -1538,7 +1557,7 @@ if __name__ in ("__main__", "__test__"):
                                 "draft_mode": True,
                                 "read_files": _debate_reads,
                                 "round_idx": 1,
-                                "pass_round_history": pass_round_history,
+                                "pass_history": pass_history,
                             }
 
                             _r_depends = _ingest_deps(
@@ -1707,7 +1726,7 @@ if __name__ in ("__main__", "__test__"):
                     _round_debate["verdict"] = _r_verdict
                     _round_debate["ledger"] = _r_ledger
                     _round_debate["round_idx"] = round_idx
-                    _round_debate["pass_round_history"] = pass_round_history
+                    _round_debate["pass_history"] = pass_history
                     # Give this round the ledger of the PREVIOUS round so it knows what was just tried
                     if round_idx > 1:
                         _round_debate["prior_ledger"] = (

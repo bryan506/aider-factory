@@ -75,6 +75,8 @@ Upstream Aider includes telemetry instrumentation that pings external servers on
 * `show-release-notes: false` suppresses web browser subprocess execution (`webbrowser.open`).
 * `notifications: false` disables desktop notification daemons (`notify-send` / `osascript`).
 
+> **Unbreakable Code-Level Guarantee:** Beyond configuration files, `orchestrate.py` and `apply_agent.py` hardcode `--no-analytics`, `--no-check-update`, `--no-show-release-notes`, and `--no-notifications` directly into the subprocess execution CLI arguments. This provides an unbreakable guarantee of privacy and offline execution that supersedes any user misconfiguration or missing `.aider.conf.yml`.
+
 #### Local Cost Accounting Mechanics
 Cost tracking remains 100% operational despite telemetry silencing because usage data is extracted directly from model API response payloads:
 $$\text{Cost}_{\text{message}} = (\text{Prompt Tokens} \times \text{Rate}_{\text{input}}) + (\text{Completion Tokens} \times \text{Rate}_{\text{output}})$$

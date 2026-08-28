@@ -114,6 +114,15 @@ aider-helper bootstrap
 
 Ensure you have Python 3.12 and [uv](https://astral.sh/uv/) installed.
 
+### System Prerequisites
+
+Before installation, ensure your host has the required build tools for Tree-Sitter (C compiler) and Aider's repository map engine (ctags):
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake curl git universal-ctags
+```
+
 ### Global Installation (Recommended)
 
 ```bash

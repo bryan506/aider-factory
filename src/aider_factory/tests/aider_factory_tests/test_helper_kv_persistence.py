@@ -111,16 +111,75 @@ class TestHelperKVPersistence(unittest.TestCase):
         self.assertEqual(len(captured_messages), 1)
         turn_1_content = captured_messages[0][1]["content"]
         self.assertIn("<skills_reference>", turn_1_content)
+        self.assertIn("<yaml_documentation>", turn_1_content)
+        self.assertIn("<reference_schema>", turn_1_content)
 
         # Turn 2: Follow-up without --master
         bootstrap.run_query("How many turns should I use?", None, "", ask_mode=True, master_mode=False)
         self.assertEqual(len(captured_messages), 2)
         turn_2_new_user_msg = captured_messages[1][3]["content"]
 
-        # Invariant: Turn 2's new user turn must NOT duplicate <skills_reference>
+        # Invariant: Turn 2's new user turn must NOT duplicate persistent blocks
         self.assertNotIn("<skills_reference>", turn_2_new_user_msg)
-        # But Turn 1 in history still holds it
+        self.assertNotIn("<yaml_documentation>", turn_2_new_user_msg)
+        self.assertNotIn("<reference_schema>", turn_2_new_user_msg)
+        # But Turn 1 in history still holds them
         self.assertIn("<skills_reference>", captured_messages[1][1]["content"])
+        self.assertIn("<yaml_documentation>", captured_messages[1][1]["content"])
+        self.assertIn("<reference_schema>", captured_messages[1][1]["content"])
+
+    @patch("litellm.completion")
+    def test_helper_reference_schema_and_untruncated_docs_paths(self, mock_completion):
+        """Verify reference_schema and yaml_docs_sample.md load completely, and real docs paths resolve."""
+        mock_completion.side_effect = lambda **kwargs: _create_mock_stream("Reply")
+
+        # 1. Test Default Query loads real complete_env.yml as reference_schema (omitting yaml_docs)
+        bootstrap.run_query("Explain schema", None, "", ask_mode=True)
+        call_msgs = mock_completion.call_args_list[-1][1]["messages"]
+        user_content = call_msgs[1]["content"]
+        self.assertIn("<reference_schema>", user_content)
+        self.assertIn("endpoints:", user_content)
+        self.assertNotIn("<yaml_documentation>", user_content)
+
+        # Clear session
+        bootstrap.clear_helper_session(terminal_mode=False)
+
+        # 2. Test Master Mode loads untruncated YAML documentation and skills
+        bootstrap.run_query("Explain schema in master mode", None, "", ask_mode=True, master_mode=True)
+        master_msgs = mock_completion.call_args_list[-1][1]["messages"]
+        master_user_content = master_msgs[1]["content"]
+        self.assertIn("<yaml_documentation>", master_user_content)
+        self.assertIn("# AI Factory Pipeline — YAML Configuration Reference", master_user_content)
+        self.assertIn("## Complete Annotated Configuration Schema", master_user_content)
+        self.assertIn("<skills_reference>", master_user_content)
+        self.assertGreater(len(master_user_content), 10000, "YAML documentation must be loaded completely without truncation")
+
+        # Clear session
+        bootstrap.clear_helper_session(terminal_mode=False)
+
+        # 3. Test Expert Mode loads skills, yaml docs, and full manual
+        bootstrap.run_query("Explain architecture", None, "", ask_mode=True, expert_mode=True)
+        expert_call_msgs = mock_completion.call_args_list[-1][1]["messages"]
+        expert_user_content = expert_call_msgs[1]["content"]
+        self.assertIn("<skills_reference>", expert_user_content)
+        self.assertIn("<yaml_documentation>", expert_user_content)
+        self.assertIn("File: factory.md", expert_user_content)
+        self.assertIn("<factory_service_manual>", expert_user_content)
+
+    @patch("litellm.completion")
+    def test_helper_reference_schema_omitted_in_terminal_mode(self, mock_completion):
+        """Verify terminal assistant (-t) completely strips all configuration schemas."""
+        mock_completion.side_effect = lambda **kwargs: _create_mock_stream("Terminal Reply")
+
+        bootstrap.run_query("Explain unix pipes", None, "", ask_mode=True, terminal_mode=True)
+        call_msgs = mock_completion.call_args_list[-1][1]["messages"]
+        user_content = call_msgs[1]["content"]
+
+        self.assertNotIn("<reference_schema>", user_content)
+        self.assertNotIn("<yaml_documentation>", user_content)
+        self.assertNotIn("<active_configuration>", user_content)
+        self.assertNotIn("<skills_reference>", user_content)
+        self.assertNotIn("<factory_service_manual>", user_content)
 
     @patch("litellm.completion")
     def test_helper_terminal_session_isolation(self, mock_completion):

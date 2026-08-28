@@ -54,7 +54,81 @@ def test_debate_default():
     )
 
 
+def test_cli_debate_pass_history_resolution():
+    """Verify _run_cli_debate resolves pass_history (defaulting to True) from active phase."""
+    import oracle_agent
+    import tempfile
+    import yaml
+    from unittest.mock import patch, MagicMock
+
+    class FakeMessage:
+        def __init__(self, content):
+            self.content = content
+        def get(self, item, default=None):
+            return getattr(self, item, default)
+        def __getitem__(self, item):
+            return getattr(self, item)
+
+    class FakeChoice:
+        def __init__(self, content):
+            self.message = FakeMessage(content)
+        def get(self, item, default=None):
+            return getattr(self, item, default)
+        def __getitem__(self, item):
+            return getattr(self, item)
+
+    class FakeUsage:
+        def __init__(self, prompt_tokens=10, completion_tokens=5):
+            self.prompt_tokens = prompt_tokens
+            self.completion_tokens = completion_tokens
+        def get(self, item, default=None):
+            return getattr(self, item, default)
+        def __getitem__(self, item):
+            return getattr(self, item)
+
+    class FakeResponse:
+        def __init__(self, content="VERDICT: AGREE"):
+            self.choices = [FakeChoice(content)]
+            self.usage = FakeUsage()
+        def get(self, item, default=None):
+            return getattr(self, item, default)
+        def __getitem__(self, item):
+            return getattr(self, item)
+
+    cfg = {
+        "phases": [
+            {
+                "enabled": True,
+                "escalation_debate": {
+                    "pass_history": False,
+                }
+            }
+        ]
+    }
+
+    with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as f:
+        yaml.dump(cfg, f)
+        f.flush()
+        cfg_path = f.name
+
+    try:
+        with patch.dict("os.environ", {"ORACLE_CONFIG_FILE": cfg_path}), \
+             patch("orchestrate.AiderFactory") as mock_factory, \
+             patch("oracle_agent._retrieve", return_value=""), \
+             patch("litellm.completion", return_value=FakeResponse("VERDICT: AGREE")):
+            
+            mock_factory.return_value._aider_ask_turn.return_value = "PROPOSAL: test fix"
+
+            ret = oracle_agent._run_cli_debate("Test issue", "code", max_turns=1, rounds=1)
+            assert ret == 0
+            print("  ✅ _run_cli_debate resolved pass_history successfully.")
+    finally:
+        if os.path.exists(cfg_path):
+            os.remove(cfg_path)
+
+
 if __name__ == "__main__":
     test_debate_flag()
     test_debate_default()
+    test_cli_debate_pass_history_resolution()
     print("\n🎉 All CLI Oracle Debate Tests Passed!")

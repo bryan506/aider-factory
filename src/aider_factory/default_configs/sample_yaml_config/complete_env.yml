@@ -42,11 +42,41 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         grounding_agent: "openai/minicheck-flan-t5-large"
 
     rag:
-        collection_name: "working_repo_lib"
-        retrieval_mode: top_k # top_k, no_retrieve, full_document
-        embed_backend: "sentence-transformers" # openai, sentence-transformers
-        query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: " # important for embedder chunk retrieval
+        collection_name: "working_repo_lib" # folder name for all rag content
+        batch: true # a table per file/directory or all in one table
+        retrieval_mode: top_k # no_retrieve, top_k, or full_document
+        use_docling: true # fast-path digital document extraction
+        docling_do_ocr: true # internal OCR for hybrid/image pages in Docling
+        docling_timeout: null # Timeout for Docling conversion (sec). null=inf
+        run_ocr_rag: false # can turn off/on to skip OCR step
+        vectordb_overwrite: false # rewrite all documents to lanceDB
         ocr_prompt: "<|grounding|>Convert the document to markdown."
+        query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: " # important for embedder chunk retrieval
+        chunk_size_chars: 1500 # Max characters per text chunk
+        chunk_overlap_chars: 300  # Overlap characters on consecutive chunks
+        recall_k: 75 # Number of Stage 1 vector candidates before ranking
+        top_k: 20  # Number of Stage 2 chunks returned to prompt context
+        cer_threshold: 0.05 # OCR Character Error Rate before text fallback
+        ocr_max_retries: 2  # Number of OCR attempts on transient failures
+        ocr_parallel: 8 # Number of parallel OCR workers (1 per page)
+        code_chunk_size: 2000 # character length for AST-parsed code chunks
+        ocr_max_tokens: 4096  # max tokens per OCR worker. ~32k/8 = 4096k
+        embed_backend: "sentence-transformers" # openai, sentence-transformers
+        working_repo: "" # override not adviced, pegs to working directory
+        code_exts: null # Override code extensions to ingest (e.g., [.py, .R])
+        text_doc_exts: null  # Override text extensions (e.g., [.md, .txt])
+        ignore: null  # Override directories to skip during ingestion scanning
+
+    oracle:
+        start_job: false # Run programmatic document generator first
+        template: "src/aider_factory/markdown/internal/analyze_bugs.md"
+        full_document: false # Send entire paper text instead of chunks
+        pre_edit_debate:
+            enabled: false # Hold debate before making any code edits
+            insert_debate: [1, 0, 0] # [--> Job1 --> Job2 --> Job3 --> Tests]
+            loops: 3 # Debate turns per job (0 = lone Oracle consultation)
+            job_debate_template: "" # Paths [/job1_tmpl,/job2_tmpl,/job3_tmpl]
+            job_debate_collection: "" # Paths [/coll1, /coll2, /coll3]
 
     toggles:
         pair_programming: true # Interactive mode with terminal chat
@@ -57,16 +87,29 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         iterate_test: false # Loop tests automatically until they pass
         auto_test: false # Let Aider run tests natively (3 loops)
         sticky_context: false # Keep edits from prior tasks in context
-        map_tokens: 0 # Repository map token budget (0 = disabled)
-        map_refresh: "manual" # Repo map refresh mode ("manual", "auto", "always")
-        map_multiplier_no_files: 0 # Multiplier for map size when no files are loaded
-        max_chat_history_tokens: 100000 # Chat history token budget ceiling
+        ## settings to help with KV cache and autonomous vs paired sessions
+        map_tokens: 0 # Token limit for repo map (0 = disabled)
+        map_refresh: "manual" # Repo map refresh mode (manual/auto/always)
+        map_multiplier_no_files: 0 # Map multiplier when no files loaded
+        max_chat_history_tokens: 100000 # Chat token budget before truncation
         yes_always: false # Auto-confirm all prompts
         auto_accept_architect: false # Auto-apply architect proposal to editor
         auto_commits: true # Auto-commit git changes after each edit
         suggest_shell_commands: true # Allow model to propose shell commands
         detect_urls: false # Scrape URLs found in model responses
         disable_playwright: false # Prevent automated headless browser installs
+
+    validation:
+        enabled: false # Enable strict quote-checking on reviews
+        validation_tag: "evidence" # Tag used to identify quotes
+        region_threshold: 0.60 # Cosine similarity cutoff for matches
+        region_margin: 2 # Extra lines of context around matches
+        region_paragraphs: 0 # Paragraphs to check above/below header limits
+        region_top_k: 5 # Chunks to fetch for each quote check
+        validation_loops: 3 # Max heal attempts for ungrounded quotes
+        redo_oracle_job: false # Force generator to rerun every time
+        verify_all_claims: false # Validate all claims, not just failed
+        entail_threshold: 0.5 # Minimum entailment verifier score
 
     escalation_debate:
         loops: 4 # Maximum debate turns per round

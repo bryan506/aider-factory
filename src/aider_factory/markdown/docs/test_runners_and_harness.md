@@ -173,6 +173,7 @@ When `iterate_test: true` is enabled, the pipeline enters an autonomous loop to 
 
 1. **Aider Internal Loops (`auto_test: true`):** Aider manages up to 3 fast internal fix-and-test attempts before yielding back to Python.
 2. **Orchestrator Outer Loops (`loop_aider_test`):** `orchestrate.py` manages the outer loop ceiling (defaulting to 1). On each outer attempt, fresh failure logs are captured and passed as a new prompt to Aider.
+3. **Outer Loop Tracking (`VALIDATION_ATTEMPT`):** The orchestrator injects `VALIDATION_ATTEMPT: str(attempt)` into the test subprocess environment. This allows contextual validators (like `validator.py`) to track outer loop progress and reset their no-progress ledgers on attempt 0.
 
 ### Eliminating False Positives: `Task.final_check` & `Task.soft_fail`
 

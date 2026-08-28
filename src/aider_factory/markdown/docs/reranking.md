@@ -79,6 +79,7 @@ $$S = \text{JinaForRanking}(Q, \{D_1, D_2, \dots, D_N\})$$
        "top_n": 5
      }
      ```
+     > **Compatibility Note:** Sending both the `"documents"` and `"texts"` keys simultaneously in the JSON payload guarantees seamless compatibility across Jina/Cohere APIs (which expect `"documents"`) and TEI APIs (which expect `"texts"`), eliminating the need for backend-specific configuration flags.
    - Target `{base}/v1/rerank`. If HTTP `404 Not Found` is returned, retry automatically against `{base}/rerank`.
    - Extract `relevance_score` or `score` from the returned item dictionary and assign `candidate["_relevance_score"] = float(score)`.
 3. **Local In-Process Routing (`_load_local_reranker`)**:

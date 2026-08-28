@@ -72,7 +72,7 @@ When transitioning from Phase 0 (Planning) to Phase 1 (Execution), `_render_vali
 If the test suite fails during Stage 4 (`iterate_test`), the orchestrator triggers an escalation debate:
 - **Debate Rounds (`rounds`)**: Chained full debate cycles (Debate $\to$ Apply $\to$ Re-Test).
 - **Cross-Round Memory (`pass_round_history`)**: Carries prior turn context and model KV caches across rounds.
-- **Ledger Chaining**: Passes `<stem>.job_verdict_r1.md` and `<stem>.job_debate_r1.json` to Round 2 to prevent repeating failed proposals.
+- **Ledger Chaining**: Passes `<stem>.job_verdict_r1.md` and `<stem>.job_debate_r1.json` to Round 2. The orchestrator explicitly parses the `prior_ledger` to extract the exact failed proposal from the previous round and injects it into the new prompt, giving the model memory of its past attempts to prevent infinite loops of identical fixes.
 
 ### 3.4 OS-Level File Descriptor Multiplexing (`OSTee`)
 Standard Python logging drops subprocess stdout/stderr. `run_workflow.py` wraps execution in `OSTee`:

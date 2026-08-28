@@ -927,9 +927,9 @@ class AiderFactory:
         )
 
         # Clear debate context: always on round 1 (fresh sequence), or every round
-        # when pass_round_history is off (each cluster of loops gets a clean slate).
+        # when pass_history is off (each cluster of loops gets a clean slate).
         _first_round = d.get("round_idx", 1) == 1
-        _clear = not d.get("pass_round_history", False) or _first_round
+        _clear = not d.get("pass_history", True) or _first_round
         if _clear:
             for _f in [
                 oracle_debate_session,
@@ -1078,9 +1078,9 @@ class AiderFactory:
                 pass
 
         # Clean up debate working files — but preserve them when
-        # pass_round_history is True so the next round's oracle and architect
+        # pass_history is True so the next round's oracle and architect
         # can resume from the prior round's accumulated context.
-        if not d.get("pass_round_history", False):
+        if not d.get("pass_history", True):
             for _df in [
                 oracle_debate_session,
                 oracle_debate_cost_sidecar,
@@ -1331,6 +1331,8 @@ class AiderFactory:
             if task.detect_urls is not None:
                 cmd.append("--detect-urls" if task.detect_urls else "--no-detect-urls")
 
+            if not task.pair_programming:
+                cmd.append("--exit")
             if task.yes_always:
                 cmd.append("--yes-always")
             if task.disable_playwright:
@@ -1429,10 +1431,19 @@ class AiderFactory:
                     # read-only context and the user drives the conversation.
                     cmd.extend(["--read", task.message_file])
                 else:
+                    target_list = ", ".join(f"`{f}`" for f in task.files) if task.files else "none"
+                    msg = (
+                        f"ACTIVE TARGET FILE(S): {target_list}\n"
+                        f"STRICT INVARIANT: You MUST ONLY plan and modify the assigned target file(s) ({target_list}).\n"
+                        f"Do NOT propose SEARCH/REPLACE blocks for any other files.\n"
+                        f"Do NOT create new files.\n"
+                        f"All files passed via --read are IMMUTABLE context.\n\n"
+                        f"Please execute the instructions found in {task.message_file}."
+                    )
                     cmd.extend(
                         [
                             "--message",
-                            f"Please execute the instructions found in {task.message_file}.",
+                            msg,
                             "--read",
                             task.message_file,
                         ]
@@ -1544,12 +1555,11 @@ class AiderFactory:
                 )
 
                 try:
-                    # Send 'd\n' (Don't ask again) to gracefully reject mid-run interactive prompts
-                    # like "Add file to the chat?" or "Run shell command?", preventing the LLM from
-                    # getting distracted and dropping commits. For prompts without a (D) option
-                    # (e.g. "Create new file?"), 'd' is invalid, triggering an EOFError on the
-                    # next read which safely accepts the default [Yes].
-                    process.stdin.write(b"d\n")
+                    # Send repeated 'n\n' (No) to gracefully reject all out-of-scope mid-run
+                    # prompts ("Add file to the chat?", "Create new file?"). With --exit enabled,
+                    # Aider terminates immediately upon completing --message, discarding any
+                    # unused buffer entries without polling them as trailing chat turns.
+                    process.stdin.write(b"n\n" * 50)
                     process.stdin.flush()
                     process.stdin.close()
                 except Exception:

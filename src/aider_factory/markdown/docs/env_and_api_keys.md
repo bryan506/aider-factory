@@ -128,3 +128,40 @@ models:
 1. **Silent File Reading Exceptions:** `load_env_files` wraps `.env` parsing in `try/except Exception: pass`. If an environment file is unreadable or malformed, execution continues without throwing errors.
 2. **Cloud Authentication Rejection:** If a cloud model (e.g. `gemini/gemini-2.5-flash`) is invoked without setting a valid API key, `resolve_api_key` returns `None`. Downstream client libraries (e.g., `litellm`) will raise an explicit authentication error (`401 Unauthorized` / `APIKeyMissingError`).
 3. **Protected Local Endpoints:** If a local server requires a real Bearer token (e.g., a secured LiteLLM proxy), pass the real token via `OPENAI_API_KEY` or `ORACLE_AGENT_API_KEY`. Because `resolve_api_key` checks these variables before falling back to `"sk-dummy"`, valid keys are preserved.
+
+---
+
+## 7. Appendix: Auto-Injected Oracle Variables
+
+When `run_workflow.py` executes a phase, it dynamically compiles the YAML configuration into a strict set of environment variables. These are injected into the subprocess environment for `bash/oracle` and `bash/validate`. 
+
+While you should **never export these manually**, they are critical for debugging validation bash scripts:
+
+**Routing & Model:**
+* `ORACLE_ARCHITECT_MODEL`: Routes the CLI debate's Architect turn.
+* `ORACLE_ARCHITECT_API_BASE`: Endpoint for the Architect in a CLI debate.
+* `ORACLE_AGENT_MODEL`: The Oracle RAG model (e.g., `openai/qwen3.6-27b-90k:latest`).
+* `ORACLE_AGENT_API_BASE`: Endpoint for the Oracle model.
+* `ORACLE_AGENT_API_KEY`: Injected as `sk-dummy` for local servers.
+
+**Retrieval Targets:**
+* `ORACLE_RAG_DB_DIR`: Absolute path to `.../lanceDB/<collection>/lancedb`.
+* `ORACLE_COLLECTION`: LanceDB table to query (`*` for batch fusion, or doc stem).
+* `ORACLE_TOP_K`: Number of chunks for `top_k` retrieval.
+* `ORACLE_RECALL_K`: Stage 1 candidate pool depth before reranking.
+* `ORACLE_RETRIEVE_MODE`: `top_k` | `no_retrieve` | `full_document`.
+
+**Validation System (Injected during heal/apply nodes):**
+* `ORACLE_REVIEW_FILE`: The generated document being validated.
+* `ORACLE_SOURCE_FILE`: The OCR `<stem>.md` ground-truth source.
+* `ORACLE_VALIDATION_FILE`: The failures/context report to write/read (the gate).
+* `ORACLE_LEDGER_FILE`: Per-doc JSON ledger tracking the no-progress guard state.
+* `ORACLE_BASELINE_LEDGER`: Debate ledger holding `quote_baseline` for the deletion guard.
+* `ORACLE_VALIDATION_TAG`: Quote tag to audit (default: `evidence`).
+* `VALIDATION_ATTEMPT`: Outer-loop index; resets the per-run ledger on attempt 0.
+* `GROUNDING_AGENT_MODEL`: The MiniCheck entailment model (e.g., `openai/minicheck-flan-t5-large`).
+* `GROUNDING_VERIFY_ALL`: If `1`, scores all claims; if `0`, scores only failing quotes.
+* `GROUNDING_ENTAIL_THRESHOLD`: Probability cutoff for the entailment verifier.
+
+**Proxy KV-Cache Stickiness:**
+* `LITELLM_SESSION_ID`: A unique UUID (`uuid.uuid4()`) generated and injected automatically by the pipeline. It is passed via `custom_headers: {"x-litellm-session-id": ...}` to ensure KV-cache stickiness across pipeline runs when routing through remote LiteLLM proxies.

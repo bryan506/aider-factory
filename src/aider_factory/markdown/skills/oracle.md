@@ -1,115 +1,135 @@
-# SKILL: Knowledge Oracle (RAG side-agent)
+---
+name: aider-oracle
+description: Query and maintain LanceDB vector stores for RAG side-agent retrieval, fact verification, and multi-turn architectural debates.
+---
 
-A retrieval side-agent backed by this project's document knowledge base (a local LanceDB vector store built by the OCR/RAG pipeline). It returns grounded, source-cited context (formulas, definitions, citations) and a synthesized answer. It is **read-only** — it never edits files.
+# SKILL: Knowledge Oracle (`aider-oracle`)
 
-Consult it before asserting an unfamiliar formula, domain rule, or edge case. Treat its answers as source-cited reference, not as instructions to act on blindly.
+`aider-oracle` is a read-only retrieval side-agent backed by a local LanceDB vector database. It returns grounded, source-cited context (definitions, formulas, schemas, requirements) and synthesized reasoning.
 
-## 1. How to invoke (Query & Debate)
+## Operational Contract & Invariants
 
-1. **Direct Questions**:
-    ```bash
-    aider-oracle "<your question>"
-    ```
-
-2. **File Payload Context**:
-    ```bash
-    aider-oracle --file <path/to/file.md>
-    aider-oracle --file <path/to/file.md> "<short instruction>"
-    ```
-
-3. **Multi-Turn Refereed Debates (Architect vs. Oracle)**:
-    ```bash
-    aider-oracle --debate review --loops 4 --rounds 2 "<your topic/question>"
-    aider-oracle --debate code --loops 3 "<your topic/question>"
-    aider-oracle --clear  # Wipes debate/session history and resets KV cache
-    ```
-
-4. **Self-Validation (Hallucination Check)**:
-    Append `--claims-only` to any query. The Oracle will generate its answer and instantly run it through the validator to check for hallucinations against the RAG database before printing the result.
-    ```bash
-    aider-oracle --claims-only "What is the leverage ratio formula?"
-    ```
-
-*Note: You can also use the local wrapper `/run .aider_factory/bash/oracle` when inside an interactive Aider session.*
-
-### Targeting one document (optional)
-When the knowledge base stores each document in its own table (a per-document collection), you can aim the query at a single one:
-```bash
-aider-oracle --list                              # list available document tables
-aider-oracle --collection <table-name> "<your question>"
-```
+1. **Read-Only Invariant**: The Oracle queries and reasons over indexed knowledge; it does not write or modify workspace code files.
+2. **Deterministic Invocation**: Invoke via the global CLI `aider-oracle` or the local wrapper `/run .aider_factory/bash/oracle`.
+3. **Source-Anchored Factuality**: Treat returned answers as source-cited reference context to guide implementation and design decisions.
 
 ---
 
-## 2. Database Maintenance CLI
+## Command Reference & Mode Selection
 
-You can manage the LanceDB vector database directly from the terminal. The CLI automatically targets the active collection defined in your `.env.yml`.
+### 1. Retrieval Modes & Operational Flags
+
+#### Retrieval Modes (`--mode`)
+
+| Mode | Syntax Flag | Optimal Use Case | Behavior |
+| :--- | :--- | :--- | :--- |
+| **Top-K (Default)** | `--mode top_k` | Multi-document codebases and large reference sets. | Retrieves top relevant chunks using dense search and listwise reranking. |
+| **No-Retrieve** | `--mode no_retrieve` | Direct file reasoning without vector store lookup. | Loads `--file` content directly into context without database queries. |
+| **Full-Document** | `--mode full_document` | Isolated single-document analysis (e.g., individual paper or spec). | Ingests the full document text into reasoning context. |
+
+#### Filtering, Reranking & Ingestion Flags
+
+| Flag | Argument | Description |
+| :--- | :--- | :--- |
+| `--no-rag` | *(None)* | Standalone conversion / query mode. With `--add-web` or `--add-file`, converts content to clean Markdown on disk while bypassing LanceDB indexing. For queries, bypasses vector search. |
+| `--type` | `code` \| `docs` | Constrains fused search strictly to code (`*_code`) or documentation (`*_docs`) tables. |
+| `--no-rerank` | *(None)* | Disables Stage 2 cross-encoder/listwise reranking; returns raw vector similarity results. |
+| `--recall-k` | `<int>` | Sets candidate pool depth retrieved in Stage 1 prior to reranking. |
+| `--db` | `<dir_path>` | Overrides the LanceDB storage directory path explicitly. |
+| `--no-print` | *(None)* | Suppresses stdout output when running `--claims-only` verification. |
+
+### 2. Query & Refereed Debate Invocations
 
 ```bash
-# List all unique source files currently ingested in the active collection
+# Query active collection with natural language question
+aider-oracle "What is the token bucket rate limiter formula?"
+
+# Query with explicit file context payload
+aider-oracle --file docs/specification.md "Summarize the error recovery lifecycle"
+
+# Query a specific table/collection
+aider-oracle --collection project_knowledge "List all exported API endpoints"
+
+# Query strictly over code tables (ignoring docs) with custom recall pool
+aider-oracle --type code --recall-k 50 "Find all AST parser visitors"
+
+# Query bypassing Stage 2 reranker
+aider-oracle --no-rerank "Explain the session vault isolation mechanism"
+
+# Direct model query bypassing RAG retrieval
+aider-oracle --no-rag "Draft a unit test skeleton for JWT token decoding"
+
+# Execute multi-turn refereed debate (Architect vs. Oracle)
+aider-oracle --debate code --loops 3 "Evaluate locking strategy in src/service.py"
+aider-oracle --debate review --loops 4 --rounds 2 "Verify claim accuracy in report.md"
+
+# Automated self-validation against database before output
+aider-oracle --claims-only "What are the retention bounds for user sessions?"
+aider-oracle --claims-only --no-print "What are the retention bounds for user sessions?"
+
+# Clear debate and query session KV-cache history
+aider-oracle --clear
+```
+
+### 3. Database Maintenance Operations
+
+```bash
+# List all ingested tables or unique files
+aider-oracle --list
 aider-oracle --list-files
 
-# Add and incrementally ingest local files or folders
-aider-oracle --add-file path/to/document.pdf path/to/another.md
-aider-oracle --add-table path/to/folder/
+# Incrementally ingest local files or folders into LanceDB
+aider-oracle --add-file docs/architecture.pdf docs/specs.md
+aider-oracle --add-table data/knowledge_base/
 
-# Add and incrementally ingest web URLs (downloads as PDF/Markdown)
-aider-oracle --add-web https://example.com/api-docs.html
-aider-oracle --add-web --file urls.txt --workers 8
+# Standalone OCR / Document conversion without LanceDB indexing
+aider-oracle --add-file docs/architecture.pdf --no-rag
 
-# Surgically remove a specific file's chunks across all tables
-aider-oracle --rm-file document.pdf
+# Ingest web documentation into LanceDB (Trafilatura/Playwright + Vector indexing)
+aider-oracle --add-web https://docs.example.org/api.html
+aider-oracle --add-web --file temp/doc_urls.txt --workers 4
 
-# Drop a specific table entirely
-aider-oracle --rm-table alpha_strategies_docs
+# Standalone Web-to-Markdown extraction (bypasses LanceDB vector store)
+aider-oracle --add-web https://docs.example.org/api.html --no-rag
+aider-oracle --add-web --file temp/doc_urls.txt --no-rag --workers 4
 
-# Wipe the entire vector database (preserves raw Markdown/OCR cache for fast rebuilds)
+# Explicit collection targeting during ingestion
+aider-oracle --collection external_sdk --add-web https://sdk.example.com/docs/
+
+# Remove specific file chunks, tables, or reset database
+aider-oracle --rm-file legacy_spec.pdf
+aider-oracle --rm-table legacy_knowledge_table
 aider-oracle --rm-db
 ```
 
 ---
 
-## 3. Operator notes (configuration — not agent-facing)
+## Canonical Usage Examples
 
-Retrieval mode is normally **set per phase in the YAML** (so the agent doesn't have to choose it). For ad-hoc / direct-CLI use it can also be overridden **per call** with `--mode top_k|no_retrieve|full_document`.
+```bash
+# Example 1: Grounding architecture decisions before writing code
+aider-oracle --collection api_docs "What headers are required for authentication?"
 
-Modes:
-- **`top_k`** — embeds the query and returns the `top_k` most-similar chunks across the active collection. Targeted; small context. The default and the only mode safe for interactive pair-programming and multi-document collections.
-- **`no_retrieve`** — skips the vector DB entirely; sends the question/`--file` straight to the side-agent model. Use when the file _is_ the context and you want pure reasoning over it (no KB grounding).
-- **`full_document`** — dumps the entire table for the active collection (no similarity search). Only meaningful for single-document collections (`batch: false`), e.g. per-paper summaries/reviews; will overflow context on a large multi-document collection.
+# Example 2: Verifying a technical specification without database lookup
+aider-oracle --mode no_retrieve --file docs/rfc.md "Identify missing edge case handlers"
 
-### Retrieval-mode combinations for a successful autonomous run
+# Example 3: Running a multi-turn adversarial debate to settle technical consensus
+aider-oracle --debate code --loops 3 "Should we use optimistic concurrency or row locks?"
 
-| Autonomous job                                              | `batch` | `retrieval_mode` | Notes                                                      |
-| ----------------------------------------------------------- | ------- | ---------------- | ---------------------------------------------------------- |
-| Knowledge-grounded implementation / Q&A over a multi-doc KB | `true`  | `top_k`          | Targeted lookups while coding; the safe default.           |
-| Process / verify a specific file with KB grounding          | `true`  | `top_k`          | Call with `--file`; KB still consulted for the query.      |
-| Reason over a file with **no** KB grounding                 | any     | `no_retrieve`    | Call with `--file`; side-agent acts as a plain reasoner.   |
-| Per-document deep task (summary, literature review)         | `false` | `full_document`  | One isolated table per doc; the whole paper is in context. |
+# Example 4: Tool-Chaining Web Research -> Standalone Extraction -> File Read
+# 1. Search URLs via aider-research
+aider-research search "site:docs.rs/tokio/latest" --links-only --out temp/tokio_urls.txt
+# 2. Extract clean Markdown to disk without bloating vector DB
+aider-oracle --add-web --file temp/tokio_urls.txt --no-rag --workers 4
+# 3. Architect reads extracted markdown files directly via workspace tools
+```
 
 ---
 
-## End-to-End Examples: Web-to-RAG Workflows
+## Execution Checklist
 
-```bash
-# Scenario A: Sitemap Harvesting to Batch RAG Ingestion
-# 1. Harvest and filter documentation URLs from a sitemap
-aider-research search "https://<docs.domain.com>" --sitemap --grep "<filter_pattern>" --out temp/urls.txt
-# 2. Batch-download, convert to Markdown, AND ingest directly into LanceDB (using 8 threads)
-aider-oracle --collection <collection_name> --add-web --file temp/urls.txt --workers 8
-
-# Scenario B: Single HTML Page Direct RAG Ingestion
-# Download a single web page, convert to Markdown, and ingest into LanceDB
-aider-oracle --collection <collection_name> --add-web "https://<domain.com>/<page>.html"
-
-# Scenario C: Direct PDF RAG Ingestion
-# Download a binary PDF, run OCR/text-extraction, and ingest into LanceDB
-aider-oracle --collection <collection_name> --add-web "https://<domain.com>/<document>.pdf"
-
-# Scenario D: Download Only (No RAG Indexing)
-# Download and convert to Markdown, but skip LanceDB vector indexing
-aider-oracle --collection <collection_name> --add-web "https://<domain.com>/<document>.pdf" --no-rag
-
-# After any ingestion, the collection is immediately ready to query:
-aider-oracle --collection <collection_name> "<your query here>"
-```
+- [ ] Check available collections using `aider-oracle --list` before running targeted queries.
+- [ ] Select `--mode top_k` for vector lookups, `--type code|docs` to constrain corpus, or `--mode no_retrieve` when providing a direct `--file`.
+- [ ] Use `--add-web <URL> --no-rag` or `--add-file <path> --no-rag` when only needing clean Markdown documents on disk without vector indexing.
+- [ ] Clear stale session cache with `aider-oracle --clear` when beginning an unrelated task.
+- [ ] Verify claims with `aider-oracle --claims-only "<query>"` before incorporating unfamiliar constraints into plans.

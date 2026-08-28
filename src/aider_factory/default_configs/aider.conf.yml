@@ -14,19 +14,19 @@ timeout: "10800"
 max-chat-history-tokens: "90000"
 map-tokens: "0"
 map-refresh: manual # or manual, auto, always, files
-yes-always: true ## read below
-auto-accept-architect: true
+yes-always: false  ## read below
+auto-accept-architect: false
 architect: true ## toggle on and off along with yes-always for automatic commands, so far commands only works in /code-edit mode.
 auto-commits: true
 
 # Allow the agent to propose shell commands (e.g. the Knowledge Oracle skill).
 # Autonomy/approval is governed separately by --yes-always.
-suggest-shell-commands: false
+suggest-shell-commands: true
 detect-urls: false
-disable-playwright: true
+disable-playwright: false
 fancy-input: true
 pretty: true
-multiline: true
+multiline: false
 auto-lint: true
 map-multiplier-no-files: 0
 

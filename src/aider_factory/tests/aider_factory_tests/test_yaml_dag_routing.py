@@ -261,6 +261,139 @@ def test_yaml_dag_routing():
             sys.argv = old_argv
             os.chdir(orig_cwd)
 
+        # 6. Global & Phase Linting Configuration Propagation
+        config_6 = {
+            "working_directory": base_dir,
+            "auto_lint": False,
+            "lint_cmd": "global_lint {file}",
+            "phases": [
+                {
+                    "name": "PhaseInherit",
+                    "enabled": True,
+                    "rag": {"collection_name": "", "batch": True, "run_ocr_rag": False},
+                    "toggles": {
+                        "run_job_one": True,
+                    },
+                    "models": {"architect_agent": "mock", "editor_agent": "mock"},
+                    "files": {"target_files": ["R/a.R"]},
+                },
+                {
+                    "name": "PhaseOverride",
+                    "enabled": True,
+                    "rag": {"collection_name": "", "batch": True, "run_ocr_rag": False},
+                    "toggles": {
+                        "run_job_one": True,
+                        "auto_lint": True,
+                        "lint_cmd": "phase_lint {file}",
+                    },
+                    "models": {"architect_agent": "mock", "editor_agent": "mock"},
+                    "files": {"target_files": ["R/b.R"]},
+                },
+            ],
+        }
+
+        yaml_path_6 = os.path.join(base_dir, "test6.yml")
+        with open(yaml_path_6, "w") as f:
+            yaml.dump(config_6, f)
+
+        old_argv = sys.argv
+        os.chdir(base_dir)
+        sys.argv = ["run_workflow.py", "mock_routing_session_6", yaml_path_6]
+        namespace_6 = {
+            "__name__": "__test__",
+            "__file__": run_workflow_path,
+        }
+        with open(run_workflow_path, "r") as f:
+            code_6 = f.read()
+        try:
+            exec(code_6, namespace_6)
+            tasks_6 = namespace_6["factory"].tasks
+            job1_inherit = tasks_6["p0_job1_a"]
+            job1_override = tasks_6["p1_job1_b"]
+
+            assert job1_inherit.auto_lint is False
+            assert job1_inherit.lint_cmd == "global_lint {file}"
+            assert job1_override.auto_lint is True
+            assert job1_override.lint_cmd == "phase_lint {file}"
+            print(
+                "Test 6: Global & Phase Linting Configuration Propagation:\n  ✅ Global inheritance and phase override matched\n  🎉 PASS\n"
+            )
+        finally:
+            sys.argv = old_argv
+            os.chdir(orig_cwd)
+
+        # 7. pass_history Propagation to Deliberate Tasks
+        config_7 = {
+            "working_directory": base_dir,
+            "phases": [
+                {
+                    "name": "Phase7",
+                    "enabled": True,
+                    "rag": {"collection_name": "", "batch": True, "run_ocr_rag": False},
+                    "oracle": {
+                        "start_job": False,
+                        "pre_edit_debate": {
+                            "enabled": True,
+                            "insert_debate": [1, 0, 0],
+                        },
+                    },
+                    "toggles": {
+                        "run_job_one": True,
+                        "iterate_test": True,
+                    },
+                    "escalation_debate": {
+                        "loops": 2,
+                        "rounds": 2,
+                        "pass_history": True,
+                    },
+                    "models": {
+                        "architect_agent": "mock",
+                        "editor_agent": "mock",
+                        "editor_agent_test": "mock",
+                    },
+                    "files": {"target_files": ["R/a.R"]},
+                }
+            ],
+        }
+
+        yaml_path_7 = os.path.join(base_dir, "test7.yml")
+        with open(yaml_path_7, "w") as f:
+            yaml.dump(config_7, f)
+
+        old_argv = sys.argv
+        os.chdir(base_dir)
+        sys.argv = ["run_workflow.py", "mock_routing_session_7", yaml_path_7]
+        namespace_7 = {
+            "__name__": "__test__",
+            "__file__": run_workflow_path,
+        }
+        with open(run_workflow_path, "r") as f:
+            code_7 = f.read()
+        try:
+            exec(code_7, namespace_7)
+            tasks_7 = namespace_7["factory"].tasks
+
+            job1_debate = tasks_7["p0_job1_debate_a"]
+            assert job1_debate.deliberate is not None
+            assert job1_debate.deliberate.get("pass_history") is True
+            assert "pass_round_history" not in job1_debate.deliberate
+
+            escalate_r1 = tasks_7["p0_deliberate_a_r1"]
+            assert escalate_r1.deliberate is not None
+            assert escalate_r1.deliberate.get("pass_history") is True
+            assert "pass_round_history" not in escalate_r1.deliberate
+
+            escalate_r2 = tasks_7["p0_deliberate_a_r2"]
+            assert escalate_r2.deliberate is not None
+            assert escalate_r2.deliberate.get("pass_history") is True
+            assert "pass_round_history" not in escalate_r2.deliberate
+            print(
+                "Test 7: pass_history DAG Propagation:\n  ✅ pass_history passed to all debate tasks\n  🎉 PASS\n"
+            )
+        finally:
+            sys.argv = old_argv
+            os.chdir(orig_cwd)
+
     finally:
         os.chdir(orig_cwd)
         if os.path.exists(base_dir):

@@ -65,6 +65,8 @@ The pipeline parses the `models` block in `.env.yml` and dynamically injects `OP
 | `openai/` | OpenAI-compatible (llama-server, LiteLLM) | `architect_api_base` | Routes to local `llama-server` or remote proxy. |
 | `ollama/` | Ollama native API | `editor_api` | Local coding models via `ollama serve`. |
 | `lm_studio/` | LM Studio | `editor_api` | Maps to the same editor endpoint. |
+
+> **Simultaneous Dual-Endpoint Injection:** When `editor_api` (or `editor_api_base`) is defined in the configuration, `orchestrate.py` and `apply_agent.py` simultaneously set both `OLLAMA_API_BASE` and `LM_STUDIO_API_BASE` to that exact endpoint in the subprocess environment. This guarantees seamless routing regardless of whether the user prefixes the model with `ollama/` or `lm_studio/`.
 | `gemini/` | Google Gemini API | Bypasses endpoints | Uses `GEMINI_API_KEY`. |
 | `vertex_ai/` | GCP Vertex AI | Bypasses endpoints | Uses GCP credentials. |
 | `github_copilot/` | GitHub Copilot | Bypasses endpoints | Uses Copilot auth. |

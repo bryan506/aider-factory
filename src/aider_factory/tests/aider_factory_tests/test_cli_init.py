@@ -102,9 +102,58 @@ def test_ensure_bash_wrappers_provisions_all_launchers():
     print("✅ All Bash Wrappers Provisioning PASS")
 
 
+@patch("cli.ensure_searxng_service")
+@patch("cli.ensure_bash_wrappers")
+@patch("subprocess.run")
+def test_init_markdown_tree_provisioned(mock_sub, mock_bash, mock_searxng):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        original_cwd = os.getcwd()
+        os.chdir(tmp_dir)
+        try:
+            cli.init_user_project(tmp_dir)
+            local_markdown_dir = os.path.join(tmp_dir, ".aider_factory", "markdown")
+            assert os.path.isdir(local_markdown_dir), ".aider_factory/markdown must be created"
+            for subdir in ["docs", "oracle_pre_plan", "skills", "templates", "internal"]:
+                assert os.path.isdir(
+                    os.path.join(local_markdown_dir, subdir)
+                ), f"Missing markdown/{subdir}"
+        finally:
+            os.chdir(original_cwd)
+    print("✅ Markdown Tree Provisioning PASS")
+
+
+@patch("cli.ensure_searxng_service")
+@patch("cli.ensure_bash_wrappers")
+@patch("subprocess.run")
+def test_init_markdown_does_not_overwrite_existing(mock_sub, mock_bash, mock_searxng):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        original_cwd = os.getcwd()
+        os.chdir(tmp_dir)
+        try:
+            custom_dir = os.path.join(
+                tmp_dir, ".aider_factory", "markdown", "templates"
+            )
+            os.makedirs(custom_dir, exist_ok=True)
+            custom_file = os.path.join(custom_dir, "custom_template.md")
+            with open(custom_file, "w", encoding="utf-8") as f:
+                f.write("CUSTOM CONTENT DO NOT OVERWRITE")
+
+            cli.init_user_project(tmp_dir)
+
+            with open(custom_file, "r", encoding="utf-8") as f:
+                assert (
+                    f.read() == "CUSTOM CONTENT DO NOT OVERWRITE"
+                ), "Existing user files must not be overwritten"
+        finally:
+            os.chdir(original_cwd)
+    print("✅ Markdown Non-Destructive Copy PASS")
+
+
 if __name__ == "__main__":
     test_init_empty_dir_creates_scratchpad()
     test_init_discovers_existing_files()
     test_init_playwright_provisioning()
     test_ensure_bash_wrappers_provisions_all_launchers()
+    test_init_markdown_tree_provisioned()
+    test_init_markdown_does_not_overwrite_existing()
     print("\n🎉 All CLI Quickstart Unit Tests Passed!")

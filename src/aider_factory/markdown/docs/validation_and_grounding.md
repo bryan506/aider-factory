@@ -57,11 +57,14 @@ When configured, the pipeline upgrades claim verification from cosine topicality
 $$ \text{Faithfulness}(\text{Claim}) = \min_{s_i \in \text{Sentences}(\text{Claim})} P(\text{Entailed} \mid \text{Document}, s_i) $$
 If the minimum probability falls below `entail_threshold` (default 0.5), the claim is flagged as unsupported.
 
-### 3.4 Reciprocal Rank Fusion (RRF)
+### 3.4 Claim Drift Annotation (`verify_all=True`)
+When `verify_all_claims: true` is configured, the validator evaluates the surrounding claim blocks even for quotes that are perfectly grounded (exact substring matches). If the surrounding prose fails the entailment check, it is appended to a `claim_drift` list. This is an *annotate-only* mechanic: it surfaces warnings about potential hallucination in the prose without failing the strict validation gate.
+
+### 3.5 Reciprocal Rank Fusion (RRF)
 When retrieving chunks across multiple LanceDB tables (e.g., `--claims-only` or batch RAG), the pipeline merges ranked lists using RRF (Cormack et al., 2009):
 $$ \text{RRF\_Score}(d \in D) = \sum_{t \in \text{Tables}} \frac{1}{60 + \text{rank}_t(d)} $$
 
-### 3.5 Tag State Machine Transitions
+### 3.6 Tag State Machine Transitions
 * `[evidence]` $\rightarrow$ `[validated]`: Quote is grounded and its hash matches the pre-edit baseline.
 * `[evidence]` $\rightarrow$ `[fixed]`: Quote is grounded but its hash is NOT in the baseline (it was edited).
 * `[evidence]` $\rightarrow$ `[unsupported]`: Quote remains ungrounded after an `agreed` debate.
@@ -121,3 +124,38 @@ Because MiniCheck is a seq2seq classifier and not a standard conversational LLM,
 ### 6.3 Soft-Quotes & LaTeX Edge Cases
 Quotes containing LaTeX math formatting (`$`) or the explicit `(OCR-uncertain)` marker are treated as "soft-quotes." Because OCR engines rarely extract complex mathematics with character-for-character fidelity, soft-quotes bypass exact-substring gating. 
 * **Invariant:** An agent can never promote a soft-quote. If an agent writes `[fixed]` or `[validated]` on a soft-quote that cannot be mathematically proven, the validator deterministically demotes it back to `[evidence]`.
+
+### 6.4 Deploying the MiniCheck Server (`minicheck_server.py`)
+Because MiniCheck is a seq2seq classifier and not a standard conversational LLM, it cannot be served via a standard `llama.cpp` GGUF chat endpoint. The pipeline includes a dedicated FastAPI shim (`minicheck_server.py`) that downloads the HuggingFace weights and exposes an OpenAI-compatible `/v1/chat/completions` endpoint.
+
+To deploy it persistently on your host GPU/CPU, use `uv` (PEP 723 inline dependencies) and a systemd unit:
+
+1. **First run (downloads weights):**
+   ```bash
+   cd /path/to/aider-factory/src/aider_factory/python
+   uv run --locked minicheck_server.py
+   ```
+
+2. **Systemd Unit (`/etc/systemd/system/minicheck.service`):**
+   ```ini
+   [Unit]
+   Description=MiniCheck grounding verifier (OpenAI-compatible)
+   After=network.target
+
+   [Service]
+   User=your_user
+   WorkingDirectory=/path/to/aider-factory/src/aider_factory/python
+   Environment=MINICHECK_CACHE=/path/to/aider-factory/src/aider_factory/python/ckpts
+   ExecStart=/home/your_user/.local/bin/uv run --locked minicheck_server.py
+   Restart=on-failure
+   RestartSec=3
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+   *Note: If the service fails with `status=217/USER`, the `User=` directive does not match a valid host account.*
+
+### 6.5 Validation Operational Quirks
+* **Multiple anchors on one line:** Fully supported. The validator extracts and grounding-checks *every* anchor per line using regex `finditer`.
+* **Validate against the OCR `<stem>.md`:** Always audit against the raw markdown source, not the LanceDB dump, to prevent chunk overlap/join artifacts from causing false failures.
+* **Phase-Splittable Tip:** To iterate on a review without paying to regenerate the initial draft, set `redo_oracle_job: false` (reuses the existing review) and `run_ocr_rag: false` (reuses the cached LanceDB tables).

@@ -1,0 +1,78 @@
+name: "My Project"
+working_directory: "/path/to/project"
+
+colors:
+    architect_debate: "#38bdf8"
+    oracle_debate: "#d3869b"
+
+test_command_prefix: ""
+test_runner: "pytest {file}"
+test_naming_and_path: "tests/test_{stem}.py"
+lint_cmd: null
+auto_lint: true
+loop_aider_test: 3
+
+endpoints:
+    architect_api_base: "http://192.168.100.2:8080/v1"
+    editor_api: "http://192.168.100.1:8080/v1"
+    editor_api_fallback: "http://192.168.100.1:8080/v1"
+    rag_agent_api: "http://192.168.100.1:8080/v1"
+    grounding_agent_api: "http://192.168.100.1:8090/v1"
+    ranking_api_base: null
+    ocr_api_base: "http://192.168.100.2:8081/v1"
+    embed_api_base: "http://192.168.100.1:8080/v1"
+
+phases:
+  - name: "Pair Programming Session"
+    enabled: true
+
+    models:
+        architect_agent: "gemini/gemini-3.7-flash"
+        editor_agent: "gemini/gemini-3.6-flash"
+        editor_agent_test: "gemini/gemini-3.6-flash"
+        editor_agent_test_fallback: "gemini/gemini-3.6-flash"
+        rag_agent: "gemini/gemini-3.6-flash"
+        ranking_agent: "jinaai/jina-reranker-v3.5"
+        ocr_agent: "gemini/gemini-3.6-flash"
+        embed_model: "gemini/text-embedding-004"
+        grounding_agent: "openai/minicheck-flan-t5-large"
+
+    rag:
+        collection_name: "working_repo_lib"
+        retrieval_mode: top_k
+        embed_backend: "sentence-transformers"
+        query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\nQuery: "
+        ocr_prompt: "<|grounding|>Convert the document to markdown."
+
+    toggles:
+        pair_programming: true
+        shared_history: false
+        run_job_one: true
+        run_job_two: false
+        run_job_three: false
+        iterate_test: true
+        auto_test: false
+        sticky_context: false
+
+    escalation_debate:
+        loops: 4
+        rounds: 2
+        pass_history: true
+
+    files:
+        target_files:
+            - "src/my_module.py"
+        extra_editable_files:
+            - "src/helpers.py"
+        test_files:
+            - "tests/test_my_module.py"
+        context_files_job:
+            - "src/utils.py"
+        context_files_test:
+            - "src/utils.py"
+
+    plans:
+        job_one_plan: "markdown/templates/implement.md"
+        job_two_plan: "markdown/templates/validate.md"
+        job_three_plan: "markdown/templates/testing.md"
+        iterate_plan: "markdown/templates/testing_unit_iterate.md"

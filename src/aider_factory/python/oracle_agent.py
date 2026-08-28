@@ -224,13 +224,32 @@ def _rerank_chunks(query: str, candidates: list[dict], top_n: int = 5) -> list[d
                     scored = [c for c in candidates if "_relevance_score" in c]
                     unscored = [c for c in candidates if "_relevance_score" not in c]
                     scored.sort(key=lambda x: x["_relevance_score"], reverse=True)
+                    if scored:
+                        print(
+                            f"[rerank] ok: remote reranker ({model}) scored "
+                            f"{len(scored)}/{len(candidates)} candidates → top {min(top_n, len(scored))} "
+                            f"(top score {scored[0]['_relevance_score']:.4f}).",
+                            file=sys.stderr,
+                        )
                     return (scored + unscored)[:top_n]
             else:
-                print(f"[rerank] warning: remote rerank returned status {resp.status_code}; falling back to vector order.", file=sys.stderr)
+                # Remote endpoint reachable but rejected the request (e.g. the configured
+                # model is not served at this endpoint -> 400/422). Do NOT degrade straight
+                # to vector order; fall through to the local in-process reranker below.
+                print(
+                    f"[rerank] note: remote reranker returned status {resp.status_code}; "
+                    "falling through to local in-process reranker.",
+                    file=sys.stderr,
+                )
         except Exception as e:
-            print(f"[rerank] warning: remote rerank failed ({e}); falling back to vector order.", file=sys.stderr)
-
-        return candidates[:top_n]
+            # Endpoint unreachable/timeout: fall through to the local in-process reranker.
+            print(
+                f"[rerank] note: remote reranker unavailable ({e}); "
+                "falling through to local in-process reranker.",
+                file=sys.stderr,
+            )
+        # NOTE: no `return` here — control intentionally continues to the
+        # In-Process Local Path so a failed remote call still gets real reranking.
 
     # In-Process Local Path
     #
@@ -275,6 +294,13 @@ def _rerank_chunks(query: str, candidates: list[dict], top_n: int = 5) -> list[d
             scored = [c for c in candidates if "_relevance_score" in c]
             unscored = [c for c in candidates if "_relevance_score" not in c]
             scored.sort(key=lambda x: x["_relevance_score"], reverse=True)
+            if scored:
+                print(
+                    f"[rerank] ok: local listwise reranker ({model}) scored "
+                    f"{len(scored)}/{len(candidates)} candidates → top {min(top_n, len(scored))} "
+                    f"(top score {scored[0]['_relevance_score']:.4f}).",
+                    file=sys.stderr,
+                )
             return (scored + unscored)[:top_n]
 
         # ---- Classic pairwise cross-encoder path (CrossEncoder.predict) ----
@@ -295,6 +321,12 @@ def _rerank_chunks(query: str, candidates: list[dict], top_n: int = 5) -> list[d
             candidates[idx]["_relevance_score"] = _extract_score(score)
 
         candidates.sort(key=lambda x: x.get("_relevance_score", 0.0), reverse=True)
+        print(
+            f"[rerank] ok: local cross-encoder ({model}) scored "
+            f"{len(candidates)} candidates → top {min(top_n, len(candidates))} "
+            f"(top score {candidates[0].get('_relevance_score', 0.0):.4f}).",
+            file=sys.stderr,
+        )
         return candidates[:top_n]
     except Exception as e:
         print(
@@ -398,10 +430,10 @@ def _retrieve(query, k):
         return f"[knowledge base unavailable: {e}]"
 
     try:
-        default_recall = min(max(k * 4, 30, len(tables) * 4), 100) if len(tables) > 1 else max(k * 4, 30)
+        default_recall = min(max(k * 4, 75, len(tables) * 4), 150) if len(tables) > 1 else max(k * 4, 75)
         recall_k = int(os.environ.get("ORACLE_RECALL_K", default_recall))
     except (ValueError, TypeError):
-        recall_k = min(max(k * 4, 30, len(tables) * 4), 100) if len(tables) > 1 else max(k * 4, 30)
+        recall_k = min(max(k * 4, 75, len(tables) * 4), 150) if len(tables) > 1 else max(k * 4, 75)
 
     per_table = []
     for t in tables:
@@ -473,9 +505,9 @@ def _validate_oracle_response(answer_text):
     a.db = os.environ.get("ORACLE_RAG_DB_DIR")
     a.collection = os.environ.get("ORACLE_COLLECTION")
     try:
-        a.top_k = int(os.environ.get("ORACLE_TOP_K", "5"))
+        a.top_k = int(os.environ.get("ORACLE_TOP_K", "20"))
     except (ValueError, TypeError):
-        a.top_k = 5
+        a.top_k = 20
     try:
         a.region_threshold = float(os.environ.get("ORACLE_REGION_THRESHOLD", "0.60"))
     except (ValueError, TypeError):
@@ -556,9 +588,9 @@ def _run_auto():
     db_dir = os.environ.get("ORACLE_RAG_DB_DIR")
     collection = os.environ.get("ORACLE_COLLECTION", "knowledge")
     try:
-        k = int(os.environ.get("ORACLE_TOP_K", "5"))
+        k = int(os.environ.get("ORACLE_TOP_K", "20"))
     except ValueError:
-        k = 5
+        k = 20
 
     if not model:
         print("[oracle-job] ORACLE_AGENT_MODEL not set; skipping.", file=sys.stderr)
@@ -720,6 +752,7 @@ def _extract_overrides(argv):
     """
     transient_keys = [
         "ORACLE_EXPLICIT_COLLECTION",
+        "ORACLE_EXPLICIT_DB",
         "ORACLE_DEBATE_MODE",
         "ORACLE_DEBATE_LOOPS",
         "ORACLE_DEBATE_ROUNDS",
@@ -822,6 +855,7 @@ def _extract_overrides(argv):
         if a == "--db":
             if i + 1 < len(args):
                 os.environ["ORACLE_RAG_DB_DIR"] = args[i + 1]
+                os.environ["ORACLE_EXPLICIT_DB"] = "1"
                 i += 2
                 continue
             print("[oracle] --db requires a path", file=sys.stderr)
@@ -945,8 +979,9 @@ def _extract_overrides(argv):
     # it MUST override any leaked ORACLE_RAG_DB_DIR from the environment.
     coll = os.environ.get("ORACLE_COLLECTION")
     explicit_coll = os.environ.get("ORACLE_EXPLICIT_COLLECTION") == "1"
+    explicit_db = os.environ.get("ORACLE_EXPLICIT_DB") == "1"
     
-    if coll and (explicit_coll or not os.environ.get("ORACLE_RAG_DB_DIR")):
+    if coll and not explicit_db and (explicit_coll or not os.environ.get("ORACLE_RAG_DB_DIR")):
         # If the collection contains a slash, treat it as a global path
         if "/" in coll or "\\" in coll:
             abs_coll = os.path.abspath(os.path.normpath(coll))
@@ -1309,27 +1344,35 @@ def _add_maintenance(action, paths):
 
     # 6. Determine settings from active phase
     batch_setting = True
-    chunk_size = 800
-    chunk_overlap = 100
+    chunk_size = 1500
+    chunk_overlap = 300
     cer_thresh = 0.05
     max_retries = 2
     parallel = 1
     ocr_max_tokens = 4096
     code_chunk_size = 2000
-    
+    use_docling = True
+    docling_do_ocr = True
+    docling_timeout = None
+    ocr_prompt = rag_manager.DEFAULT_OCR_PROMPT
+
     phases = cfg.get("phases", [])
     if phases:
         active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
         phase_rag = active_phase.get("rag", {}) or {}
         phase_val = active_phase.get("validation", {}) or {}
         batch_setting = bool(phase_rag.get("batch", True))
-        chunk_size = int(phase_rag.get("chunk_size_chars", 800))
-        chunk_overlap = int(phase_rag.get("chunk_overlap_chars", 100))
+        chunk_size = int(phase_rag.get("chunk_size_chars", 1500))
+        chunk_overlap = int(phase_rag.get("chunk_overlap_chars", 300))
         cer_thresh = float(phase_rag.get("cer_threshold", 0.05))
         max_retries = int(phase_rag.get("ocr_max_retries", 2))
         parallel = int(phase_rag.get("ocr_parallel", 1))
         ocr_max_tokens = int(phase_rag.get("ocr_max_tokens", 4096))
         code_chunk_size = int(phase_rag.get("code_chunk_size", 2000))
+        use_docling = phase_rag.get("use_docling", True)
+        docling_do_ocr = phase_rag.get("docling_do_ocr", True)
+        docling_timeout = phase_rag.get("docling_timeout") or cfg.get("rag", {}).get("docling_timeout")
+        ocr_prompt = phase_rag.get("ocr_prompt", rag_manager.DEFAULT_OCR_PROMPT)
 
     # Resolve embedding settings with proper fallbacks to rag blocks
     global_rag = cfg.get("rag", {}) or {}
@@ -1377,7 +1420,7 @@ def _add_maintenance(action, paths):
             chunk_overlap_chars=chunk_overlap,
             ocr_api_base=endpoints.get("ocr_api_base"),
             ocr_agent=phase_models.get("ocr_agent"),
-            ocr_prompt=rag_manager.DEFAULT_OCR_PROMPT,
+            ocr_prompt=ocr_prompt,
             overwrite=False,  # CRITICAL: incremental update!
             cer_threshold=cer_thresh,
             ocr_max_retries=max_retries,
@@ -1386,6 +1429,9 @@ def _add_maintenance(action, paths):
             code_chunk_size=code_chunk_size,
             batch=batch_setting,
             ocr_only=ocr_only_mode,
+            use_docling=use_docling,
+            docling_do_ocr=docling_do_ocr,
+            docling_timeout=docling_timeout,
         )
         if success:
             print("[oracle] Ingestion completed successfully.", file=sys.stderr)
@@ -1495,26 +1541,34 @@ def _add_web_maintenance(urls):
         return 0
 
     batch_setting = True
-    chunk_size = 800
-    chunk_overlap = 100
+    chunk_size = 1500
+    chunk_overlap = 300
     cer_thresh = 0.05
     max_retries = 2
     parallel = 1
     ocr_max_tokens = 4096
     code_chunk_size = 2000
+    use_docling = True
+    docling_do_ocr = True
+    docling_timeout = None
+    ocr_prompt = rag_manager.DEFAULT_OCR_PROMPT
 
     phases = cfg.get("phases", [])
     if phases:
         active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
         phase_rag = active_phase.get("rag", {}) or {}
         batch_setting = bool(phase_rag.get("batch", True))
-        chunk_size = int(phase_rag.get("chunk_size_chars", 800))
-        chunk_overlap = int(phase_rag.get("chunk_overlap_chars", 100))
+        chunk_size = int(phase_rag.get("chunk_size_chars", 1500))
+        chunk_overlap = int(phase_rag.get("chunk_overlap_chars", 300))
         cer_thresh = float(phase_rag.get("cer_threshold", 0.05))
         max_retries = int(phase_rag.get("ocr_max_retries", 2))
         parallel = int(phase_rag.get("ocr_parallel", 1))
         ocr_max_tokens = int(phase_rag.get("ocr_max_tokens", 4096))
         code_chunk_size = int(phase_rag.get("code_chunk_size", 2000))
+        use_docling = phase_rag.get("use_docling", True)
+        docling_do_ocr = phase_rag.get("docling_do_ocr", True)
+        docling_timeout = phase_rag.get("docling_timeout") or cfg.get("rag", {}).get("docling_timeout")
+        ocr_prompt = phase_rag.get("ocr_prompt", rag_manager.DEFAULT_OCR_PROMPT)
 
     # Resolve embedding settings with proper fallbacks to rag blocks
     global_rag = cfg.get("rag", {}) or {}
@@ -1557,7 +1611,7 @@ def _add_web_maintenance(urls):
             chunk_overlap_chars=chunk_overlap,
             ocr_api_base=endpoints.get("ocr_api_base"),
             ocr_agent=phase_models.get("ocr_agent"),
-            ocr_prompt=rag_manager.DEFAULT_OCR_PROMPT,
+            ocr_prompt=ocr_prompt,
             overwrite=False,
             cer_threshold=cer_thresh,
             ocr_max_retries=max_retries,
@@ -1565,6 +1619,9 @@ def _add_web_maintenance(urls):
             ocr_max_tokens=ocr_max_tokens,
             code_chunk_size=code_chunk_size,
             batch=batch_setting,
+            use_docling=use_docling,
+            docling_do_ocr=docling_do_ocr,
+            docling_timeout=docling_timeout,
         )
         if success:
             print("[oracle] Web ingestion completed successfully.", file=sys.stderr)
@@ -1619,7 +1676,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
         yaml_path = os.path.join(project_dir, ".env.yml")
 
     _reads = []
-    _pass_round_history = False
+    _pass_history = True
     active_idx = os.environ.get("ORACLE_PHASE_INDEX")
     target_coll = os.environ.get("ORACLE_COLLECTION")
     if os.path.exists(yaml_path):
@@ -1647,7 +1704,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
                         if f_pat and f_pat not in _reads:
                             _reads.append(f_pat)
                 _ot = phase.get("escalation_debate", {}) or {}
-                _pass_round_history = bool(_ot.get("pass_history", False))
+                _pass_history = bool(_ot.get("pass_history", True))
                 break
         except Exception:
             pass
@@ -1711,9 +1768,9 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
     context = ""
     ret_mode = (os.environ.get("ORACLE_RETRIEVE_MODE") or "top_k").strip().lower()
     try:
-        k = int(os.environ.get("ORACLE_TOP_K", "5"))
+        k = int(os.environ.get("ORACLE_TOP_K", "20"))
     except ValueError:
-        k = 5
+        k = 20
     with contextlib.redirect_stdout(sys.stderr):
         if ret_mode == "full_document":
             context = _full_document(
@@ -1734,7 +1791,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
     print(
         f"\n[oracle] Starting CLI debate ({mode} mode): "
         f"{max_turns} loops x {rounds} round(s) = {total_turns} max turns, "
-        f"pass_round_history={_pass_round_history}\n",
+        f"pass_history={_pass_history}\n",
         file=sys.stderr,
     )
 
@@ -1743,7 +1800,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
     last_oracle = ""
 
     for round_idx in range(1, rounds + 1):
-        _clear = not _pass_round_history and round_idx > 1
+        _clear = not _pass_history and round_idx > 1
         if _clear:
             oracle_messages = [{"role": "system", "content": oracle_sys}]
             _session_loaded = False  # Force turn 0 + retrieval on next round
@@ -1753,9 +1810,9 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
                     (os.environ.get("ORACLE_RETRIEVE_MODE") or "top_k").strip().lower()
                 )
                 try:
-                    k = int(os.environ.get("ORACLE_TOP_K", "5"))
+                    k = int(os.environ.get("ORACLE_TOP_K", "20"))
                 except ValueError:
-                    k = 5
+                    k = 20
                 with contextlib.redirect_stdout(sys.stderr):
                     if ret_mode == "full_document":
                         context = _full_document(
@@ -1835,7 +1892,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
 
         oracle_messages.append({"role": "assistant", "content": initial_oracle})
         last_oracle = initial_oracle
-        # Mark context as loaded so subsequent rounds (pass_round_history=True)
+        # Mark context as loaded so subsequent rounds (pass_history=True)
         # send only the delta question instead of re-sending all files + context
         # that are already in oracle_messages from this round's turn 0.
         _session_loaded = True
@@ -1919,10 +1976,10 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
             loop_context = ""
             if ret_mode != "no_retrieve":
                 try:
-                    loop_k = int(os.environ.get("ORACLE_TOP_K", "5"))
-                    if loop_k < 5: loop_k = 5
+                    loop_k = int(os.environ.get("ORACLE_TOP_K", "20"))
+                    if loop_k < 20: loop_k = 20
                 except ValueError:
-                    loop_k = 5
+                    loop_k = 20
                 with contextlib.redirect_stdout(sys.stderr):
                     loop_context = _retrieve(arch_text, loop_k)
                 
@@ -2200,9 +2257,9 @@ def main():
     api_base = os.environ.get("ORACLE_AGENT_API_BASE")  # None for gemini/
     api_key = os.environ.get("ORACLE_AGENT_API_KEY")  # 'sk-dummy' for local
     try:
-        k = int(os.environ.get("ORACLE_TOP_K", "5"))
+        k = int(os.environ.get("ORACLE_TOP_K", "20"))
     except ValueError:
-        k = 5
+        k = 20
 
     # Retrieval strategy for this session (set per-phase via the YAML -> env):
     #   top_k (default) | no_retrieve | full_document

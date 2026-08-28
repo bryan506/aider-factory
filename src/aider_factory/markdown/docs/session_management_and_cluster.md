@@ -177,7 +177,7 @@ To bypass the cold-storage backup and permanently delete files, pass the `--fore
 * `helper` or `config`: Clears `.helper_session.json`.
 * `terminal` or `term`: Clears `.helper_terminal_session.json`.
 * `oracle`: Clears `.oracle_session.json` and `.oracle_session.json.costs.json`.
-* `debate`: Clears `.oracle_debate_session.json` and `.debate_aider_history.md`.
+* `debate`: Clears active `.oracle_debate_session.json` and `.debate_aider_history.md`, as well as any vaulted orphan artifacts in the `chat_history/` directory.
 * `<session_name>`: Clears session-scoped sidecars under `sessions/<session_name>/`.
 
 ### Repository Map Commands
@@ -219,7 +219,7 @@ When a session is created with an explicit configuration (e.g., `aider-factory c
 
 ### Diagnostic Status Dashboard (`--status`)
 Running `aider-factory --status` (or `--status --global`) prints real-time diagnostics:
-1. **Main Aider Sessions**: Lists session names, last modified timestamp, chat history size (KB), and config pairing status (`paired` vs `no config`).
+1. **Main Aider Sessions**: Lists session names, last modified timestamp, chat history size (KB), and config pairing status (`paired` vs `no config`). *Note: For tasks using `shared_history: false`, the reported history size accurately reflects the aggregate size of all vaulted isolated histories inside the `chat_history/` directory, rather than just the active `.aider.chat.history.md` file.*
 2. **Side-Agent Sessions & KV Caches**: Reports turn counts, disk sizes, and timestamps for `helper`, `terminal`, `oracle`, and `debate` sessions.
 3. **Remote Inference Cluster Endpoints**: Queries configured cluster endpoints to verify ONLINE/OFFLINE health status.
 

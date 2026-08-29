@@ -43,6 +43,9 @@ def check_topology(test_name, config, required_substrings, forbidden_substrings)
             code = f.read()
 
         try:
+            for k in list(sys.modules.keys()):
+                if "orchestrate" in k:
+                    del sys.modules[k]
             exec(code, namespace)
             tasks = namespace["factory"].tasks
             task_ids = " ".join(tasks.keys())

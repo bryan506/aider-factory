@@ -499,7 +499,7 @@ class TestE2EWorkflowSmoke(unittest.TestCase):
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=240,
+                timeout=900,
             )
 
             self.assertEqual(

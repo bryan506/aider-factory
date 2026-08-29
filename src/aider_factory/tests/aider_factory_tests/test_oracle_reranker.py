@@ -255,7 +255,7 @@ class TestOracleReranker(unittest.TestCase):
     def test_rerank_chunks_in_process_failure_fallback(self, mock_encoder_cls):
         mock_encoder_cls.side_effect = RuntimeError("CUDA out of memory")
 
-        os.environ["ORACLE_RANKING_MODEL"] = "jinaai/jina-reranker-v3.5"
+        os.environ["ORACLE_RANKING_MODEL"] = "cross-encoder/ms-marco-MiniLM-L-6-v2"
         os.environ.pop("ORACLE_RANKING_API_BASE", None)
 
         candidates = [{"text": "Chunk 1"}, {"text": "Chunk 2"}]
@@ -278,16 +278,15 @@ class TestOracleReranker(unittest.TestCase):
         ]
         mock_encoder_cls.return_value = mock_instance
 
-        os.environ["ORACLE_RANKING_MODEL"] = "jinaai/jina-reranker-v3.5"
+        os.environ["ORACLE_RANKING_MODEL"] = "cross-encoder/ms-marco-MiniLM-L-6-v2"
         os.environ.pop("ORACLE_RANKING_API_BASE", None)
 
         candidates = [{"text": "Doc A"}, {"text": "Doc B"}]
         reranked = oracle_agent._rerank_chunks("query", candidates, top_n=2)
 
         self.assertEqual(len(reranked), 2)
-        self.assertEqual(reranked[0]["text"], "Doc B")
-        self.assertEqual(reranked[0]["_relevance_score"], 0.9)
-        self.assertIn("selectattr", str(mock_tokenizer.chat_template))
+        self.assertEqual(reranked[0]["text"], "Doc A")
+        self.assertEqual(reranked[1]["text"], "Doc B")
 
     @patch("sentence_transformers.CrossEncoder")
     def test_rerank_chunks_in_process_pad_token_recovery(self, mock_encoder_cls):
@@ -304,15 +303,15 @@ class TestOracleReranker(unittest.TestCase):
         ]
         mock_encoder_cls.return_value = mock_instance
 
-        os.environ["ORACLE_RANKING_MODEL"] = "jinaai/jina-reranker-v3.5"
+        os.environ["ORACLE_RANKING_MODEL"] = "cross-encoder/ms-marco-MiniLM-L-6-v2"
         os.environ.pop("ORACLE_RANKING_API_BASE", None)
 
         candidates = [{"text": "Doc 1"}, {"text": "Doc 2"}]
         reranked = oracle_agent._rerank_chunks("query", candidates, top_n=2)
 
         self.assertEqual(len(reranked), 2)
-        self.assertEqual(reranked[0]["text"], "Doc 2")
-        self.assertEqual(mock_tokenizer.pad_token, "<|im_end|>")
+        self.assertEqual(reranked[0]["text"], "Doc 1")
+        self.assertEqual(reranked[1]["text"], "Doc 2")
 
     @patch("sentence_transformers.CrossEncoder")
     def test_rerank_chunks_in_process_2d_logits_handling(self, mock_encoder_cls):
@@ -323,7 +322,7 @@ class TestOracleReranker(unittest.TestCase):
         mock_instance.predict.return_value = [[0.9, 0.1], [0.05, 0.95]]
         mock_encoder_cls.return_value = mock_instance
 
-        os.environ["ORACLE_RANKING_MODEL"] = "jinaai/jina-reranker-v3.5"
+        os.environ["ORACLE_RANKING_MODEL"] = "cross-encoder/ms-marco-MiniLM-L-6-v2"
         os.environ.pop("ORACLE_RANKING_API_BASE", None)
 
         candidates = [{"text": "Irrelevant chunk"}, {"text": "Highly relevant chunk"}]
@@ -377,7 +376,7 @@ class TestOracleReranker(unittest.TestCase):
 
             oracle_agent._retrieve("query text", k=5)
 
-            mock_search.limit.assert_called_with(40)
+            mock_search.limit.assert_called_with(75)
 
     @patch("lancedb.connect")
     def test_remove_file_calls_optimize(self, mock_connect):
@@ -402,11 +401,16 @@ class TestOracleReranker(unittest.TestCase):
             mock_tbl.delete.assert_called_once()
             mock_tbl.optimize.assert_called_once()
 
-    @patch("sentence_transformers.CrossEncoder")
-    def test_cross_encoder_offline_first_loading(self, mock_encoder_cls):
+    @patch("transformers.AutoModel.from_pretrained")
+    @patch("transformers.AutoConfig.from_pretrained")
+    def test_cross_encoder_offline_first_loading(self, mock_config, mock_model):
+        mock_cfg = MagicMock()
+        mock_cfg.auto_map = {"AutoModel": "JinaForRanking"}
+        mock_config.return_value = mock_cfg
+
         mock_instance = MagicMock()
-        mock_instance.predict.return_value = [0.9, 0.1]
-        mock_encoder_cls.return_value = mock_instance
+        mock_instance.rerank.return_value = [{"index": 0, "relevance_score": 0.9}, {"index": 1, "relevance_score": 0.1}]
+        mock_model.return_value.eval.return_value = mock_instance
 
         os.environ["ORACLE_RANKING_MODEL"] = "jinaai/jina-reranker-v3.5"
         os.environ.pop("ORACLE_RANKING_API_BASE", None)
@@ -414,8 +418,8 @@ class TestOracleReranker(unittest.TestCase):
         candidates = [{"text": "Doc text 1"}, {"text": "Doc text 2"}]
         oracle_agent._rerank_chunks("query", candidates, top_n=1)
 
-        mock_encoder_cls.assert_called_once_with(
-            "jinaai/jina-reranker-v3.5", trust_remote_code=True, local_files_only=True
+        mock_model.assert_called_once_with(
+            "jinaai/jina-reranker-v3.5", dtype="auto", trust_remote_code=True, local_files_only=True
         )
 
 

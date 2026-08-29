@@ -5,6 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+script_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.abspath(os.path.join(script_dir, "../../../../"))
+pkg_python_dir = os.path.join(src_dir, "aider_factory", "python")
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+if pkg_python_dir not in sys.path:
+    sys.path.insert(0, pkg_python_dir)
+
 import yaml
 from aider_factory.python.orchestrate import AiderFactory, Task, TaskStatus
 from aider_factory.python.run_workflow import _render_validate_template, resolve_template_path
@@ -464,6 +472,9 @@ class TestE2E4JobPipeline(unittest.TestCase):
                     sys.argv = ["run_workflow.py", sess_name, str(cfg_file)]
                     os.chdir(proj)
                     ns = {"__name__": "__test__", "__file__": str(run_workflow_script)}
+                    for k in list(sys.modules.keys()):
+                        if "orchestrate" in k:
+                            del sys.modules[k]
                     exec(runner_code, ns)
 
                     tasks = ns["factory"].tasks
@@ -568,6 +579,9 @@ class TestE2E4JobPipeline(unittest.TestCase):
                 sys.argv = ["run_workflow.py", sess_name, str(cfg_file)]
                 os.chdir(proj)
                 ns = {"__name__": "__test__", "__file__": str(run_workflow_script)}
+                for k in list(sys.modules.keys()):
+                    if "orchestrate" in k:
+                        del sys.modules[k]
                 exec(runner_code, ns)
 
                 tasks = ns["factory"].tasks
@@ -660,6 +674,9 @@ class TestE2E4JobPipeline(unittest.TestCase):
                 sys.argv = ["run_workflow.py", str(test_cfg_file)]
                 os.chdir(proj)
                 ns = {"__name__": "__test__", "__file__": str(run_workflow_script)}
+                for k in list(sys.modules.keys()):
+                    if "orchestrate" in k:
+                        del sys.modules[k]
                 exec(runner_code, ns)
 
                 # Assert that developer's session.yml was NOT clobbered by test_ephemeral.yml

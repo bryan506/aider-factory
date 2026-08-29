@@ -9,6 +9,10 @@ sys.path.insert(0, python_module_dir)
 import rag_manager
 
 # --- MONKEYPATCH FOR OFFLINE TESTING ---
+_orig_rasterize = rag_manager._rasterize
+_orig_ocr = rag_manager._ocr_image
+_orig_ast = rag_manager._ast_chunk
+
 def mock_rasterize(src_path, out_dir, dpi=150):
     # raw_text is the CER *reference* only (deliberately unlike the OCR output below),
     # so the OCR path must actually run for the PDF to be captured.
@@ -129,6 +133,11 @@ rag_manager.ingest(context_root=base_dir, collection_name="legacy_col", embed_mo
 legacy_tbl = legacy_db.open_table("legacy_col_docs")
 assert legacy_tbl.count_rows() == 0, "Failed: old-schema guard was bypassed and rows were added."
 print("✅ Old-schema guard successfully prevented appends on the target table.")
+
+# RESTORE ORIGINAL FUNCTIONS TO PREVENT LEAKING INTO OTHER TESTS
+rag_manager._rasterize = _orig_rasterize
+rag_manager._ocr_image = _orig_ocr
+rag_manager._ast_chunk = _orig_ast
 
 shutil.rmtree(base_dir)
 print("\n🎉 All Phase 3+4 ingest integration tests passed!")

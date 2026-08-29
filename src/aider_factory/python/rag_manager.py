@@ -788,7 +788,7 @@ def ingest(
                     pass
 
             if should_try_docling:
-                sys.stderr.write(f"       [Docling] Attempting isolated fast-path parse for {os.path.basename(doc_path)}...\n")
+                sys.stderr.write(f"       [Docling] Attempting native parse for {os.path.basename(doc_path)}...\n")
                 sys.stderr.flush()
 
                 runner_script = os.path.abspath(
@@ -797,20 +797,29 @@ def ingest(
                 import subprocess
                 try:
                     do_ocr_arg = "true" if docling_do_ocr else "false"
+                    
+                    # Pass the host's HF_HOME to the uv environment so Docling can use cached weights
+                    env = os.environ.copy()
+                    if "HF_HOME" not in env:
+                        env["HF_HOME"] = os.path.expanduser("~/.cache/huggingface")
+                    
                     result = subprocess.run(
-                        ["uv", "run", "--isolated", "--with", "docling>=2.0.0", "python", runner_script, doc_path, md_path, do_ocr_arg],
+                        ["uv", "run", "--with", "docling>=2.0.0", "python", runner_script, doc_path, md_path, do_ocr_arg],
                         capture_output=True,
                         text=True,
                         check=False,
                         timeout=docling_timeout,
+                        env=env,
                     )
                     if result.returncode == 0:
-                        sys.stderr.write("       [Docling] Success! Extracted natively via isolated env.\n")
+                        sys.stderr.write("       [Docling] Success! Extracted natively.\n")
                         sys.stderr.flush()
                         with open(md_path, "r", encoding="utf-8") as f:
                             return f.read()
                     else:
-                        sys.stderr.write(f"       [Docling] Isolated parse failed (code {result.returncode}). Falling back to Vision OCR.\n")
+                        sys.stderr.write(f"       [Docling] Native parse failed (code {result.returncode}). Falling back to Vision OCR.\n")
+                        if result.stderr:
+                            sys.stderr.write(f"       [Docling Error] {result.stderr.strip()}\n")
                         sys.stderr.flush()
                 except Exception as e:
                     sys.stderr.write(f"       [Docling] Subprocess failed: {e}. Falling back to Vision OCR.\n")

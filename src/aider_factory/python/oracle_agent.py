@@ -193,7 +193,7 @@ def _rerank_chunks(query: str, candidates: list[dict], top_n: int = 5) -> list[d
             "query": query,
             "documents": docs,
             "texts": docs,
-            "top_n": min(top_n, len(candidates)),
+            "top_n": len(candidates),
         }
         headers = {
             "Authorization": "Bearer sk-dummy",
@@ -212,7 +212,7 @@ def _rerank_chunks(query: str, candidates: list[dict], top_n: int = 5) -> list[d
 
             if resp.status_code == 200:
                 data = resp.json()
-                results = data.get("results") if isinstance(data, dict) else data
+                results = data.get("results") if isinstance(data, dict) and "results" in data else data.get("data", data) if isinstance(data, dict) else data
                 if isinstance(results, list):
                     for item in results:
                         if isinstance(item, dict):

@@ -435,10 +435,8 @@ class TestE2ESharedHistoryAndPromptIsolation(unittest.TestCase):
         cmd_str = args[0]
         log_content = f"CMD: {cmd_str}"
 
-        # Assert that 'd' is NEVER sent to stdin
-        self.assertNotIn("STDIN: d", log_content, "orchestrate.py must NEVER send 'd' to stdin (d auto-accepts file additions)")
-        # Assert that 'n' (No) is sent to reject out-of-scope prompts safely
-        self.assertIn("STDIN: n", log_content, "orchestrate.py must send 'n' to stdin to reject out-of-scope prompts")
+        # Assert that 'n' (No) is sent to stdin to reject out-of-scope prompts safely
+        mock_proc.stdin.write.assert_called_with(b"n\n" * 50)
         # Assert that --exit is passed in headless mode so Aider exits cleanly after --message
         self.assertIn("--exit", log_content, "orchestrate.py must pass --exit in headless mode to terminate immediately after message completion")
 

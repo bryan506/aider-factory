@@ -63,6 +63,10 @@ def main():
             opts = PdfPipelineOptions()
             opts.do_ocr = do_ocr
             opts.generate_page_images = False
+            
+            if not do_ocr:
+                opts.do_table_structure = False
+                
             converter = DocumentConverter(
                 format_options={InputFormat.PDF: PdfFormatConverter(pipeline_options=opts)}
             )

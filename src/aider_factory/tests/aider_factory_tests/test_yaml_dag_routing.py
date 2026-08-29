@@ -45,6 +45,9 @@ def run_test(test_name, yaml_content, expected_mapping):
         code = f.read()
 
     try:
+        for k in list(sys.modules.keys()):
+            if "orchestrate" in k:
+                del sys.modules[k]
         exec(code, namespace)
         tasks = namespace["factory"].tasks
 
@@ -244,6 +247,9 @@ def test_yaml_dag_routing():
         with open(run_workflow_path, "r") as f:
             code_5 = f.read()
         try:
+            for k in list(sys.modules.keys()):
+                if "orchestrate" in k:
+                    del sys.modules[k]
             exec(code_5, namespace_5)
             tasks_5 = namespace_5["factory"].tasks
             job1_task = next(t for t_id, t in tasks_5.items() if "job1" in t_id)
@@ -306,6 +312,9 @@ def test_yaml_dag_routing():
         with open(run_workflow_path, "r") as f:
             code_6 = f.read()
         try:
+            for k in list(sys.modules.keys()):
+                if "orchestrate" in k:
+                    del sys.modules[k]
             exec(code_6, namespace_6)
             tasks_6 = namespace_6["factory"].tasks
             job1_inherit = tasks_6["p0_job1_a"]
@@ -370,6 +379,9 @@ def test_yaml_dag_routing():
         with open(run_workflow_path, "r") as f:
             code_7 = f.read()
         try:
+            for k in list(sys.modules.keys()):
+                if "orchestrate" in k:
+                    del sys.modules[k]
             exec(code_7, namespace_7)
             tasks_7 = namespace_7["factory"].tasks
 

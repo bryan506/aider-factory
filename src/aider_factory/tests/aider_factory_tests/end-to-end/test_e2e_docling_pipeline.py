@@ -47,7 +47,7 @@ class TestE2EDoclingPipeline(unittest.TestCase):
                 batch=True,
                 overwrite=True,
                 use_docling=True,
-                docling_do_ocr=False,
+                docling_do_ocr=True,
             )
 
             self.assertTrue(success, "Live Docling ingestion failed.")

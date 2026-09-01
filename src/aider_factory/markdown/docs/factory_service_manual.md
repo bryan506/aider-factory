@@ -1715,367 +1715,6 @@ Model-specific reasoning budgets and KV-cache behaviors are forced via this file
 | **Empty RAG context / `[knowledge base unavailable]`** | Embedding endpoint unreachable, or model evicted on `--models-max 1` servers. | Verify embedding server health (`curl <embed_api_base>/v1/models`). Increase `--models-max`. |
 | **Slow Oracle CLI returns** | Model is streaming `<think>` tokens to stdout. | Ensure `think: false` and `thinking_tokens: 0` are set in `.aider.model.settings.yml` for the `rag_agent`. |
 | **`permission denied: /run` during a session** | Model emitted `/run` inside a shell block instead of a bare command. | Aider's `architect` mode blocks shell execution. Use the programmatic `oracle` job or type `/run` manually in pair mode. |
-# Local Inference Setup Guide
-
-This guide covers the bare-metal installation, compilation, and systemd daemonization of local inference servers (`llama.cpp` and `ollama`) optimized for the AI Factory pipeline.
-
-## 1. GPU Acceleration Layer
-
-### Primary: AMD ROCm Setup
-
-For AMD GPUs (especially Unified Memory setups like MI300 or consumer APUs/GPUs), install the ROCm SDK and add your user to the required hardware groups.
-
-```bash
-sudo apt install -y rocm-hip-sdk
-sudo usermod -aG render,video $USER
-# Log out and log back in for group changes to take effect
-```
-
-### Auxiliary: NVIDIA CUDA Setup
-
-If deploying on an NVIDIA host, install the proprietary drivers and CUDA toolkit:
-
-```bash
-sudo apt install -y nvidia-driver-550 nvidia-cuda-toolkit
-```
-
-### Model Acquisition and Organization
-
-GGUF model files can be downloaded from HuggingFace and stored in a central directory. All models are registered in `models.ini` using aliases, which you then reference in your pipeline YAML.
-
-#### Downloading Models from HuggingFace
-
-```bash
-mkdir -p ~/Programs/gguf
-cd ~/Programs/gguf
-
-# Download split model files from HuggingFace (example pattern)
-wget https://huggingface.co/USER/MODEL/resolve/main/model-00001-of-00002.gguf
-wget https://huggingface.co/USER/MODEL/resolve/main/model-00002-of-00002.gguf
-```
-
-#### Merging Split GGUF Files
-
-If the model was downloaded as multiple parts, use `llama-merge-gguf` to combine them:
-
-```bash
-# Clone and build llama-merge-gguf
-git clone https://github.com/ggerganov/llama.cpp
-cd llama.cpp/gguf-py
-pip install -e .
-
-# Merge split files into one GGUF
-llama-merge-gguf \
-    model-00001-of-00002.gguf \
-    model-00002-of-00002.gguf \
-    qwen3.6-27b-merged.gguf
-
-# Remove split files, keep only the merged file
-rm model-00001-of-00002.gguf model-00002-of-00002.gguf
-```
-
-#### Organizing Models
-
-All merged GGUF files live in `~/Programs/gguf/` alongside `models.ini`:
-
-```
-~/Programs/gguf/
-  models.ini
-  qwen3.6-27b-merged.gguf
-  glm-ocr-f16.gguf
-  glm-ocr-mmproj.gguf
-```
-
-## 2. Compiling `llama.cpp`
-
-#### Dependencies
-
-```bash
-sudo apt update
-sudo apt install -y build-essential cmake git
-```
-
-#### Clone the Repository
-
-```bash
-git clone https://github.com/ggerganov/llama.cpp
-cd llama.cpp
-```
-
-#### AMD (HIP/ROCm) — Primary Build
-
-```bash
-HIPCXX="$(hipconfig -l)/clang" cmake -B build \
-    -DGGML_HIP=ON \
-    -DGGML_HIP_ROCWMMA_FATTN=ON \
-    -DCMAKE_BUILD_TYPE=Release
-
-cmake --build build --config Release -j $(nproc)
-```
-
-#### NVIDIA (CUDA) — Auxiliary Build
-
-```bash
-cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j $(nproc)
-```
-
-The compiled `llama-server` binary will be at:
-
-```bash
-./build/bin/llama-server
-```
-
----
-
-## 3. The `models.ini` Configuration File
-
-llama.cpp supports a local model registry via `models.ini`. This file defines available models and their GGUF file paths, allowing `llama-server` to switch models on the fly via an API call.
-
-Create `~/.config/llama-server/models.ini`:
-
-```ini
-# ~/.config/llama-server/models.ini
-# Format: [model-name] -> /path/to/model.gguf
-# The name after the slash in your pipeline YAML (e.g., "glm-ocr-f16:latest") maps to these entries.
-
-[qwen3.5-122b-a10b-90k:latest]
-path = /opt/models/qwen3.5-122b-a10b-90k-Q4_K_M.gguf
-ctx_size = 32768
-n_gpu_layers = 999
-
-[qwen3.6-27b-90k:latest]
-path = /opt/models/qwen3.6-27b-90k-udq4kxl.gguf
-ctx_size = 32768
-n_gpu_layers = 999
-
-[glm-ocr-f16:LATEST]
-model = /opt/models/GLM-OCR-f16.gguf
-mmproj = /opt/models/mmproj-GLM-OCR-Q8_0.gguf
-ctx-size = 65536          # divided by parallel slots (65536/8 = 8192 per slot)
-parallel = 8              # 8 concurrent OCR requests; sweet spot for AMD APUs
-n-gpu-layers = 999
-temp = 0.1
-flash-attn = off          # vision models: do NOT enable flash attention
-cache-type-k = f16        # vision models: use f16 KV cache (not quantized)
-cache-type-v = f16
-mmap = false
-
-[qwen3-embedding-8b-8k:LATEST]
-model = /opt/models/Qwen3-Embedding-8B.i1-Q6_K.gguf
-embeddings = on            # expose /v1/embeddings (CRITICAL for embedding models)
-pooling = last             # Qwen3-Embedding pools the final [EOS] token (CRITICAL)
-ctx-size = 16384           # safety margin for long queries (model trains to 40960)
-batch-size = 16384
-ubatch-size = 16384
-n-gpu-layers = 999
-parallel = 1               # embedding requests are serial; 1 slot is sufficient
-flash-attn = on
-cache-type-k = f16
-cache-type-v = f16
-mmap = false
-```
-
-When `llama-server` is running, you can switch models via API:
-
-```bash
-curl http://localhost:8081/load -d '{"model": "qwen3.6-27b-90k:latest"}'
-```
-
----
-
-## 4. Systemd Services for llama-server Instances
-
-#### Systemd Service 1: Primary Router (Port 8081)
-
-This instance serves the Architect and RAG Oracle models. It runs with MTP enabled for speed and parallel execution for hot-swapping.
-
-Create `/etc/systemd/system/llama-pair-router.service`:
-
-```ini
-[Unit]
-Description=Llama.cpp Primary Router — Architect + Oracle + Fallback Models
-After=network.target
-
-[Service]
-Type=simple
-User=YOUR_USERNAME
-WorkingDirectory=/home/YOUR_USERNAME
-
-# Ubuntu Performance & Stability Tuning
-LimitMEMLOCK=infinity
-LimitNOFILE=1048576
-OOMScoreAdjust=-1000
-# Environment="HSA_OVERRIDE_GFX_VERSION=11.0.0" # Uncomment if using consumer AMD RDNA3 GPUs/APUs
-
-ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --host 0.0.0.0 \
-    --port 8081 \
-    --models-dir /home/YOUR_USERNAME/.config/llama-server \
-    --models-max 3 \
-    --parallel 3 \
-    --ctx-size 32768 \
-    --spec-type draft-mtp \
-    --spec-draft-n-max 3 \
-    --flash-attn
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable llama-pair-router.service
-sudo systemctl start llama-pair-router.service
-# Verify status:
-sudo systemctl status llama-pair-router.service
-```
-
-#### Systemd Service 2: Vision/OCR + Embedding Endpoint (Port 8080)
-
-This instance serves the GLM-OCR vision model and the embedding model. The router loads models on demand (`--models-max 1` means one model at a time; the router evicts the idle model when a different model is requested). **Critical:** Do NOT enable MTP or Flash Attention as global flags on this instance — vision model encoders break with both. Per-model overrides in `models.ini` (e.g. `flash-attn = on` for the embedding model) are safe.
-
-Create `/etc/systemd/system/llama-vision.service`:
-
-```ini
-[Unit]
-Description=Llama.cpp Vision/OCR + Embedding Endpoint
-After=network.target
-
-[Service]
-Type=simple
-User=YOUR_USERNAME
-WorkingDirectory=/home/YOUR_USERNAME
-
-# Ubuntu Performance & Stability Tuning
-LimitMEMLOCK=infinity
-LimitNOFILE=1048576
-OOMScoreAdjust=-1000
-# Environment="HSA_OVERRIDE_GFX_VERSION=11.0.0" # Uncomment if using consumer AMD RDNA3 GPUs/APUs
-
-ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --host 0.0.0.0 \
-    --port 8080 \
-    --models-preset /path/to/models.ini \
-    --models-max 1 \
-    --parallel 1 \
-    --no-mmap \
-    --slot-prompt-similarity 0.0
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Note: `--parallel 1` is the global default; the per-model `parallel = 8` in `models.ini` for `glm-ocr-f16:LATEST` overrides it when that model is loaded.
-
-#### Parallel OCR Tuning (Vision Model Slot Count)
-
-The optimal number of parallel OCR slots depends on your GPU's memory bandwidth. On an AMD Strix Halo APU (128 GB unified memory, ~250 GB/s bandwidth, 40 CUs at 2800 MHz), benchmarks show:
-
-| `parallel` | Per-slot decode speed | Aggregate throughput | Wall-clock (47-page PDF) | Verdict                          |
-| ---------- | --------------------- | -------------------- | ------------------------ | -------------------------------- |
-| 1          | ~80 t/s               | ~80 t/s              | ~20 min (sequential)     | Baseline                         |
-| 8          | ~80 t/s               | ~640 t/s             | ~5 min                   | Sweet spot                       |
-| 16         | ~14 t/s               | ~224 t/s             | ~12 min                  | Regression (bandwidth saturated) |
-
-**Recommendation:** Start at `parallel = 8` for vision models. Memory cost is minimal (~5 GB total for GLM-OCR at 8 slots with 8192 context per slot). Monitor GPU clocks — if they drop below ~2200 MHz sustained, reduce slots.
-
-Enable and start:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable llama-vision.service
-sudo systemctl start llama-vision.service
-# Verify status:
-sudo systemctl status llama-vision.service
-```
-
----
-
-## 5. Remote llama-server Instances & Ubuntu Firewall (UFW)
-
-If you are accessing these servers from other machines on your LAN (or running remote instances), ensure Ubuntu's Uncomplicated Firewall (UFW) allows the traffic:
-
-```bash
-sudo ufw allow 8080/tcp
-sudo ufw allow 8081/tcp
-sudo ufw allow 11434/tcp
-```
-
-If your primary inference machine is a separate device (e.g., a tablet with an AMD GPU), you can run an additional `llama-server` instance on that remote host and configure the pipeline to target it via the `architect_api_base` endpoint.
-
-On the remote host, create a similar systemd service pointing to the same `models.ini`:
-
-```ini
-[Service]
-ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --host 0.0.0.0 \
-    --port 8081 \
-    --models-dir /home/YOUR_USERNAME/.config/llama-server \
-    --models-max 3 \
-    --parallel 3 \
-    --ctx-size 32768
-```
-
-## 6. Ollama Configuration (Port 11434)
-
-Ollama is primarily used for fast, background coding tasks (the Editor model). It runs on its default port (11434) and is referenced by the `editor_api` endpoint.
-
-#### Installation
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-```
-
-#### Systemd Performance Tuning & Remote Access
-
-To optimize Ollama for the AI Factory pipeline, we need to allow remote access, prevent models from unloading during long test-suite runs, and enable Flash Attention to save VRAM.
-
-Edit the systemd override:
-
-```bash
-sudo systemctl edit ollama.service
-```
-
-Add the following environment variables:
-
-```ini
-[Service]
-# Allow remote access from other machines on the LAN
-Environment="OLLAMA_HOST=0.0.0.0"
-# Keep models loaded in VRAM indefinitely (prevents slow reloads during long pipeline pauses)
-Environment="OLLAMA_KEEP_ALIVE=-1"
-# Enable Flash Attention to save VRAM on large context windows
-Environment="OLLAMA_FLASH_ATTENTION=1"
-# Allow multiple concurrent requests (useful if running multiple pipelines)
-Environment="OLLAMA_NUM_PARALLEL=4"
-```
-
-Then:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart ollama
-```
-
-#### Pulling Models
-
-```bash
-ollama pull qwen3.6-27B-90k:latest
-ollama pull qwen2.5-coder:1.5b
-```
-
-The Ollama API is automatically OpenAI-compatible, so the `ollama/` prefix in your pipeline YAML will route correctly.
 # Full-Stack Observability, Master Logging & Cost Accounting
 
 ## 1. Executive Overview & Foundational Invariants
@@ -2736,6 +2375,17 @@ model_list:
 ```
 Set `endpoints.ranking_api_base: "http://<proxy-ip>:4000/v1"` in `.env.yml`.
 
+#### Option C: Native `llama-server` Daemonization
+```bash
+./build/bin/llama-server \
+  -m /opt/models/Qwen3-Reranker-4B_Q8_0.gguf \
+  --alias qwen3-reranker-4b:latest \
+  --reranking \
+  --embedding \
+  --pooling rank \
+  --port 8081
+```
+
 ---
 
 ## 6. Operational Edge Cases, Failure Modes & Telemetry
@@ -2748,6 +2398,7 @@ Set `endpoints.ranking_api_base: "http://<proxy-ip>:4000/v1"` in `.env.yml`.
 | **Cold-start / air-gapped cache miss** | `AutoModel(trust_remote_code=True)` fails with `local_files_only=True` on first use (custom `modeling.py` not cached). | The loader falls back to `local_files_only=False` to download the trusted remote code + weights once; subsequent runs are fully offline. Pre-seed the HF cache for air-gapped CI. |
 | **2D Logit Score Mismatch (classic cross-encoders)** | Binary `SequenceClassification` cross-encoder outputs a 2-D logit array `[neg, pos]`. | `_extract_score` safely inspects array length and extracts `val[-1]` (the positive relevance class) rather than taking index `0`. |
 | **Missing local dependencies** | `ImportError: sentence_transformers` or `transformers`. | Ensure execution uses `.aider_factory/bash/oracle`, `.aider_factory/bash/validate`, or `factory` to run within the provisioned `uv` tool venv. |
+| **Near-Zero Scores ($10^{-25}$) / Inverted Rankings on `llama-server`** | `llama-server` returns scores like `2.5e-26` and ranks irrelevant documents higher. | **Cause:** The GGUF was converted without `cls.output.weight` or `llama-server` is missing `--embedding` and `--pooling rank`, causing unscaled vocabulary-wide softmax evaluation. **Fix:** Reconvert from raw HF safetensors using `convert_hf_to_gguf.py` and ensure `reranking = true`, `embedding = true`, and `pooling = rank` are set in `models.ini`. |
 # Session Management & Cold-Storage Caching
 
 The `aider-factory` framework provides an enterprise-grade session lifecycle and cold-storage archiving subsystem designed for deterministic task resumption and multi-workspace isolation.
@@ -3737,6 +3388,22 @@ To deploy it persistently on your host GPU/CPU, use `uv` (PEP 723 inline depende
 
 `aider-factory` provides a private, automated web research and ingestion subsystem composed of `research_agent.py` (metasearch & sitemap harvesting) and `rag_web.py` (multi-stage URL extraction & `llms.txt` discovery). This subsystem enables agents to query live web data, harvest documentation manifests, and ingest external HTML/PDFs into LanceDB without relying on commercial search APIs.
 
+### SearXNG Service Auto-Provisioning (`ensure_searxng_service`)
+
+The pipeline automatically manages and provisions the local SearXNG service (`http://localhost:8088`)
+in user-space via `cli.py` on first run or whenever `aider-research` is invoked:
+
+1.  **Health Check Probe:** Attempts a 1-second `GET http://localhost:8088/healthz` probe.
+2.  **Container Engine Precedence (Podman-First):**
+    - **Podman (Primary):** Checks for `podman` first (`podman info`). Preferred for rootless,
+      zero-sudo execution.
+    - **Docker (Fallback):** Checked only if Podman is missing or unusable.
+3.  **Configuration & Systemd Unit Synthesis:** Auto-generates `~/.config/searxng/settings.yml`
+    (enabling JSON format) and writes a user-space systemd unit file at
+    `~/.config/systemd/user/searxng.service`.
+4.  **Daemon Launch:** Executes `systemctl --user enable --now searxng.service` without requiring
+    `sudo` privileges.
+
 ### Foundational Invariants
 
 1. **Strict Privacy & Zero-Tracking**: Queries are routed through a local, user-level SearXNG container (`port 8088`). Queries never leave the infrastructure unless falling back to public instances.
@@ -3805,59 +3472,71 @@ To deploy it persistently on your host GPU/CPU, use `uv` (PEP 723 inline depende
 ## 3. Technical Mechanics & Deep-Dive Logic
 
 ### Dynamic Public Instance Fallback
+
 To mitigate upstream rate limits (e.g., Google serving CAPTCHAs to the local SearXNG instance), `research_agent.py` implements a dynamic fallback mechanism:
+
 1. Fetches `https://searx.space/data/instances.json`.
 2. Filters for instances with `network_type == "normal"`, `uptimeMonth >= 99`, `grade` in `["A", "A+", "V"]`, and Google error rate `< 50`.
 3. Sorts by highest uptime and lowest latency.
 4. Caches the top 5 URLs in `.aider_factory/logs/cache/searxng_fallbacks.json` for 24 hours.
 
 ### Sitemap Discovery & Fallback Chain
+
 When harvesting a domain, if the default `sitemap.xml` endpoint fails or returns 404 at depth 1, the pipeline automatically falls back to fetching `robots.txt` to parse official `Sitemap:` directives. If no directives are found, it performs a final probe for an `llms.txt` manifest.
 
 ### Multi-Line Query Collapse
+
 When passing complex prompts via `--file <query.txt>`, the research agent deterministically collapses multi-line inputs into a single-line query using `re.sub(r"\s+", " ", query).strip()` before dispatching to the SearXNG API.
 
 ### `llms.txt` Discovery & Regex Parsing
+
 When harvesting an `llms.txt` manifest, the pipeline extracts valid Markdown link targets using the following regular expression:
+
 ```python
 re.findall(r'\[.*?\]\((https?://[^\s\)]+|/[^\s\)]+|[^\s\)]+\.md|[^\s\)]+\.html|[^\s\)]+\.txt)\)', text)
 ```
+
 Relative URLs are automatically resolved against the manifest's base URL using `urllib.parse.urljoin`.
 
 ### Sitemap Regex Filtering (`--grep`)
+
 When harvesting URLs via `--sitemap`, the pipeline supports powerful pre-ingestion filtering using `--grep` and `--grep-exclude`. These flags compile the provided strings as case-insensitive regular expressions (`re.IGNORECASE`), allowing flexible, pattern-based inclusion or exclusion of massive sitemaps before they reach the ingestion engine.
 
 ### Headless Playwright JIT Provisioning
+
 For Single-Page Applications (SPAs) where Trafilatura yields $< 100$ bytes, `rag_web.py` falls back to Playwright. If the Chromium binary is missing, it catches the `Executable doesn't exist` exception and executes:
+
 ```python
 subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
 ```
+
 This downloads the ~150MB binary to `~/.cache/ms-playwright` transparently.
 
 ### Concurrent Web Fetching
+
 When `aider-oracle --add-web` is invoked with multiple URLs, `rag_web.fetch_urls_batch()` utilizes a `ThreadPoolExecutor`. The concurrency level is controlled by the `--workers` flag (or `ORACLE_WEB_WORKERS`), allowing rapid ingestion of large documentation sites.
 
 ---
 
 ## 4. Exhaustive CLI Invocations & Command Matrix
 
-| Command / Flag | Context | Description & Operational Behavior |
-| :--- | :--- | :--- |
-| `aider-research search "<query>" --top 10` | Metasearch | Queries SearXNG and returns the top 10 results as a Markdown report. |
-| `aider-research search "<query>" --academic` | Academic Search | Filters SearXNG engines to `arxiv,google_scholar,crossref,core`. |
-| `aider-research search "<query>" --engines e1,e2` | Metasearch | Queries specific SearXNG engines (e.g., `google,bing`). |
-| `aider-research search "<query>" --time-range day\|month\|year` | Metasearch | Restricts search results to a specific time range. |
-| `aider-research search --file <query.txt>` | Metasearch | Reads a multi-line query from a file and collapses it into a single search string. |
-| `aider-research search "<query>" --links-only` | URL Extraction | Returns only a raw list of URLs (useful for piping into `--add-web`). |
-| `aider-research search "<url>" --sitemap` | Sitemap Harvest | Recursively parses `sitemap.xml` or `llms.txt` for URLs up to `--site-depth`. |
-| `aider-research search "<url>" --sitemap --site-depth N` | Sitemap Harvest | Recursively parses sitemaps up to depth `N` (default: 1). |
-| `aider-research search ... --grep "<regex>"` | URL Filtering | Applies case-insensitive regex inclusion filtering to harvested URLs. |
-| `aider-research search ... --grep-exclude "<regex>"` | URL Filtering | Applies case-insensitive regex exclusion filtering to harvested URLs. |
-| `aider-oracle --add-web <url>` | Single URL Ingest | Downloads, converts to Markdown/PDF, and incrementally ingests into LanceDB. |
-| `aider-oracle --add-web --file <urls.txt>` | Batch URL Ingest | Reads line-separated URLs and ingests them sequentially. |
-| `aider-oracle --add-web --file:<urls.txt>` | Batch URL Ingest | Explicit inline syntax for URL list files, avoiding positional ambiguity. |
-| `aider-oracle --add-web ... --workers 8` | Concurrent Ingest | Processes batch URL ingestion using 8 parallel worker threads. |
-| `aider-oracle --add-web ... --no-rag` | Conversion Only | Downloads and converts URLs to Markdown, but skips LanceDB vector indexing. |
+| Command / Flag                                                  | Context           | Description & Operational Behavior                                                 |
+| :-------------------------------------------------------------- | :---------------- | :--------------------------------------------------------------------------------- |
+| `aider-research search "<query>" --top 10`                      | Metasearch        | Queries SearXNG and returns the top 10 results as a Markdown report.               |
+| `aider-research search "<query>" --academic`                    | Academic Search   | Filters SearXNG engines to `arxiv,google_scholar,crossref,core`.                   |
+| `aider-research search "<query>" --engines e1,e2`               | Metasearch        | Queries specific SearXNG engines (e.g., `google,bing`).                            |
+| `aider-research search "<query>" --time-range day\|month\|year` | Metasearch        | Restricts search results to a specific time range.                                 |
+| `aider-research search --file <query.txt>`                      | Metasearch        | Reads a multi-line query from a file and collapses it into a single search string. |
+| `aider-research search "<query>" --links-only`                  | URL Extraction    | Returns only a raw list of URLs (useful for piping into `--add-web`).              |
+| `aider-research search "<url>" --sitemap`                       | Sitemap Harvest   | Recursively parses `sitemap.xml` or `llms.txt` for URLs up to `--site-depth`.      |
+| `aider-research search "<url>" --sitemap --site-depth N`        | Sitemap Harvest   | Recursively parses sitemaps up to depth `N` (default: 1).                          |
+| `aider-research search ... --grep "<regex>"`                    | URL Filtering     | Applies case-insensitive regex inclusion filtering to harvested URLs.              |
+| `aider-research search ... --grep-exclude "<regex>"`            | URL Filtering     | Applies case-insensitive regex exclusion filtering to harvested URLs.              |
+| `aider-oracle --add-web <url>`                                  | Single URL Ingest | Downloads, converts to Markdown/PDF, and incrementally ingests into LanceDB.       |
+| `aider-oracle --add-web --file <urls.txt>`                      | Batch URL Ingest  | Reads line-separated URLs and ingests them sequentially.                           |
+| `aider-oracle --add-web --file:<urls.txt>`                      | Batch URL Ingest  | Explicit inline syntax for URL list files, avoiding positional ambiguity.          |
+| `aider-oracle --add-web ... --workers 8`                        | Concurrent Ingest | Processes batch URL ingestion using 8 parallel worker threads.                     |
+| `aider-oracle --add-web ... --no-rag`                           | Conversion Only   | Downloads and converts URLs to Markdown, but skips LanceDB vector indexing.        |
 
 ---
 
@@ -3869,18 +3548,19 @@ Web research and ingestion parameters are controlled via environment variables a
 endpoints:
   # Optional: Override the default local SearXNG endpoint
   # Environment Variable: SEARXNG_BASE_URL
-  searxng_api_base: "http://localhost:8088" 
+  searxng_api_base: "http://localhost:8088"
 
 phases:
   - name: "Web Ingestion Phase"
     rag:
-      chunk_size_chars: 800         # Chunk size for ingested web Markdown
-      chunk_overlap_chars: 100      # Overlap for ingested web Markdown
-      code_chunk_size: 2000         # Chunk size for code snippets in web docs
-      ocr_parallel: 1               # Concurrency for OCR (if web PDF is scanned)
+      chunk_size_chars: 800 # Chunk size for ingested web Markdown
+      chunk_overlap_chars: 100 # Overlap for ingested web Markdown
+      code_chunk_size: 2000 # Chunk size for code snippets in web docs
+      ocr_parallel: 1 # Concurrency for OCR (if web PDF is scanned)
 ```
 
 **Environment Variables**:
+
 - `SEARXNG_BASE_URL`: Defines the primary SearXNG endpoint (Default: `http://localhost:8088`).
 - `ORACLE_WEB_WORKERS`: Defines the ThreadPoolExecutor worker count for `--add-web` (Default: `1`).
 - `ORACLE_NO_RAG_INGEST`: If `1`, bypasses LanceDB indexing during `--add-web` (Markdown conversion only).
@@ -3889,10 +3569,10 @@ phases:
 
 ## 6. Operational Edge Cases, Failure Modes & Telemetry
 
-| Edge Case / Failure Mode | Root Cause / Symptom | Mitigation & System Recovery |
-| :--- | :--- | :--- |
-| **SearXNG Rate Limit (CAPTCHA)** | Local SearXNG returns 0 results or `unresponsive_engines`. | `research_agent.py` automatically fetches healthy public instances from `searx.space` and retries the query. |
-| **Playwright Provisioning Blocked** | `playwright install chromium` fails due to corporate firewall or air-gapped environment. | Exception is caught safely. Extraction fails gracefully without crashing the pipeline, logging a warning to `stderr`. |
-| **Sitemap 404 Not Found** | Target domain does not expose `/sitemap.xml`. | Pipeline automatically fetches `/robots.txt` to parse `Sitemap:` directives. If absent, falls back to probing `/llms.txt`. |
-| **SPA Yields Empty Markdown** | Target URL is a React/Vue SPA; Trafilatura extracts $< 100$ bytes. | Pipeline detects low byte count and escalates to the Headless Playwright fallback to render the DOM before extraction. |
-| **Invalid Regex Filter** | User provides malformed regex to `--grep` or `--grep-exclude`. | `re.compile` catches the error, logs a clear message to `stderr`, and exits with code 1. |
+| Edge Case / Failure Mode            | Root Cause / Symptom                                                                     | Mitigation & System Recovery                                                                                               |
+| :---------------------------------- | :--------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------- |
+| **SearXNG Rate Limit (CAPTCHA)**    | Local SearXNG returns 0 results or `unresponsive_engines`.                               | `research_agent.py` automatically fetches healthy public instances from `searx.space` and retries the query.               |
+| **Playwright Provisioning Blocked** | `playwright install chromium` fails due to corporate firewall or air-gapped environment. | Exception is caught safely. Extraction fails gracefully without crashing the pipeline, logging a warning to `stderr`.      |
+| **Sitemap 404 Not Found**           | Target domain does not expose `/sitemap.xml`.                                            | Pipeline automatically fetches `/robots.txt` to parse `Sitemap:` directives. If absent, falls back to probing `/llms.txt`. |
+| **SPA Yields Empty Markdown**       | Target URL is a React/Vue SPA; Trafilatura extracts $< 100$ bytes.                       | Pipeline detects low byte count and escalates to the Headless Playwright fallback to render the DOM before extraction.     |
+| **Invalid Regex Filter**            | User provides malformed regex to `--grep` or `--grep-exclude`.                           | `re.compile` catches the error, logs a clear message to `stderr`, and exits with code 1.                                   |

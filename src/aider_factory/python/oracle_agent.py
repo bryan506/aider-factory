@@ -2184,6 +2184,49 @@ def _ensure_oracle_config():
 
 
 def main():
+    # Early intercept: Display CLI help without executing vector search or LLM calls
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+        print("""aider-oracle: Knowledge Oracle side-agent and LanceDB RAG interface.
+
+Usage:
+  aider-oracle "<question>"
+  aider-oracle --file <path> ["<inline question>"]
+  aider-oracle --debate [code|review] [--loops N] [--rounds N] "<question>"
+  aider-oracle --collection <table> [--db <dir>] "<question>"
+  aider-oracle --type [code|docs] "<question>"
+  aider-oracle --no-rag "<question>"
+  aider-oracle --clear [oracle]
+
+RAG Retrieval & Ranking:
+  --collection <name>       Target specific LanceDB table/collection
+  --db <dir>                Override LanceDB vector database directory
+  --mode <m>                Retrieval mode: top_k (default), no_retrieve, full_document
+  --type <code|docs>        Corpus type filter (excludes per-doc literature tables)
+  --no-rag                  Bypass RAG vector search (pure LLM reasoning)
+  --no-rerank               Bypass cross-encoder reranking stage
+  --recall-k <N>            Candidate retrieval depth before reranking (default: 75+)
+  --claims-only             Validate claims against knowledge base
+
+Debate & Verification:
+  --debate [code|review]    Run multi-turn Architect-Oracle deliberation (default: code)
+  --loops <N>               Max turn loops per debate round (default: 3)
+  --rounds <N>              Max debate rounds (default: 1)
+  --no-print                Suppress stdout claims validation report
+
+Knowledge Base Maintenance:
+  --list                    List LanceDB tables in active database
+  --list-files              List unique indexed files in active collection
+  --add-file <path ...>     Incrementally ingest file(s) into active collection
+  --add-table <dir ...>     Incrementally ingest directory into active collection
+  --add-web <url ...>       Fetch and ingest web pages / llms.txt / sitemaps
+  --workers, -w <N>         Concurrent workers for web download (default: 1)
+  --rm-table <table_name>   Drop a specific table from database
+  --rm-file <filename>      Surgically remove all chunks for a file
+  --rm-db                   Wipe vector database for collection (preserves OCR cache)
+  --clear [oracle]          Clear active oracle & debate conversation history
+""")
+        return 0
+
     # Programmatic, no-Aider mode (template -> file). Triggered by --job, --auto, or ORACLE_JOB.
     if (
         "--job" in sys.argv[1:]

@@ -315,7 +315,7 @@ def _generate_repo_maps(cwd, map_tokens=2048, target="all", is_global=False):
         projects = [os.path.abspath(cwd)]
 
     for proj in projects:
-        _ensure_git_repo(proj)
+        init_user_project(proj)
         af_dir = os.path.join(proj, ".aider_factory")
         os.makedirs(af_dir, exist_ok=True)
         p_name = os.path.basename(proj)
@@ -546,16 +546,19 @@ def ensure_bash_wrappers(project_aider_factory_dir):
 
 def _get_registry_path():
     """Return the global workspace registry JSON path (~/.config/aider_factory/registry.json)."""
-    config_dir = os.path.expanduser("~/.config/aider_factory")
+    config_base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    config_dir = os.path.join(config_base, "aider_factory")
     os.makedirs(config_dir, exist_ok=True)
     return os.path.join(config_dir, "registry.json")
 
 
 def _register_project(cwd):
-    """Auto-register the project root directory in the global registry."""
+    """Auto-register the project root directory in the global registry if it is an aider_factory workspace."""
     try:
-        reg_file = _get_registry_path()
         abs_cwd = os.path.abspath(cwd)
+        if not os.path.isdir(os.path.join(abs_cwd, ".aider_factory")):
+            return
+        reg_file = _get_registry_path()
         projects = []
         if os.path.exists(reg_file):
             try:
@@ -1249,11 +1252,39 @@ def _clear_side_sessions(cwd, is_global=False, forever=False):
 
 def main():
     """Global 'aider-factory' CLI entry point."""
-    ensure_aider_installed()
-    init_user_project()
-
     cwd = os.getcwd()
     args = sys.argv[1:]
+
+    # Early intercept: Display CLI help without creating workspace artifacts
+    if "--help" in args or "-h" in args:
+        print("""aider-factory: Multi-agent orchestration and workflow CLI
+
+Usage:
+  aider-factory [options] [session_name] [config_file.yml]
+
+Workflow Execution:
+  aider-factory                           Run default workflow (.env.yml)
+  aider-factory <session_name>            Run workflow with custom session name
+  aider-factory <config.yml>              Run workflow with specific config YAML
+  aider-factory -s, --session <name>      Explicit session identifier
+
+Session & Artifact Management:
+  aider-factory --status [-g]             Display active sessions and cluster health
+  aider-factory --list-sessions [-g]      List active session directories
+  aider-factory --clear-session <name>    Clear a specific session directory
+  aider-factory --clear-all [-g]          Clear all session archives
+  aider-factory --clear-side-sessions     Clear side-agent cache files
+  aider-factory --clear-side-session <k>  Clear specific side-agent artifact (helper|terminal|oracle|debate)
+  --forever                               Bypass ~/.cache backup during wipe operations
+  -g, --global                            Apply session/status command across all registered projects
+
+Repository Mapping:
+  aider-factory --repo-map [-g]           Generate source-only static repo map
+  aider-factory --repo-map-tests [-g]     Generate tests-only static repo map
+  aider-factory --repo-map-all [-g]       Generate both source and tests static repo maps
+  --map-tokens <N>                        Set token budget for repo mapping (default: 2048)
+""")
+        sys.exit(0)
 
     is_global = "--global" in args or "-g" in args
     forever = "--forever" in args
@@ -1334,6 +1365,10 @@ def main():
         except (IndexError, ValueError):
             print("Error: --clear-session requires a session name.", file=sys.stderr)
             sys.exit(1)
+
+    # Workflow Launch Path: Initialize workspace scaffolding only when launching workflow
+    ensure_aider_installed()
+    init_user_project(cwd)
 
     # Extract session name or config file from positional arguments
     session_name = None

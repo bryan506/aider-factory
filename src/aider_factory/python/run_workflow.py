@@ -300,6 +300,19 @@ class OSTee:
 
 
 if __name__ in ("__main__", "__test__"):
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+        print("""aider-factory: Multi-agent orchestration and workflow runner.
+
+Usage:
+  aider-factory [options] [session_name] [config_file.yml]
+  .aider_factory/bash/factory [options] [session_name] [config_file.yml]
+
+Options:
+  -h, --help            Show this help message and exit.
+  -s, --session <name>  Explicit session identifier.
+""")
+        sys.exit(0)
+
     # Ensure user project space and bash wrappers are initialized and up-to-date
     try:
         try:

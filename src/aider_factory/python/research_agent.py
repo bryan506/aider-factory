@@ -342,17 +342,35 @@ def run_sitemap_harvester(target_url, grep_pat=None, grep_ex_pat=None, depth=1, 
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(
-            'usage: aider-research search "<query>" [--academic] [--engines e1,e2] [--top N] [--time-range day|month|year] [--links-only|-l] [--out <file>]\n'
-            '   or: aider-research search "<url>" --sitemap [--grep "<pat>"] [--grep-exclude "<pat>"] [--site-depth N] [--out <file>]\n'
-            '   or: aider-research search --file <query.txt> [--academic] [--top N] [--links-only|-l] [--out <file>]'
-        )
-        sys.exit(0)
-
     args = sys.argv[1:]
-    if args[0] == "search":
+    if args and args[0] == "search":
         args = args[1:]
+
+    # Early intercept: Display CLI help without executing search or sitemap crawl
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:] or not args:
+        print("""aider-research: SearXNG search client, research report generator, and sitemap harvester.
+
+Usage:
+  aider-research [search] "<query>" [options]
+  aider-research [search] --file <query.txt> [options]
+  aider-research [search] "<url>" --sitemap [options]
+
+Search Options:
+  --academic                Filter search to scientific/academic engines (arxiv, scholar, etc.)
+  --engines <e1,e2>         Comma-separated list of specific engines (e.g. google,bing,duckduckgo)
+  --top <N>                 Max search results to retrieve (default: 10)
+  --time-range <range>      Filter results by recency (day, month, year)
+  --links-only, -l          Output bare URLs only (one per line)
+  --out, -o <file>          Custom destination path for report or URL list
+
+Sitemap Harvester Options:
+  --sitemap                 Extract all URLs from domain XML sitemap or llms.txt
+  --grep, -g "<pattern>"    Regex filter for discovered URLs (case-insensitive)
+  --grep-exclude, -ge "<p>" Regex exclusion filter for discovered URLs
+  --site-depth, -d <N>      Recursive sub-sitemap discovery depth (default: 1)
+  --out, -o <file>          Save discovered URL list to text file
+""")
+        sys.exit(0)
 
     # Route A: Sitemap Harvester
     if "--sitemap" in args:

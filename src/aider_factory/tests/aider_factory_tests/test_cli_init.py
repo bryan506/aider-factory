@@ -149,6 +149,78 @@ def test_init_markdown_does_not_overwrite_existing(mock_sub, mock_bash, mock_sea
     print("✅ Markdown Non-Destructive Copy PASS")
 
 
+def test_cli_flags_in_uninitialized_directory_creates_zero_artifacts():
+    """Verify management and help flags do not scaffold .git or .aider_factory in arbitrary uninitialized directories."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        original_cwd = os.getcwd()
+        os.chdir(temp_dir)
+        try:
+            # Test --help flag creates zero files
+            with patch("sys.argv", ["aider-factory", "--help"]), patch("sys.exit") as mock_exit:
+                mock_exit.side_effect = SystemExit(0)
+                try:
+                    cli.main()
+                except SystemExit as e:
+                    assert e.code == 0
+            assert os.listdir(temp_dir) == [], f"Expected empty dir after --help, found: {os.listdir(temp_dir)}"
+
+            # Test --clear-all -g --forever creates zero files
+            with patch("sys.argv", ["aider-factory", "--clear-all", "-g", "--forever"]), \
+                 patch("cli._get_registered_projects", return_value=[]), \
+                 patch("sys.exit") as mock_exit:
+                mock_exit.side_effect = SystemExit(0)
+                try:
+                    cli.main()
+                except SystemExit as e:
+                    assert e.code == 0
+            assert os.listdir(temp_dir) == [], f"Expected empty dir after --clear-all -g --forever, found: {os.listdir(temp_dir)}"
+        finally:
+            os.chdir(original_cwd)
+    print("✅ Zero Artifact Scaffolding in Uninitialized Dir PASS")
+
+
+def test_all_cli_tools_help_flags():
+    """Verify that --help and -h flags across all CLI entry points output usage and exit 0."""
+    import oracle_agent
+    import research_agent
+    import apply_agent
+    import validator
+
+    # 1. Test oracle_agent --help and -h
+    with patch("sys.argv", ["aider-oracle", "--help"]):
+        assert oracle_agent.main() == 0
+
+    with patch("sys.argv", ["aider-oracle", "-h"]):
+        assert oracle_agent.main() == 0
+
+    # 2. Test research_agent --help and search -h
+    for flag_combo in [["aider-research", "--help"], ["aider-research", "search", "-h"], ["aider-research"]]:
+        with patch("sys.argv", flag_combo), patch("sys.exit") as mock_exit:
+            mock_exit.side_effect = SystemExit(0)
+            try:
+                research_agent.main()
+            except SystemExit as e:
+                assert e.code == 0
+
+    # 3. Test apply_agent --help
+    with patch("sys.argv", ["aider-apply", "--help"]), patch("sys.exit") as mock_exit:
+        mock_exit.side_effect = SystemExit(0)
+        try:
+            apply_agent.main()
+        except SystemExit as e:
+            assert e.code == 0
+
+    # 4. Test validator --help
+    with patch("sys.argv", ["aider-validate", "--help"]), patch("sys.exit") as mock_exit:
+        mock_exit.side_effect = SystemExit(0)
+        try:
+            validator.main()
+        except SystemExit as e:
+            assert e.code == 0
+
+    print("✅ All CLI Tools --help / -h Parity PASS")
+
+
 if __name__ == "__main__":
     test_init_empty_dir_creates_scratchpad()
     test_init_discovers_existing_files()
@@ -156,4 +228,6 @@ if __name__ == "__main__":
     test_ensure_bash_wrappers_provisions_all_launchers()
     test_init_markdown_tree_provisioned()
     test_init_markdown_does_not_overwrite_existing()
+    test_cli_flags_in_uninitialized_directory_creates_zero_artifacts()
+    test_all_cli_tools_help_flags()
     print("\n🎉 All CLI Quickstart Unit Tests Passed!")

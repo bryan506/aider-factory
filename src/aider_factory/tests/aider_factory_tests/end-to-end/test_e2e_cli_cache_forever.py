@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -179,6 +180,121 @@ class TestE2ECLICacheAndForever(unittest.TestCase):
         self.assertFalse(os.path.exists(s_alpha2))
         self.assertFalse(os.path.exists(s_beta2))
         self.assertFalse(os.path.exists(os.path.join(self.cache_dir, "aider_factory_cache")))
+
+    def test_e2e_global_clear_from_arbitrary_uninitialized_directory(self):
+        """Zero-mock E2E: Execute 'aider-factory --clear-all -g --forever' from an empty uninitialized directory."""
+        # 1. Setup an active registered workspace with a dummy session
+        sess_dir = os.path.join(self.af_dir, "sessions", "session_alpha")
+        os.makedirs(sess_dir, exist_ok=True)
+        with open(os.path.join(sess_dir, "session.yml"), "w", encoding="utf-8") as f:
+            f.write("name: Alpha\n")
+
+        # Register workspace_alpha in registry.json
+        reg_file = os.path.join(self.config_dir, "aider_factory", "registry.json")
+        os.makedirs(os.path.dirname(reg_file), exist_ok=True)
+        with open(reg_file, "w", encoding="utf-8") as f:
+            json.dump({"projects": [self.ws_dir]}, f)
+
+        # 2. Create an isolated uninitialized external directory (representing ~)
+        external_empty_dir = os.path.join(self.temp_root, "arbitrary_external_dir")
+        os.makedirs(external_empty_dir, exist_ok=True)
+
+        # 3. Run global clear command from inside the uninitialized directory
+        res = self._run_cli(["--clear-all", "-g", "--forever"], cwd=external_empty_dir)
+        self.assertEqual(res.returncode, 0, msg=f"CLI stderr: {res.stderr}")
+        self.assertIn("All session archives cleared in 'workspace_alpha'", res.stdout)
+
+        # 4. Invariant assertion: external directory must remain completely empty (zero blast radius)
+        self.assertEqual(os.listdir(external_empty_dir), [])
+
+        # 5. Invariant assertion: session in registered workspace was successfully wiped
+        self.assertFalse(os.path.exists(sess_dir))
+
+    def test_e2e_all_clients_help_and_terminal_flags_smoke(self):
+        """Zero-mock E2E smoke test: Verify --help, -h, and terminal flags across all clients and bash wrappers."""
+        py_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../python"))
+        empty_dir = os.path.join(self.temp_root, "pristine_empty_dir")
+        os.makedirs(empty_dir, exist_ok=True)
+
+        # 1. Main CLI entry point: verify --help, -h, --status -g, --list-sessions -g from empty directory
+        for flag in ["--help", "-h", "--status", "--list-sessions"]:
+            args = [flag, "-g"] if flag in ("--status", "--list-sessions") else [flag]
+            res = self._run_cli(args, cwd=empty_dir)
+            self.assertEqual(res.returncode, 0, msg=f"Flag {flag} failed with stderr: {res.stderr}")
+            if flag in ("--help", "-h"):
+                self.assertIn("aider-factory: Multi-agent orchestration", res.stdout)
+            elif flag == "--status":
+                self.assertIn("AI Factory Session & Cluster Status", res.stdout)
+
+        # Assert pristine directory has 0 created files/directories
+        self.assertEqual(os.listdir(empty_dir), [])
+
+        # 2. Standalone Python Agent Entrypoints: verify direct script execution
+        scripts = [
+            (os.path.join(py_dir, "oracle_agent.py"), ["--help", "-h"], "aider-oracle: Knowledge Oracle"),
+            (os.path.join(py_dir, "research_agent.py"), ["--help", "-h"], "aider-research: SearXNG search client"),
+            (os.path.join(py_dir, "apply_agent.py"), ["--help", "-h"], "aider-apply: Execute headless Aider"),
+            (os.path.join(py_dir, "validator.py"), ["--help", "-h"], "Evidence grounding audit"),
+        ]
+
+        for script_path, flags, expected_snippet in scripts:
+            for flag in flags:
+                res = subprocess.run(
+                    [sys.executable, script_path, flag],
+                    cwd=empty_dir,
+                    env=self.env,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(res.returncode, 0, msg=f"{os.path.basename(script_path)} {flag} failed: {res.stderr}")
+                self.assertIn(expected_snippet, res.stdout)
+
+        # 3. Subcommand specific help: research search -h and research (no args)
+        for args in [["search", "-h"], ["search", "--help"], []]:
+            res = subprocess.run(
+                [sys.executable, os.path.join(py_dir, "research_agent.py")] + args,
+                cwd=empty_dir,
+                env=self.env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(res.returncode, 0, msg=f"research_agent {' '.join(args)} failed: {res.stderr}")
+            self.assertIn("aider-research: SearXNG search client", res.stdout)
+
+        # 4. Bash Wrappers: Generate wrappers in workspace and execute them directly
+        import aider_factory.cli as cli
+        cli.ensure_bash_wrappers(self.af_dir)
+        bash_dir = os.path.join(self.af_dir, "bash")
+
+        wrapper_expectations = [
+            ("oracle", "aider-oracle: Knowledge Oracle"),
+            ("research", "aider-research: SearXNG search client"),
+            ("validate", "Evidence grounding audit"),
+            ("apply", "aider-apply: Execute headless Aider"),
+            ("factory", "aider-factory: Multi-agent orchestration"),
+        ]
+
+        for wrapper_name, expected_snippet in wrapper_expectations:
+            wrapper_path = os.path.join(bash_dir, wrapper_name)
+            for flag in ["--help", "-h"]:
+                res = subprocess.run(
+                    [wrapper_path, flag],
+                    cwd=empty_dir,
+                    env=self.env,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(res.returncode, 0, msg=f"Bash wrapper {wrapper_name} {flag} failed: {res.stderr}")
+                self.assertIn(expected_snippet, res.stdout)
+
+        # Final assertion: pristine directory must remain completely empty throughout all executions
+        self.assertEqual(os.listdir(empty_dir), [])
 
 
 if __name__ == "__main__":

@@ -188,6 +188,17 @@ model_list:
 ```
 Set `endpoints.ranking_api_base: "http://<proxy-ip>:4000/v1"` in `.env.yml`.
 
+#### Option C: Native `llama-server` Daemonization
+```bash
+./build/bin/llama-server \
+  -m /opt/models/Qwen3-Reranker-4B_Q8_0.gguf \
+  --alias qwen3-reranker-4b:latest \
+  --reranking \
+  --embedding \
+  --pooling rank \
+  --port 8081
+```
+
 ---
 
 ## 6. Operational Edge Cases, Failure Modes & Telemetry
@@ -200,3 +211,4 @@ Set `endpoints.ranking_api_base: "http://<proxy-ip>:4000/v1"` in `.env.yml`.
 | **Cold-start / air-gapped cache miss** | `AutoModel(trust_remote_code=True)` fails with `local_files_only=True` on first use (custom `modeling.py` not cached). | The loader falls back to `local_files_only=False` to download the trusted remote code + weights once; subsequent runs are fully offline. Pre-seed the HF cache for air-gapped CI. |
 | **2D Logit Score Mismatch (classic cross-encoders)** | Binary `SequenceClassification` cross-encoder outputs a 2-D logit array `[neg, pos]`. | `_extract_score` safely inspects array length and extracts `val[-1]` (the positive relevance class) rather than taking index `0`. |
 | **Missing local dependencies** | `ImportError: sentence_transformers` or `transformers`. | Ensure execution uses `.aider_factory/bash/oracle`, `.aider_factory/bash/validate`, or `factory` to run within the provisioned `uv` tool venv. |
+| **Near-Zero Scores ($10^{-25}$) / Inverted Rankings on `llama-server`** | `llama-server` returns scores like `2.5e-26` and ranks irrelevant documents higher. | **Cause:** The GGUF was converted without `cls.output.weight` or `llama-server` is missing `--embedding` and `--pooling rank`, causing unscaled vocabulary-wide softmax evaluation. **Fix:** Reconvert from raw HF safetensors using `convert_hf_to_gguf.py` and ensure `reranking = true`, `embedding = true`, and `pooling = rank` are set in `models.ini`. |

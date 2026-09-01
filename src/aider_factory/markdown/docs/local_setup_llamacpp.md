@@ -37,6 +37,32 @@ wget https://huggingface.co/USER/MODEL/resolve/main/model-00001-of-00002.gguf
 wget https://huggingface.co/USER/MODEL/resolve/main/model-00002-of-00002.gguf
 ```
 
+#### Converting Instruction-Aware Rerankers (e.g. Qwen3-Reranker)
+
+Reranker models require the binary classification head (`cls.output.weight`) and `pooling_type = RANK` metadata. Convert directly from official Hugging Face safetensors:
+
+```bash
+# 1. Download raw Hugging Face repository
+uv run --with huggingface_hub python -c \
+  "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-Reranker-4B', local_dir='/tmp/Qwen3-Reranker-4B-src')"
+
+# 2. Convert to F16 GGUF
+uv run --with gguf --with torch --with safetensors --with sentencepiece --with protobuf --with transformers \
+  python ~/Programs/llama.cpp/convert_hf_to_gguf.py \
+    --outtype f16 \
+    --outfile /tmp/Qwen3-Reranker-4B-f16.gguf \
+    /tmp/Qwen3-Reranker-4B-src
+
+# 3. Quantize to Q8_0
+~/Programs/llama.cpp/build/bin/llama-quantize \
+    /tmp/Qwen3-Reranker-4B-f16.gguf \
+    ~/Programs/gguf/Qwen3-Reranker-4B_Q8_0.gguf \
+    Q8_0
+
+# 4. Clean up temporary source files
+rm -rf /tmp/Qwen3-Reranker-4B-src /tmp/Qwen3-Reranker-4B-f16.gguf
+```
+
 #### Merging Split GGUF Files
 
 If the model was downloaded as multiple parts, use `llama-merge-gguf` to combine them:
@@ -156,6 +182,21 @@ parallel = 1               # embedding requests are serial; 1 slot is sufficient
 flash-attn = on
 cache-type-k = f16
 cache-type-v = f16
+mmap = false
+
+[qwen3-reranker-4b:latest]
+model = /opt/models/Qwen3-Reranker-4B_Q8_0.gguf
+reranking = true
+embedding = true
+pooling = rank
+ctx-size = 16384
+batch-size = 16384
+ubatch-size = 8192
+n-gpu-layers = 999
+flash-attn = on
+cache-type-k = q8_0
+cache-type-v = q8_0
+slot-prompt-similarity = 0.0
 mmap = false
 ```
 

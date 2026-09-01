@@ -20,8 +20,8 @@ def _probe_all_reranker_endpoints(candidate_urls):
 
     active_endpoints = []
     models_to_try = [
-        "qwen3-reranker-4b-gpu:LATEST",
         "qwen3-reranker-4b:LATEST",
+        "qwen3-reranker-4b-gpu:LATEST",
     ]
 
     seen = set()

@@ -20,6 +20,15 @@ def _get_docling_calls(mock_sub):
     ]
 
 
+def _extract_docling_args(cmd):
+    """Dynamically extracts (doc_path, md_path, do_ocr_arg) relative to docling_runner.py."""
+    idx = next(i for i, x in enumerate(cmd) if "docling_runner.py" in str(x))
+    doc_path = cmd[idx + 1] if len(cmd) > idx + 1 else None
+    md_path = cmd[idx + 2] if len(cmd) > idx + 2 else None
+    do_ocr_arg = cmd[idx + 3] if len(cmd) > idx + 3 else None
+    return doc_path, md_path, do_ocr_arg
+
+
 class TestDoclingRouting(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -74,7 +83,7 @@ class TestDoclingRouting(unittest.TestCase):
     ):
         def side_effect(*args, **kwargs):
             if args and isinstance(args[0], list) and any("docling_runner.py" in str(x) for x in args[0]):
-                md_path = args[0][8]
+                _, md_path, _ = _extract_docling_args(args[0])
                 with open(md_path, "w", encoding="utf-8") as f:
                     f.write("Extracted office document text " * 10)
                 res = MagicMock()
@@ -102,7 +111,7 @@ class TestDoclingRouting(unittest.TestCase):
 
         def side_effect(*args, **kwargs):
             if args and isinstance(args[0], list) and any("docling_runner.py" in str(x) for x in args[0]):
-                md_path = args[0][8]
+                _, md_path, _ = _extract_docling_args(args[0])
                 with open(md_path, "w", encoding="utf-8") as f:
                     f.write("Digital PDF parsed markdown " * 10)
                 res = MagicMock()
@@ -145,7 +154,7 @@ class TestDoclingRouting(unittest.TestCase):
     ):
         def side_effect(*args, **kwargs):
             if args and isinstance(args[0], list) and any("docling_runner.py" in str(x) for x in args[0]):
-                md_path = args[0][8]
+                _, md_path, _ = _extract_docling_args(args[0])
                 with open(md_path, "w", encoding="utf-8") as f:
                     f.write("Extracted text via Docling OCR " * 10)
                 res = MagicMock()
@@ -219,7 +228,7 @@ class TestDoclingRouting(unittest.TestCase):
 
         def side_effect(*args, **kwargs):
             if args and isinstance(args[0], list) and any("docling_runner.py" in str(x) for x in args[0]):
-                md_path = args[0][8]
+                _, md_path, _ = _extract_docling_args(args[0])
                 with open(md_path, "w", encoding="utf-8") as f:
                     f.write("Extracted text " * 10)
                 res = MagicMock()
@@ -235,7 +244,8 @@ class TestDoclingRouting(unittest.TestCase):
         docling_calls = _get_docling_calls(mock_subprocess)
         self.assertEqual(len(docling_calls), 1)
         call_args = docling_calls[0].args[0]
-        self.assertEqual(call_args[9], "true")
+        _, _, do_ocr_val = _extract_docling_args(call_args)
+        self.assertEqual(do_ocr_val, "true")
 
     @patch("fitz.open")
     @patch("rag_manager._rasterize")
@@ -249,7 +259,7 @@ class TestDoclingRouting(unittest.TestCase):
 
         def side_effect(*args, **kwargs):
             if args and isinstance(args[0], list) and any("docling_runner.py" in str(x) for x in args[0]):
-                md_path = args[0][8]
+                _, md_path, _ = _extract_docling_args(args[0])
                 with open(md_path, "w", encoding="utf-8") as f:
                     f.write("Extracted text " * 10)
                 res = MagicMock()
@@ -265,7 +275,8 @@ class TestDoclingRouting(unittest.TestCase):
         docling_calls = _get_docling_calls(mock_subprocess)
         self.assertEqual(len(docling_calls), 1)
         call_args = docling_calls[0].args[0]
-        self.assertEqual(call_args[9], "false")
+        _, _, do_ocr_val = _extract_docling_args(call_args)
+        self.assertEqual(do_ocr_val, "false")
 
 
 if __name__ == "__main__":

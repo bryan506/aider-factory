@@ -120,6 +120,69 @@ To prevent context contamination between sequential or parallel tasks (e.g., `jo
 2. **`_swap_in_state`**: Before task execution, active state files (`.aider.chat.history.md`, `.oracle_session.json`, etc.) are cleared, and matching files from `chat_history/<filename>_<stem>` are copied into the active root.
 3. **`_swap_out_state`**: After execution, active state files are moved back into the `chat_history/` vault, preserving the exact KV-cache prefix for that specific node's future iterations.
 
+### Interactive Pair-Programming History Management
+
+When `pair_programming: true` is active and the user remains within a single job
+(e.g., the entire session is `job1`), the automatic vault-swap mechanism does **not**
+trigger mid-session — it fires only at task boundaries (`run_task` entry/exit).
+Aider's built-in `/clear` command resets the in-memory conversation buffer but does
+**not** move or delete the on-disk `.aider.chat.history.md` file. On the next turn,
+`--restore-chat-history` reloads the file, making the prior context reappear.
+
+This is by design: the active history file is the session's durable KV-cache prefix
+and is intentionally preserved for resumption across process restarts.
+
+#### Manual History Reset (Same-Session Epoch Clear)
+
+To archive the current conversation and start fresh **within the same pair-programming
+session**, perform the following from a second terminal:
+
+```bash
+# Navigate to your workspace root
+cd /path/to/project
+
+# Define the active session (match your AI_FACTORY_SESSION or the slug you passed)
+SESS=".aider_factory/sessions/<session_name>"
+VAULT="$SESS/chat_history"
+TIMESTAMP="$(date +%Y%m%dT%H%M%S)"
+
+# Archive current history to vault with a timestamped stem
+mkdir -p "$VAULT"
+mv "$SESS/.aider.chat.history.md" "$VAULT/.aider.chat.history_epoch_${TIMESTAMP}.md"
+
+# Create a fresh empty active file so aider has a valid path to write into
+touch "$SESS/.aider.chat.history.md"
+```
+
+After this, the next aider turn in the pair-programming terminal will start with a
+clean conversation buffer (aider reads the empty file, finds no prior turns). The
+archived file is retrievable from the vault at any time.
+
+#### Optional Shell Alias
+
+For convenience, add to `~/.bashrc` or `~/.zshrc`:
+
+```bash
+af-clear-epoch() {
+  local sess_dir=".aider_factory/sessions/${AI_FACTORY_SESSION:-default}"
+  local hist="$sess_dir/.aider.chat.history.md"
+  local vault="$sess_dir/chat_history"
+  local ts="$(date +%Y%m%dT%H%M%S)"
+  [[ -f "$hist" ]] && mkdir -p "$vault" && mv "$hist" "$vault/.aider.chat.history_epoch_${ts}.md"
+  touch "$hist"
+  echo "✓ Archived to $vault/.aider.chat.history_epoch_${ts}.md"
+}
+```
+
+#### When Automation Already Handles This
+
+| Scenario | Vault Swap Automatic? | Action Required |
+| :--- | :--- | :--- |
+| `shared_history: false`, multiple target files (job1 → job2) | ✅ Yes — `_swap_out_state` fires per task boundary | None |
+| `shared_history: false`, same file across sequential jobs | ✅ Yes — each job gets a distinct `history_stem` | None |
+| `shared_history: true`, new session resuming | ✅ Yes — fresh `.aider.chat.history.md` per session dir | None |
+| **`pair_programming: true`, same job, user wants fresh context mid-session** | ❌ No — no task boundary occurs | **Manual epoch clear (above)** |
+
 ### Headless Application & Chat Parsing (`apply_agent.py`)
 The `aider-apply` CLI executes headless Aider passes by extracting specifications directly from chat histories.
 1. **Chat Parsing**: `parse_chat_history()` scans `.aider.chat.history.md` using `TOKEN_ANCHOR_RE` (`(?m)^>\s*Tokens:\s*[\d\.]+[kKMG]?\s*sent...`) to isolate conversational turns.

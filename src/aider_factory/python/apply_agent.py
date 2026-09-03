@@ -186,6 +186,7 @@ def run_apply(
     model: str = None,
     session_name: str = None,
     no_diff: bool = False,
+    stream: bool = False,
     cwd: str = None,
 ) -> bool:
     """Execute headless Aider application pass and stream git diff."""
@@ -278,13 +279,74 @@ def run_apply(
         env["LM_STUDIO_API_BASE"] = cfg["editor_api_base"]
         env["LM_STUDIO_API_KEY"] = "sk-dummy"
 
-    print(f"🚀 Running apply pass via {cfg['editor_model']} on files: {', '.join(files)}...")
-    proc = subprocess.run(cmd, cwd=cwd, env=env)
+    # --- Output isolation: /dev/tty for visibility, stdout for outer aider ---
+    #
+    # When aider-apply is invoked via aider's /run, the outer aider captures
+    # our stdout (and stderr) as "command output" tokens. The inner aider
+    # emits 40–120k raw bytes (file echoes, thinking blocks, ANSI codes,
+    # commit confirmations). Streaming those to /dev/tty gives the user live
+    # terminal visibility WITHOUT polluting the outer aider's context window.
+    # Only the git diff (~3–4k tokens) is written to stdout.
+    #
+    # In pipeline mode (orchestrate.py), there is no outer aider capturing
+    # stdout, so _aider_ask_turn streams to sys.stdout directly. See the
+    # NOTE in orchestrate.py._aider_ask_turn for the inverse pattern.
+    #
+    # Default (stream=False): inner aider output is silently discarded.
+    # Only the git diff at the end reaches stdout. Use --stream to watch.
+    print(
+        f"🚀 Running apply pass via {cfg['editor_model']} on files: {', '.join(files)}...",
+        file=sys.stderr,
+    )
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        bufsize=1,
+    )
+
+    if stream:
+        # Open /dev/tty for live streaming (invisible to outer aider's /run capture).
+        # Falls back gracefully if unavailable (CI, headless, redirected stdin).
+        tty_fh = None
+        try:
+            tty_fh = open("/dev/tty", "w", encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+
+        try:
+            if proc.stdout:
+                for line in proc.stdout:
+                    if tty_fh:
+                        tty_fh.write(line)
+                        tty_fh.flush()
+                    # else: no TTY — discard (deadlock-safe, loop drains pipe)
+                proc.stdout.close()
+            proc.wait()
+        finally:
+            if tty_fh:
+                tty_fh.close()
+    else:
+        # Silent mode: drain pipe to prevent deadlock, discard all content.
+        if proc.stdout:
+            proc.stdout.read()
+            proc.stdout.close()
+        proc.wait()
 
     if proc.returncode != 0:
-        print(f"❌ Error: Aider apply execution failed with exit code {proc.returncode}", file=sys.stderr)
+        print(
+            f"❌ Error: Aider apply execution failed with exit code {proc.returncode}",
+            file=sys.stderr,
+        )
         return False
 
+    # Only the git diff reaches stdout (~3–4k tokens, ANSI colors preserved
+    # for readability; outer aider captures this as the sole "command output").
     if not no_diff:
         print("\n" + "=" * 70)
         print("Git Diff Result (HEAD~1):")
@@ -304,6 +366,7 @@ def main():
     parser.add_argument("--model", "-m", default=None, help="Override editor model.")
     parser.add_argument("--session", default=None, help="Target session name.")
     parser.add_argument("--no-diff", action="store_true", help="Suppress git diff output after apply.")
+    parser.add_argument("--stream", action="store_true", help="Stream inner aider output to terminal (default: silent).")
 
     args = parser.parse_args()
     success = run_apply(
@@ -313,6 +376,7 @@ def main():
         model=args.model,
         session_name=args.session,
         no_diff=args.no_diff,
+        stream=args.stream,
     )
     sys.exit(0 if success else 1)
 

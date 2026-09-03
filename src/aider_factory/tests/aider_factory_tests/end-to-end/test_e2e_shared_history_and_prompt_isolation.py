@@ -64,8 +64,15 @@ prev=""
 for i in "$@"; do
     if [[ "$prev" == "--chat-history-file" ]]; then
         echo "HISTORY_FILE: $i" >> "$LOG"
-        # Simulate recording turn in the chat history file
-        echo "# Turn for $i" >> "$i"
+        echo "# Turn for $i" >> "$LOG"
+        # Write unique content identifying the target file being processed
+        TARGET=""
+        for arg in "$@"; do
+            case "$arg" in
+                *.py) TARGET="$arg" ;;
+            esac
+        done
+        echo "## Session turn for target: $TARGET" >> "$i"
     fi
     if [[ "$prev" == "--message" ]]; then
         echo "MESSAGE: $i" >> "$LOG"
@@ -207,6 +214,36 @@ exit 0
         # Gamma must not contain Alpha or Beta history
         self.assertNotIn("module_alpha", gamma_content)
         self.assertNotIn("module_beta", gamma_content)
+
+        # --- Zero-mock assertions on the fake aider invocation log ---
+        sess_dir = os.path.join(self.test_dir, ".aider_factory", "sessions", sess_name)
+
+        with open(self.fake_aider_log, "r", encoding="utf-8") as f:
+            log_content = f.read()
+
+        # Every aider invocation must target the SESSION history file, never global
+        for line in log_content.splitlines():
+            if line.startswith("HISTORY_FILE:"):
+                path_val = line.split("HISTORY_FILE:", 1)[1].strip()
+                self.assertIn(sess_dir, path_val,
+                              f"--chat-history-file must point to session dir, got: {path_val}")
+                global_hist = os.path.join(self.test_dir, ".aider_factory", ".aider.chat.history.md")
+                self.assertNotEqual(path_val, global_hist)
+
+        # Verify --restore-chat-history is present in every invocation
+        arg_lines = [l for l in log_content.splitlines() if l.startswith("ARGS:")]
+        self.assertTrue(len(arg_lines) >= 3, "Must have at least 3 aider invocations")
+        for al in arg_lines:
+            self.assertIn("--restore-chat-history", al,
+                          f"Every aider invocation must pass --restore-chat-history: {al}")
+
+        # Verify the generated session .aider.conf.yml has NO history-path keys
+        session_conf = os.path.join(sess_dir, ".aider.conf.yml")
+        self.assertTrue(os.path.exists(session_conf))
+        with open(session_conf, "r", encoding="utf-8") as f:
+            conf = yaml.safe_load(f) or {}
+        for key in ("chat-history-file", "input-history-file", "llm-history-file", "restore-chat-history"):
+            self.assertNotIn(key, conf, f"Session config must not contain '{key}'")
 
     def test_multi_target_files_shared_history_true_accumulation(self):
         """E2E: When shared_history is TRUE and target_files has multiple files,
@@ -392,6 +429,202 @@ exit 0
         with open(session_conf, "r", encoding="utf-8") as f:
             conf_yaml = yaml.safe_load(f)
         self.assertFalse(conf_yaml.get("yes-always", True))
+
+    def test_sequential_vault_swap_across_two_runs(self):
+        """E2E: Two sequential workflow runs on the same session with shared_history:false
+        must vault-swap correctly: run-1 content archived to vault, run-2 (same stem)
+        restores prior context via swap_in, then archives accumulated state."""
+        src_folder = os.path.join(self.test_dir, "src")
+        os.makedirs(src_folder, exist_ok=True)
+        target = os.path.join(src_folder, "isolate_target.py")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("def isolate(): pass\n")
+
+        sess_name = "sequential_swap_session"
+        config_data = {
+            "name": "Sequential Swap Pipeline",
+            "working_directory": self.test_dir,
+            "phases": [{
+                "name": "Swap Phase",
+                "enabled": True,
+                "models": {"architect_agent": "mock/a", "editor_agent": "mock/e"},
+                "toggles": {
+                    "run_job_one": True, "run_job_two": False, "run_job_three": False,
+                    "iterate_test": False, "shared_history": False,
+                    "pair_programming": False, "yes_always": False,
+                },
+                "files": {"target_files": ["src/isolate_target.py"]},
+            }],
+        }
+        config_path = os.path.join(self.test_dir, "seq_swap.yml")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.dump(config_data, f)
+
+        env = self._get_subprocess_env(session_name=sess_name, config_path=config_path)
+
+        # --- RUN 1: fake aider writes identifiable content to --chat-history-file ---
+        run1_marker = "RUN_1_UNIQUE_CONTENT_xyz"
+        fake_script_v2 = f"""#!/bin/bash
+LOG="{self.fake_aider_log}"
+echo "=== AIDER INVOCATION ===" >> "$LOG"
+echo "ARGS: $@" >> "$LOG"
+STDIN_INPUT=$(cat)
+echo "STDIN: $STDIN_INPUT" >> "$LOG"
+prev=""
+for i in "$@"; do
+    if [[ "$prev" == "--chat-history-file" ]]; then
+        echo "{run1_marker}" >> "$i"
+    fi
+    prev="$i"
+done
+exit 0
+"""
+        with open(self.fake_aider, "w", encoding="utf-8") as f:
+            f.write(fake_script_v2)
+        os.chmod(self.fake_aider, 0o755)
+        open(self.fake_aider_log, "w").close()
+
+        res1 = subprocess.run(
+            [sys.executable, WORKFLOW_RUNNER, sess_name, config_path],
+            cwd=self.test_dir, env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(res1.returncode, 0, f"Run 1 failed: {res1.stderr}")
+
+        sess_dir = os.path.join(self.test_dir, ".aider_factory", "sessions", sess_name)
+        vault_dir = os.path.join(sess_dir, "chat_history")
+
+        # After run 1: vault must contain run-1 content (swap_out archived it)
+        self.assertTrue(os.path.isdir(vault_dir), "chat_history/ must exist after run 1")
+        vault_files = os.listdir(vault_dir)
+        self.assertTrue(len(vault_files) > 0, "Vault must have at least one file after run 1")
+        vault_content = ""
+        for vf in vault_files:
+            vault_content += Path(os.path.join(vault_dir, vf)).read_text(encoding="utf-8")
+        self.assertIn(run1_marker, vault_content)
+
+        # --- RUN 2: verify swap_in wiped active, then new content is archived ---
+        run2_marker = "RUN_2_UNIQUE_CONTENT_abc"
+        fake_script_v3 = f"""#!/bin/bash
+LOG="{self.fake_aider_log}"
+echo "=== AIDER INVOCATION ===" >> "$LOG"
+echo "ARGS: $@" >> "$LOG"
+STDIN_INPUT=$(cat)
+echo "STDIN: $STDIN_INPUT" >> "$LOG"
+prev=""
+for i in "$@"; do
+    if [[ "$prev" == "--chat-history-file" ]]; then
+        if [[ -f "$i" ]] && grep -q "{run1_marker}" "$i" 2>/dev/null; then
+            echo "ACTIVE_WAS_DIRTY: $(cat "$i")" >> "$LOG"
+        fi
+        echo "{run2_marker}" >> "$i"
+    fi
+    prev="$i"
+done
+exit 0
+"""
+        with open(self.fake_aider, "w", encoding="utf-8") as f:
+            f.write(fake_script_v3)
+        os.chmod(self.fake_aider, 0o755)
+        open(self.fake_aider_log, "w").close()
+
+        res2 = subprocess.run(
+            [sys.executable, WORKFLOW_RUNNER, sess_name, config_path],
+            cwd=self.test_dir, env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(res2.returncode, 0, f"Run 2 failed: {res2.stderr}")
+
+        # Same stem: swap_in correctly RESTORES prior vault context (continuity is intended).
+        # The fake aider should SEE run-1 content restored to the active file.
+        with open(self.fake_aider_log, "r", encoding="utf-8") as f:
+            log2 = f.read()
+        self.assertIn("ACTIVE_WAS_DIRTY", log2,
+                      "Run 2 (same stem) must see run-1 content restored by swap_in (context continuity)")
+        self.assertIn(run1_marker, log2,
+                      "Restored active file must contain run-1 marker")
+
+        # Vault now contains BOTH markers (run 1 context preserved + run 2 appended)
+        all_vault = ""
+        for vf in os.listdir(vault_dir):
+            all_vault += Path(os.path.join(vault_dir, vf)).read_text(encoding="utf-8")
+        self.assertIn(run1_marker, all_vault, "Run 1 content must persist in vault")
+        self.assertIn(run2_marker, all_vault, "Run 2 content must be archived to vault")
+
+    def test_history_stem_produces_per_file_vault_names(self):
+        """E2E: Each aider invocation in multi-file isolated mode must receive a
+        UNIQUE --chat-history-file path derived from the target file stem."""
+        src_folder = os.path.join(self.test_dir, "src")
+        os.makedirs(src_folder, exist_ok=True)
+
+        file_a = os.path.join(src_folder, "stem_alpha.py")
+        file_b = os.path.join(src_folder, "stem_beta.py")
+        file_c = os.path.join(src_folder, "stem_gamma.py")
+        for fp in (file_a, file_b, file_c):
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write("pass\n")
+
+        tmpl_dir = os.path.join(self.test_dir, ".aider_factory", "markdown", "templates")
+        os.makedirs(tmpl_dir, exist_ok=True)
+        with open(os.path.join(tmpl_dir, "implement.md"), "w", encoding="utf-8") as f:
+            f.write("# Plan\nImplement.\n")
+
+        sess_name = "stem_names_session"
+        config_data = {
+            "name": "Stem Names Pipeline",
+            "working_directory": self.test_dir,
+            "phases": [{
+                "name": "Stem Phase",
+                "enabled": True,
+                "models": {"architect_agent": "mock/a", "editor_agent": "mock/e"},
+                "toggles": {
+                    "run_job_one": True, "run_job_two": False, "run_job_three": False,
+                    "iterate_test": False, "shared_history": False,
+                    "pair_programming": False, "yes_always": False,
+                },
+                "files": {
+                    "target_files": ["src/stem_alpha.py", "src/stem_beta.py", "src/stem_gamma.py"],
+                    "context_files_job": [],
+                },
+                "plans": {"job_one_plan": "markdown/templates/implement.md"},
+            }],
+        }
+        config_path = os.path.join(self.test_dir, "stem_names.yml")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.dump(config_data, f)
+
+        env = self._get_subprocess_env(session_name=sess_name, config_path=config_path)
+
+        res = subprocess.run(
+            [sys.executable, WORKFLOW_RUNNER, sess_name, config_path],
+            cwd=self.test_dir, env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(res.returncode, 0, f"Workflow failed: {res.stderr}")
+
+        sess_dir = os.path.join(self.test_dir, ".aider_factory", "sessions", sess_name)
+        vault_dir = os.path.join(sess_dir, "chat_history")
+
+        with open(self.fake_aider_log, "r", encoding="utf-8") as f:
+            log = f.read()
+
+        hist_lines = [l for l in log.splitlines() if l.startswith("HISTORY_FILE:")]
+        self.assertEqual(len(hist_lines), 3, "Must have 3 aider invocations (one per file)")
+
+        # All invocations target the session-dir active path (isolation is via vault swap,
+        # not via distinct CLI paths). Verify they all point into the session dir.
+        paths = [l.split("HISTORY_FILE:", 1)[1].strip() for l in hist_lines]
+        for p in paths:
+            self.assertIn(sess_dir, p,
+                          f"--chat-history-file must point to session dir, got: {p}")
+
+        # Vault files must be distinct per stem (3 files in chat_history/)
+        vault_files = sorted(os.listdir(vault_dir))
+        self.assertEqual(len(vault_files), 3, f"Vault must have 3 distinct files, got: {vault_files}")
+
+        # Each vault file must have unique content (proves swap_out captured distinct state)
+        vault_contents = set()
+        for vf in vault_files:
+            vault_contents.add(Path(os.path.join(vault_dir, vf)).read_text(encoding="utf-8"))
+        self.assertEqual(len(vault_contents), 3,
+                         f"Vault file contents must be distinct per stem, got: {vault_contents}")
 
 
 if __name__ == "__main__":

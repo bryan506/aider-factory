@@ -508,6 +508,12 @@ class AiderFactory:
         except Exception as e:
             print(f"└──{_RESET}", flush=True)
             return f"PROPOSAL: (architect turn failed: {e})"
+        # NOTE: Pipeline mode streams to sys.stdout because there is NO outer
+        # aider capturing our output (orchestrate.py IS the top-level process).
+        # Contrast with apply_agent.py which uses /dev/tty because it is invoked
+        # via aider's /run, where the outer aider captures sys.stdout as
+        # "command output" tokens. See apply_agent.py run_apply() for the /dev/tty
+        # pattern.
         chars = []
         try:
             if proc.stdout:
@@ -1215,6 +1221,20 @@ class AiderFactory:
                         conf_data = yaml.safe_load(f) or {}
                 except Exception as e:
                     log.warning(f"⚠️ Could not load base config {base_aider_conf}: {e}")
+
+            # Strip history-path keys so the CLI --chat-history-file /
+            # --input-history-file / --llm-history-file / --restore-chat-history
+            # flags are the sole authority.  Leaving these in causes aider to
+            # read the GLOBAL .aider_factory/.aider.chat.history.md (shared
+            # across ALL sessions), injecting cross-session context and making
+            # /clear appear ineffective.
+            for _hist_key in (
+                "chat-history-file",
+                "input-history-file",
+                "llm-history-file",
+                "restore-chat-history",
+            ):
+                conf_data.pop(_hist_key, None)
 
             if task.map_tokens is not None:
                 conf_data["map-tokens"] = task.map_tokens

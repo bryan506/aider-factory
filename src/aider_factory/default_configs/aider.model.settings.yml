@@ -434,7 +434,7 @@
   accepts_settings:
       - thinking_tokens
 
-- name: openai/qwen3.8-27B-90k-think:LATEST
+- name: openai/qwen3.8-27B-90k-q5think:LATEST
   edit_format: ask
   use_repo_map: true
   reasoning_tag: think
@@ -445,10 +445,35 @@
       think: true
       thinking_tokens: 8192
       reasoning_effort: "medium"
-      temperature: 0.6
-      top_k: 20
-      top_p: 0.95
-      min_p: 0.05
+      temperature: 0.8
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.07
+      repetition_penalty: 1.04
+      extra_body:
+          chat_template_kwargs:
+              enable_thinking: true
+              preserve_thinking: true
+  accepts_settings:
+      - reasoning_effort
+      - thinking_tokens
+
+
+- name: openai/qwen3.8-flash-next-111b-90k:LATEST
+  edit_format: ask
+  use_repo_map: true
+  reasoning_tag: think
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: false
+  extra_params:
+      think: true
+      thinking_tokens: 8192
+      reasoning_effort: "medium"
+      temperature: 0.7
+      top_k: 0
+      top_p: 1.0
+      min_p: 0.08
       repetition_penalty: 1.0
       extra_body:
           chat_template_kwargs:
@@ -457,6 +482,7 @@
   accepts_settings:
       - reasoning_effort
       - thinking_tokens
+
 
 - name: openai/qwen3.5-122b-a10b-90k:LATEST
   edit_format: ask

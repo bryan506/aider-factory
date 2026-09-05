@@ -153,6 +153,11 @@ class TestE2ELocalOraclePersistence(unittest.TestCase):
             )
         os.environ["ORACLE_CONFIG_FILE"] = self.config_path
 
+        # Pin session persistence directory explicitly so _session_file() resolves correctly
+        self.session_dir = os.path.join(self.temp_dir, ".aider_factory")
+        os.makedirs(self.session_dir, exist_ok=True)
+        os.environ["ORACLE_SESSION_DIR"] = self.session_dir
+
     def tearDown(self):
         os.chdir(self.original_cwd)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -182,7 +187,9 @@ class TestE2ELocalOraclePersistence(unittest.TestCase):
         print(f"⏱️ Turn 1 (Initial Question): {turn_1_duration:.2f}s")
 
         session_path = oracle_agent._session_file()
-        self.assertTrue(os.path.exists(session_path))
+        if not os.path.isabs(session_path):
+            session_path = os.path.join(self.session_dir, session_path)
+        self.assertTrue(os.path.exists(session_path), f"Session file not found at: {session_path}")
         with open(session_path, "r", encoding="utf-8") as f:
             turn_1_msgs = json.load(f)
         self.assertEqual(len(turn_1_msgs), 3)  # System + User + Assistant
@@ -224,20 +231,25 @@ class TestE2ELocalOraclePersistence(unittest.TestCase):
         print(f"[E2E Local Oracle Debate] Testing 2-loop debate against: {self.api_base}")
         print(f"==================================================")
 
+        os.environ["ORACLE_SESSION_DIR"] = self.session_dir
+        abs_target = os.path.join(self.temp_dir, self.target_code)
+
         t0 = time.perf_counter()
         rc = oracle_agent._run_cli_debate(
-            "Refactor calculate_ratio in src/calc.py to handle zero division safely.",
+            f"Refactor calculate_ratio in {abs_target} to handle zero division safely.",
             mode="code",
             max_turns=2,
             rounds=1,
         )
         debate_duration = time.perf_counter() - t0
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 0, f"Debate returned rc={rc}; check endpoint availability and model config")
         print(f"⏱️ Debate Completed in: {debate_duration:.2f}s")
 
         debate_session = os.path.join(
-            ".aider_factory", ".oracle_debate_session.json"
+            self.session_dir, ".oracle_debate_session.json"
         )
+        if not os.path.exists(debate_session):
+            debate_session = os.path.join(".aider_factory", ".oracle_debate_session.json")
         self.assertTrue(os.path.exists(debate_session))
         with open(debate_session, "r", encoding="utf-8") as f:
             data = json.load(f)

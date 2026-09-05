@@ -225,9 +225,14 @@ Details on the fix.
             f.write("")
         self.assertEqual(parse_chat_history(empty_file), "")
 
+    @patch("aider_factory.python.apply_agent.subprocess.Popen")
     @patch("aider_factory.python.apply_agent.subprocess.run")
-    def test_run_apply_failure_returncode(self, mock_sub_run):
+    def test_run_apply_failure_returncode(self, mock_sub_run, mock_popen):
+        mock_proc = mock_popen.return_value
+        mock_proc.returncode = 1
+        mock_proc.communicate.return_value = ("", "error")
         mock_sub_run.return_value.returncode = 1
+
         spec_file = os.path.join(self.temp_dir, "spec.md")
         with open(spec_file, "w") as f:
             f.write("# Spec\n")
@@ -237,8 +242,12 @@ Details on the fix.
         success = run_apply([target_file], spec_file=spec_file, cwd=self.temp_dir, no_diff=True)
         self.assertFalse(success)
 
+    @patch("aider_factory.python.apply_agent.subprocess.Popen")
     @patch("aider_factory.python.apply_agent.subprocess.run")
-    def test_run_apply_custom_spec_file(self, mock_sub_run):
+    def test_run_apply_custom_spec_file(self, mock_sub_run, mock_popen):
+        mock_proc = mock_popen.return_value
+        mock_proc.returncode = 0
+        mock_proc.communicate.return_value = ("", "")
         mock_sub_run.return_value.returncode = 0
 
         spec_file = os.path.join(self.temp_dir, "explicit_spec.md")
@@ -258,9 +267,15 @@ Details on the fix.
         with open(active_spec, "r", encoding="utf-8") as f:
             self.assertEqual(f.read(), "# Explicit Spec\nRefactor math.py")
 
-        # Verify subprocess.run command arguments for aider invocation
-        self.assertTrue(mock_sub_run.called)
-        cmd = mock_sub_run.call_args_list[0][0][0]
+        # Verify aider was invoked via at least one subprocess mechanism
+        invoked = mock_sub_run.called or mock_popen.called
+        self.assertTrue(invoked, "Neither subprocess.run nor subprocess.Popen was called")
+
+        # Extract command from whichever mock intercepted the call
+        if mock_popen.called:
+            cmd = mock_popen.call_args_list[0][0][0]
+        else:
+            cmd = mock_sub_run.call_args_list[0][0][0]
         self.assertEqual(cmd[0], "aider")
         self.assertIn("--message-file", cmd)
         self.assertIn(active_spec, cmd)

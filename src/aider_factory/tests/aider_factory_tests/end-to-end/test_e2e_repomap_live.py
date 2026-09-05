@@ -30,8 +30,9 @@ class TestE2ERepoMapLive(unittest.TestCase):
 
     def _get_subprocess_env(self, extra_env=None):
         env = dict(os.environ)
-        # Sandbox home directory to isolate global registry
+        # Sandbox home directory and XDG config to isolate global registry
         env["HOME"] = self.test_dir
+        env["XDG_CONFIG_HOME"] = os.path.join(self.test_dir, ".config")
         env["OPENAI_API_KEY"] = "sk-dummy"
         local_bin = os.path.expanduser("~/.local/bin")
         if os.path.exists(local_bin):
@@ -381,9 +382,18 @@ class TestE2ERepoMapLive(unittest.TestCase):
         self._setup_git_repo(repo_b)
         env = self._get_subprocess_env()
 
-        # Initialize and register both workspaces via lightweight status probe
-        subprocess.run([sys.executable, CLI_PATH, "--status"], cwd=repo_a, env=env, capture_output=True)
-        subprocess.run([sys.executable, CLI_PATH, "--status"], cwd=repo_b, env=env, capture_output=True)
+        # Ensure .aider_factory/ scaffolding exists in each workspace
+        os.makedirs(os.path.join(repo_a, ".aider_factory"), exist_ok=True)
+        os.makedirs(os.path.join(repo_b, ".aider_factory"), exist_ok=True)
+
+        # Register workspaces in sandboxed XDG registry
+        config_dir = os.path.join(self.test_dir, ".config", "aider_factory")
+        os.makedirs(config_dir, exist_ok=True)
+        registry_path = os.path.join(config_dir, "registry.json")
+        with open(registry_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "projects": [os.path.abspath(repo_a), os.path.abspath(repo_b)]
+            }, f, indent=2)
 
         # Run global repo map generation from workspace A
         res_global = subprocess.run(

@@ -14,6 +14,7 @@
 #   9. Vault swap round-trip: swap_out then swap_in restores exact bytes.
 #  10. Multiple sessions in same project do not cross-contaminate.
 
+import importlib
 import os
 import shutil
 import sys
@@ -31,6 +32,13 @@ src_dir = os.path.abspath(os.path.join(script_dir, "../../.."))
 for _p in (python_module_dir, src_dir):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+# Force eviction of any pre-imported orchestrate module from earlier test collection
+for mod in list(sys.modules.keys()):
+    if mod == "orchestrate" or mod.startswith("aider_factory.python.orchestrate"):
+        sys.modules.pop(mod, None)
+
+importlib.invalidate_caches()
 
 from orchestrate import AiderFactory, Task  # noqa: E402
 

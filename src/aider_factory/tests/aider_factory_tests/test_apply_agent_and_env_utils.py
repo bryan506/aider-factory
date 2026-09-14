@@ -554,12 +554,43 @@ class TestRunApplyAndMain(unittest.TestCase):
 
         # Create mock aider binary
         self.mock_aider = self.bin_dir / "aider"
-        fake_script = textwrap.dedent("""\
+        self._main_rejections_dump = self.root / "main_aider_rejections.txt"
+        fake_script = textwrap.dedent(f"""\
             #!/usr/bin/env python3
-            import sys
+            import os, sys
             from pathlib import Path
             print("Mock Aider running...")
-            # Modify target file to simulate edit
+
+            target_args = set()
+            msg_file = None
+            for idx, arg in enumerate(sys.argv):
+                if arg == "--message-file" and idx + 1 < len(sys.argv):
+                    msg_file = sys.argv[idx + 1]
+                elif arg.endswith(".py") and not arg.startswith("-"):
+                    target_args.add(os.path.basename(arg))
+
+            rejections = []
+            if msg_file and os.path.isfile(msg_file):
+                spec_text = Path(msg_file).read_text(encoding="utf-8")
+                for word in spec_text.split():
+                    clean_word = word.strip("`'\\"(),:;[]{{}}").rstrip(".")
+                    base = os.path.basename(clean_word)
+                    if base.endswith(".py") and base not in target_args and os.path.isfile(clean_word):
+                        if "--yes-always" in sys.argv:
+                            rejections.append(f"auto-accepted:{{base}}")
+                            Path(clean_word).write_text("# edited via mention\\n")
+                        else:
+                            ans = sys.stdin.readline().strip() if not sys.stdin.closed else ""
+                            if ans == "n":
+                                rejections.append(f"rejected:{{base}}")
+                            else:
+                                rejections.append(f"accepted:{{base}}")
+                                Path(clean_word).write_text("# edited via mention\\n")
+
+            with open(r"{self._main_rejections_dump}", "w") as f:
+                for r in rejections:
+                    f.write(f"{{r}}\\n")
+
             for arg in sys.argv:
                 if arg.endswith(".py") and not arg.startswith("-"):
                     Path(arg).write_text("# edited by mock aider\\n")
@@ -694,6 +725,35 @@ class TestRunApplyAndMain(unittest.TestCase):
         self.assertIn("ALPHA_MARKER_SPEC", spec_text)
         self.assertNotIn("BETA_MARKER_SPEC", spec_text)
 
+    def test_e4_cli_rejects_mentioned_files_and_edits_target_only(self):
+        """CLI entrypoint must reject files mentioned in spec and edit only target files."""
+        target = self.root / "cli_target.py"
+        target.write_text("# original\n", encoding="utf-8")
+        ambient = self.root / "ambient_cli_mentioned.py"
+        ambient.write_text("# ambient untouched\n", encoding="utf-8")
+
+        spec = self.root / "cli_spec.md"
+        spec.write_text(
+            f"Fix {target.name} following patterns in {ambient.name}.\n",
+            encoding="utf-8",
+        )
+
+        cmd = [
+            sys.executable,
+            os.path.join(python_module_dir, "apply_agent.py"),
+            str(target),
+            "--spec", str(spec),
+            "--no-diff",
+        ]
+        res = subprocess.run(cmd, cwd=str(self.root), capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"stderr: {res.stderr}")
+
+        self.assertEqual(target.read_text(encoding="utf-8"), "# edited by mock aider\n")
+        self.assertEqual(ambient.read_text(encoding="utf-8"), "# ambient untouched\n")
+
+        rejections = self._main_rejections_dump.read_text(encoding="utf-8").splitlines()
+        self.assertIn(f"rejected:{ambient.name}", rejections)
+
 
 class TestRunApplyGaps(unittest.TestCase):
     """Fill gaps D2–D10 for run_apply()."""
@@ -705,6 +765,8 @@ class TestRunApplyGaps(unittest.TestCase):
         self.bin_dir.mkdir()
 
         self._env_dump = self.root / "aider_env_dump.txt"
+        self._args_dump = self.root / "aider_args_dump.txt"
+        self._rejections_dump = self.root / "aider_rejections_dump.txt"
         fake_aider = textwrap.dedent(f"""\
             #!/usr/bin/env python3
             import os, sys
@@ -712,6 +774,42 @@ class TestRunApplyGaps(unittest.TestCase):
             with open(r"{self._env_dump}", "w") as f:
                 for k, v in sorted(os.environ.items()):
                     f.write(f"{{k}}={{v}}\\n")
+            with open(r"{self._args_dump}", "w") as f:
+                for arg in sys.argv[1:]:
+                    f.write(f"{{arg}}\\n")
+
+            # Simulate Aider's interactive file-mention scanner
+            target_args = set()
+            msg_file = None
+            for idx, arg in enumerate(sys.argv):
+                if arg == "--message-file" and idx + 1 < len(sys.argv):
+                    msg_file = sys.argv[idx + 1]
+                elif arg.endswith(".py") and not arg.startswith("-"):
+                    target_args.add(os.path.basename(arg))
+
+            rejections = []
+            if msg_file and os.path.isfile(msg_file):
+                spec_text = Path(msg_file).read_text(encoding="utf-8")
+                # Scan spec for mentioned files
+                for word in spec_text.split():
+                    clean_word = word.strip("`'\\"(),:;[]{{}}").rstrip(".")
+                    base = os.path.basename(clean_word)
+                    if base.endswith(".py") and base not in target_args and os.path.isfile(clean_word):
+                        if "--yes-always" in sys.argv:
+                            rejections.append(f"auto-accepted:{{base}}")
+                            Path(clean_word).write_text("# edited via mention\\n")
+                        else:
+                            ans = sys.stdin.readline().strip() if not sys.stdin.closed else ""
+                            if ans == "n":
+                                rejections.append(f"rejected:{{base}}")
+                            else:
+                                rejections.append(f"accepted:{{base}}")
+                                Path(clean_word).write_text("# edited via mention\\n")
+
+            with open(r"{self._rejections_dump}", "w") as f:
+                for r in rejections:
+                    f.write(f"{{r}}\\n")
+
             for arg in sys.argv:
                 if arg.endswith(".py") and not arg.startswith("-"):
                     Path(arg).write_text("# edited\\n")
@@ -916,6 +1014,73 @@ class TestRunApplyGaps(unittest.TestCase):
         self.assertIn("OPENAI_API_BASE=http://my-proxy:4000/v1", env_text)
         self.assertIn("OLLAMA_API_BASE=http://my-proxy:4000/v1", env_text)
         self.assertIn("LM_STUDIO_API_BASE=http://my-proxy:4000/v1", env_text)
+
+    def test_d11_apply_conf_sanitized_and_no_architect(self):
+        af = self.root / ".aider_factory"
+        af.mkdir(parents=True)
+        conf = af / ".aider.conf.yml"
+        conf.write_text(
+            yaml.dump({
+                "read": ["static_repo_map.md", "static_repo_map_tests.md", "CONVENTIONS.md"],
+                "files": ["unrelated.py"],
+                "architect": True,
+                "model": "openai/some-model",
+            }),
+            encoding="utf-8",
+        )
+        target, spec = self._make_target_and_spec()
+
+        run_apply(
+            files=[str(target)],
+            spec_file=str(spec),
+            no_diff=True,
+            cwd=str(self.root),
+        )
+
+        sanitized = af / "temp" / ".apply.aider.conf.yml"
+        self.assertTrue(sanitized.exists())
+        with open(sanitized, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        self.assertNotIn("read", cfg)
+        self.assertNotIn("files", cfg)
+        self.assertFalse(cfg.get("architect"))
+        self.assertEqual(cfg.get("model"), "openai/some-model")
+
+        args_text = self._args_dump.read_text(encoding="utf-8").splitlines()
+        self.assertNotIn("--architect", args_text)
+        self.assertNotIn("--no-architect", args_text)
+        self.assertNotIn("--read", args_text)
+        self.assertIn("--exit", args_text)
+        self.assertNotIn("--yes-always", args_text)
+        self.assertIn("--config", args_text)
+        config_idx = args_text.index("--config")
+        self.assertEqual(args_text[config_idx + 1], str(sanitized))
+
+    def test_d12_mentioned_files_prompt_rejected_via_stdin(self):
+        target, spec = self._make_target_and_spec()
+        ambient = self.root / "ambient_mentioned.py"
+        ambient.write_text("# ambient untouched\n", encoding="utf-8")
+        spec.write_text(
+            f"Update {target.name} based on patterns in {ambient.name}.\n",
+            encoding="utf-8",
+        )
+
+        success = run_apply(
+            files=[str(target)],
+            spec_file=str(spec),
+            no_diff=True,
+            cwd=str(self.root),
+        )
+        self.assertTrue(success)
+        self.assertEqual(target.read_text(encoding="utf-8"), "# edited\n")
+        self.assertEqual(ambient.read_text(encoding="utf-8"), "# ambient untouched\n")
+
+        rejections = self._rejections_dump.read_text(encoding="utf-8").splitlines()
+        self.assertIn(f"rejected:{ambient.name}", rejections)
+
+        args_text = self._args_dump.read_text(encoding="utf-8").splitlines()
+        self.assertIn("--exit", args_text)
+        self.assertNotIn("--yes-always", args_text)
 
 
 # ===========================================================================

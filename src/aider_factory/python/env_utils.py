@@ -70,6 +70,32 @@ ALL_PROVIDER_KEYS = (
 )
 
 
+def probe_router(base_url: str, api_key: Optional[str] = None, timeout: int = 2) -> Optional[list]:
+    """Query LiteLLM Router GET /v1/models. Returns sorted list of model ID strings or None on failure.
+
+    Prepends 'openai/' to any bare model ID. Never raises.
+    """
+    import requests
+
+    try:
+        headers = {}
+        if api_key and not is_dummy_key(api_key):
+            headers["Authorization"] = f"Bearer {api_key}"
+        resp = requests.get(
+            f"{base_url.rstrip('/')}/models", headers=headers, timeout=timeout
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json().get("data", [])
+        return sorted(
+            m["id"] if "/" in m["id"] else f"openai/{m['id']}"
+            for m in data
+            if "id" in m
+        )
+    except Exception:
+        return None
+
+
 def resolve_api_key(
     model: str = "", api_base: Optional[str] = None, explicit_key: Optional[str] = None
 ) -> Optional[str]:

@@ -225,6 +225,20 @@ def run_apply(
     root_settings = os.path.join(cwd, ".aider.model.settings.yml")
     aider_settings = local_settings if os.path.exists(local_settings) else (root_settings if os.path.exists(root_settings) else None)
 
+    # Sanitize aider_conf to prevent ambient read-only files (e.g. repo maps) from leaking into apply
+    sanitized_conf = None
+    if aider_conf:
+        try:
+            with open(aider_conf, "r", encoding="utf-8") as f:
+                raw_cfg = yaml.safe_load(f) or {}
+            cleaned_cfg = {k: v for k, v in raw_cfg.items() if k not in ("read", "files")}
+            cleaned_cfg["architect"] = False
+            sanitized_conf = os.path.join(temp_dir, ".apply.aider.conf.yml")
+            with open(sanitized_conf, "w", encoding="utf-8") as f:
+                yaml.safe_dump(cleaned_cfg, f)
+        except Exception:
+            sanitized_conf = aider_conf
+
     apply_chat_hist = os.path.join(temp_dir, ".apply.chat.history.md")
     apply_input_hist = os.path.join(temp_dir, ".apply.input.history")
 
@@ -257,13 +271,13 @@ def run_apply(
         "--no-analytics",
         "--no-detect-urls",
         "--no-suggest-shell-commands",
-        "--yes-always",
+        "--exit",
         "--auto-commits",
         "--no-show-model-warnings",
     ]
 
-    if aider_conf:
-        cmd.extend(["--config", aider_conf])
+    if sanitized_conf:
+        cmd.extend(["--config", sanitized_conf])
     if aider_settings:
         cmd.extend(["--model-settings-file", aider_settings])
 
@@ -303,12 +317,21 @@ def run_apply(
         cmd,
         cwd=cwd,
         env=env,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         errors="replace",
         bufsize=1,
     )
+
+    try:
+        if proc.stdin:
+            proc.stdin.write("n\n" * 50)
+            proc.stdin.flush()
+            proc.stdin.close()
+    except Exception:
+        pass
 
     if stream:
         # Open /dev/tty for live streaming (invisible to outer aider's /run capture).

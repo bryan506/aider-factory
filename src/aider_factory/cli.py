@@ -1470,10 +1470,10 @@ def helper_cli():
 Environment Variables for Custom Models:
   You can customize the model and endpoint used by aider-helper at any time.
 
-  For local endpoints (e.g., llama.cpp/LM Studio):
+  For local endpoints (e.g., via LiteLLM Router backed by Lemonade Server):
     export AIDER_HELPER_MODEL="openai/qwen2.5-coder:latest"
-    export AIDER_HELPER_API_BASE="http://192.168.100.1:8080/v1"
-    export OPENAI_API_KEY="sk-dummy"
+    export AIDER_HELPER_API_BASE="http://<your-router-host>:4000/v1"
+    export LITELLM_API_KEY="sk-YOUR_ROUTER_TOKEN"
 
   For other cloud providers (e.g., Anthropic):
     export AIDER_HELPER_MODEL="anthropic/claude-3-5-sonnet-20241022"
@@ -1491,7 +1491,15 @@ Environment Variables for Custom Models:
     subparsers = parser.add_subparsers(dest="command")
 
     # Bootstrap command
-    subparsers.add_parser("bootstrap", help="Bootstrap a new workspace configuration.")
+    bootstrap_parser = subparsers.add_parser(
+        "bootstrap",
+        help="Scaffold .aider_factory/ workspace (deterministic, no LLM, no interview).",
+    )
+    bootstrap_parser.add_argument(
+        "--repo",
+        default=os.getcwd(),
+        help="Target project directory to scaffold (default: cwd).",
+    )
 
     # Query command (default)
     query_parser = subparsers.add_parser(
@@ -1553,7 +1561,7 @@ Environment Variables for Custom Models:
     from bootstrap import clear_helper_session, run_bootstrap, run_query
 
     if args.command == "bootstrap":
-        run_bootstrap(".")
+        run_bootstrap(args.repo)
     else:
         terminal_val = getattr(args, "terminal", False) or (
             "--terminal" in sys.argv or "-t" in sys.argv

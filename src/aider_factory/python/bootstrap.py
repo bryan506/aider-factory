@@ -109,7 +109,7 @@ load_env_files()
 def detect_api_key():
     if os.environ.get("AIDER_HELPER_API_BASE"):
         return "CUSTOM_LOCAL", "dummy"
-    keys = ["GEMINI_API_KEY", "GOOGLE_API_KEY", "AIDER_GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY", "OPENCODE_API_KEY"]
+    keys = ["GEMINI_API_KEY", "GOOGLE_API_KEY", "AIDER_GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY", "OPENCODE_API_KEY", "LITELLM_API_KEY"]
     for k in keys:
         val = os.environ.get(k)
         if val and not is_dummy_key(val):
@@ -125,242 +125,210 @@ def print_key_help_and_exit():
     print("\nTo make this permanent, add the export line to your ~/.bashrc or ~/.zshrc file.", file=sys.stderr)
     sys.exit(1)
 
-def run_bootstrap(target_dir):
-    """Conduct terminal-based interview to capture user intent and generate initial .env_<repo>.yml."""
-    print("====================================================")
-    print("         AI FACTORY WORKSPACE BOOTSTRAPPER          ")
-    print("====================================================\n")
-    
+def _detect_framework(cwd: str) -> tuple:
+    """Scan filesystem to infer test framework deterministically.
+
+    Returns (framework_name, test_runner, test_path_template, test_command_prefix).
+    Checks in priority order; first match wins. Defaults to py.
+    """
+    checks = [
+        ("py",
+         "uv run --with pytest pytest",
+         "tests/test_{stem}.py",
+         ""),
+        ("R",
+         "Rscript .aider_factory/tests/run_tests.R {file}",
+         "tests/testthat/test-{stem}.R",
+         ""),
+        ("rs",
+         "cargo test --test {stem}",
+         "tests/{stem}.rs",
+         ""),
+        ("js",
+         "npm test {file}",
+         "tests/{stem}.test.js",
+         ""),
+        ("go",
+         "go test {file}",
+         "tests/{stem}_test.go",
+         ""),
+    ]
+    # Map framework to filesystem markers
+    markers = {
+        "py": ["pytest.ini", "setup.cfg"],
+        "R": ["DESCRIPTION"],
+        "rs": ["Cargo.toml"],
+        "js": ["package.json"],
+        "go": ["go.mod"],
+    }
+    for name, runner, path, prefix in checks:
+        for marker in markers[name]:
+            if os.path.exists(os.path.join(cwd, marker)):
+                # For py, also accept pyproject.toml with [tool.pytest]
+                if name == "py" and marker == "setup.cfg":
+                    try:
+                        with open(os.path.join(cwd, "setup.cfg"), "r") as f:
+                            if "[tool:pytest]" not in f.read():
+                                continue
+                    except Exception:
+                        continue
+                return name, runner, path, prefix
+    # Additional py check: pyproject.toml containing [tool.pytest]
+    pyproject = os.path.join(cwd, "pyproject.toml")
+    if os.path.exists(pyproject):
+        try:
+            with open(pyproject, "r") as f:
+                if "[tool.pytest" in f.read():
+                    return "py", checks[0][1], checks[0][2], ""
+        except Exception:
+            pass
+    # Default fallback
+    return "py", checks[0][1], checks[0][2], ""
+
+
+def _select_models(available: list) -> dict:
+    """Pick architect, editor, embed, and reranker from a router model list.
+
+    Returns dict with keys: architect, editor, embed, reranker (values may be None).
+    """
+    if not available:
+        return {}
+    arch = next((m for m in available if "27b" in m.lower()), available[0])
+    embed = next((m for m in available if "embed" in m.lower()), None)
+    rerank = next((m for m in available if "rerank" in m.lower()), None)
+    return {"architect": arch, "editor": arch, "embed": embed, "reranker": rerank}
+
+
+def run_bootstrap(target_dir: str) -> None:
+    """Deterministic workspace scaffold. No interview. No LLM calls.
+
+    Steps:
+      1. Detect API keys / router availability from environment.
+      2. Detect test framework from filesystem markers.
+      3. Query router for available models; select architect/editor/embed/reranker.
+      4. Write .aider_factory/.env_<repo>.yml via regex substitution on template.
+      5. Provision directory structure and print structured summary.
+
+    Always produces a valid YAML file even with zero keys or no router.
+    """
+    cwd = os.path.abspath(target_dir)
+    repo_name = os.path.basename(cwd).strip().replace(" ", "_")
+
+    # --- Step 1: Detect keys ---
     key_name, _ = detect_api_key()
+    router_base = (
+        os.environ.get("LITELLM_BASE_URL")
+        or os.environ.get("AIDER_HELPER_API_BASE")
+    )
+    router_key = os.environ.get("LITELLM_API_KEY")
 
-    profile = {}
-    
-    # 1. Target Files
-    print("[1] Target Files to Modify:")
-    t_files = input("Enter files you want the agent to edit (comma-separated, e.g. src/main.py, R/logic.R): ").strip()
-    if not t_files:
-        print("Error: Target files are required to bootstrap a workspace.", file=sys.stderr)
-        sys.exit(1)
-    profile["target_files"] = [f.strip() for f in t_files.split(",") if f.strip()]
+    # --- Step 2: Detect framework ---
+    fw_name, fw_runner, fw_path, fw_prefix = _detect_framework(cwd)
 
-    # 2. Context Files
-    print("\n[2] Context Files (Read-Only):")
-    c_files = input("Enter read-only files the agent should look at (comma-separated, optional): ").strip()
-    profile["context_files"] = [f.strip() for f in c_files.split(",") if f.strip()]
+    # --- Step 3: Select models ---
+    available_models = None
+    if router_base:
+        from env_utils import probe_router
+        available_models = probe_router(router_base, router_key)
+    model_choices = _select_models(available_models) if available_models else {}
 
-    # 3. Language & Testing
-    print("\n[3] Language & Testing Framework:")
-    print("  1) Python (pytest)")
-    print("  2) R (testthat)")
-    print("  3) Rust (cargo test)")
-    print("  4) JavaScript (npm test)")
-    print("  5) Go (go test)")
-    print("  6) Custom")
-    choice = input("Select framework [default: 1]: ").strip() or "1"
-    
-    frameworks = {
-        "1": {"runner": "python -m pytest {file}", "path": "tests/test_{stem}.py", "prefix": ""},
-        "2": {"runner": "Rscript .aider_factory/tests/run_tests.R {file}", "path": "tests/testthat/test-{stem}.R", "prefix": ""},
-        "3": {"runner": "cargo test --test {stem}", "path": "tests/{stem}.rs", "prefix": ""},
-        "4": {"runner": "npm test {file}", "path": "tests/{stem}.test.js", "prefix": ""},
-        "5": {"runner": "go test {file}", "path": "tests/{stem}_test.go", "prefix": ""},
-        "6": {"runner": "echo 'custom'", "path": "tests/{stem}.test", "prefix": ""}
-    }
-    selected = frameworks.get(choice, frameworks["1"])
-    profile["test_runner"] = selected["runner"]
-    profile["test_naming_and_path"] = selected["path"]
-    profile["test_command_prefix"] = selected["prefix"]
-
-    # 4. Operating Mode
-    print("\n[4] Operating Mode:")
-    print("  1) Autonomous Pipeline (Iterative test-fixing loops)")
-    print("  2) Interactive Pair Programming (PTY-wrapped architect prompt)")
-    choice = input("Select operating mode [default: 1]: ").strip() or "1"
-    profile["operating_mode"] = "autonomous" if choice == "1" else "pair"
-
-    # 5. Model Discovery & Selection
-    provider_map = {
-        "GEMINI_API_KEY": "gemini",
-        "ANTHROPIC_API_KEY": "anthropic",
-        "OPENAI_API_KEY": "openai",
-        "OPENROUTER_API_KEY": "openrouter",
-        "GROQ_API_KEY": "groq"
-    }
-    provider = provider_map.get(key_name, "gemini")
-    
-    print(f"\n[+] Retrieving available models for provider '{provider}' via Aider...")
-    try:
-        subprocess.run(["aider", "--list-models", provider], check=False)
-    except Exception:
-        print("  (Aider model list unavailable. Using standard presets.)")
-
-    print("\n[5] Model Selection:")
-    arch_default = "gemini/gemini-3.6-flash" if provider == "gemini" else "openai/gpt-4o"
-    edit_default = "gemini/gemini-2.5-flash" if provider == "gemini" else "openai/gpt-4o-mini"
-    
-    arch_model = input(f"Enter Architect model [default: {arch_default}]: ").strip() or arch_default
-    edit_model = input(f"Enter Editor model [default: {edit_default}]: ").strip() or edit_default
-
-    profile["architect_agent"] = arch_model
-    profile["editor_agent"] = edit_model
-    profile["working_directory"] = os.getcwd()
-
-    # 6. Knowledge Oracle (RAG)
-    print("\n[6] Knowledge Oracle (RAG):")
-    choice = input("Do you want to attach a RAG database to query documentation? (y/n) [default: n]: ").strip().lower() or "n"
-    profile["use_rag"] = choice == "y"
-    if profile["use_rag"]:
-        profile["rag_collection"] = input("Enter your document collection directory name [default: docs]: ").strip() or "docs"
-        profile["rag_agent"] = input(f"Enter RAG Agent (Oracle) model [default: {arch_model}]: ").strip() or arch_model
-        profile["ocr_agent"] = input(f"Enter OCR Agent model [default: {arch_model}]: ").strip() or arch_model
-        profile["embed_model"] = input("Enter Embedding Model [default: BAAI/bge-m3]: ").strip() or "BAAI/bge-m3"
-        profile["embed_backend"] = input("Enter Embedding Backend (sentence-transformers/openai) [default: sentence-transformers]: ").strip() or "sentence-transformers"
-        
-        # Dynamic query_prefix auto-detection & fallback menu
-        emb_lower = profile["embed_model"].lower()
-        if "bge" in emb_lower:
-            profile["query_prefix"] = "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: "
-        elif "qwen" in emb_lower:
-            profile["query_prefix"] = "Query: "
-        else:
-            print(f"\n⚠️ No known query prefix preset found for embedding model '{profile['embed_model']}'.")
-            print("Available presets:")
-            print("  1) BGE (\"Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: \")")
-            print("  2) Qwen / Standard (\"Query: \")")
-            print("  3) Custom (Enter your own)")
-            preset_choice = input("Select preset or enter custom prefix [default: 2]: ").strip() or "2"
-            if preset_choice == "1":
-                profile["query_prefix"] = "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: "
-            elif preset_choice == "2":
-                profile["query_prefix"] = "Query: "
-            elif preset_choice == "3" or preset_choice == "":
-                profile["query_prefix"] = input("Enter custom query prefix: ").strip()
-            else:
-                profile["query_prefix"] = preset_choice
-    else:
-        profile["rag_collection"] = ""
-        profile["rag_agent"] = ""
-        profile["ocr_agent"] = ""
-        profile["embed_model"] = ""
-        profile["embed_backend"] = ""
-        profile["query_prefix"] = ""
-
-    # Synthesize config deterministically
-    repo_name = get_repo_name()
+    # --- Step 4: Write config via regex substitution ---
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    master_env_path = os.path.join(pkg_dir, "default_configs", "env.yml")
-    
-    # Bootstrap .aider_factory directory structure
-    local_aider_factory_dir = Path(target_dir) / ".aider_factory"
-    local_aider_factory_dir.mkdir(parents=True, exist_ok=True)
-    
-    target_yaml_path = local_aider_factory_dir / f".env_{repo_name}.yml"
-    
-    print("\n[+] Generating configuration...")
-    
-    with open(master_env_path, "r", encoding="utf-8") as f:
+    template_path = os.path.join(pkg_dir, "default_configs", "env.yml")
+
+    with open(template_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # 1. Project Identity
-    sensible_name = f"{os.path.basename(os.getcwd()).replace('_', ' ').replace('-', ' ').title()} Pipeline"
-    cwd = os.getcwd()
-    content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{sensible_name}"', content)
-    content = re.sub(r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd}"', content)
+    # Project identity
+    sensible_name = f"{repo_name.replace('_', ' ').replace('-', ' ').title()} Pipeline"
+    content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{sensible_name}"', content, count=1)
+    content = re.sub(r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd}"', content, count=1)
 
-    # Auto-discover cluster config and override defaults if present
-    cluster_config = _discover_cluster_config()
-    if cluster_config:
-        content = re.sub(r'architect_api_base:\s*".*?"', lambda _: f'architect_api_base: "{cluster_config["architect_api_base"]}"', content)
-        content = re.sub(r'editor_api:\s*".*?"', lambda _: f'editor_api: "{cluster_config["editor_api"]}"', content)
-        content = re.sub(r'rag_agent_api:\s*".*?"', lambda _: f'rag_agent_api: "{cluster_config["rag_agent_api"]}"', content)
-        if "architect_agent" in cluster_config:
-            profile["architect_agent"] = cluster_config["architect_agent"]
-            profile["editor_agent"] = cluster_config["editor_agent"]
+    # Test framework
+    content = re.sub(r'test_command_prefix:\s*".*?"', lambda _: f'test_command_prefix: "{fw_prefix}"', content, count=1)
+    content = re.sub(r'test_runner:\s*".*?"', lambda _: f'test_runner: "{fw_runner}"', content, count=1)
+    content = re.sub(r'test_naming_and_path:\s*".*?"', lambda _: f'test_naming_and_path: "{fw_path}"', content, count=1)
 
-    # 2. Test Framework
-    content = re.sub(r'test_command_prefix:\s*".*?"', lambda _: f'test_command_prefix: "{profile["test_command_prefix"]}"', content)
-    content = re.sub(r'test_runner:\s*".*?"', lambda _: f'test_runner: "{profile["test_runner"]}"', content)
-    content = re.sub(r'test_naming_and_path:\s*".*?"', lambda _: f'test_naming_and_path: "{profile["test_naming_and_path"]}"', content)
+    # Router endpoints (only if router detected)
+    if router_base:
+        for ep_key in ("architect_api_base", "editor_api", "editor_api_fallback",
+                       "rag_agent_api", "grounding_agent_api", "ocr_api_base",
+                       "embed_api_base"):
+            content = re.sub(
+                rf'{ep_key}:\s*".*?"',
+                lambda _, k=ep_key: f'{k}: "{router_base}"',
+                content,
+                count=1,
+            )
 
-    # 3. Models
-    content = re.sub(r'architect_agent:\s*".*?"', lambda _: f'architect_agent: "{profile["architect_agent"]}"', content)
-    content = re.sub(r'editor_agent:\s*".*?"', lambda _: f'editor_agent: "{profile["editor_agent"]}"', content)
-    content = re.sub(r'editor_agent_test:\s*".*?"', lambda _: f'editor_agent_test: "{profile["editor_agent"]}"', content)
-    content = re.sub(r'editor_agent_test_fallback:\s*".*?"', lambda _: f'editor_agent_test_fallback: "{profile["architect_agent"]}"', content)
+    # Models (only if router returned results)
+    if model_choices.get("architect"):
+        arch = model_choices["architect"]
+        editor = model_choices["editor"]
+        content = re.sub(r'architect_agent:\s*".*?"', lambda _: f'architect_agent: "{arch}"', content, count=1)
+        content = re.sub(r'editor_agent:\s*".*?"', lambda _: f'editor_agent: "{editor}"', content, count=1)
+        content = re.sub(r'editor_agent_test:\s*".*?"', lambda _: f'editor_agent_test: "{editor}"', content, count=1)
+        content = re.sub(r'editor_agent_test_fallback:\s*".*?"', lambda _: f'editor_agent_test_fallback: "{editor}"', content, count=1)
+    if model_choices.get("embed"):
+        _embed_m = model_choices["embed"]
+        content = re.sub(r'embed_model:\s*".*?"', lambda _: f'embed_model: "{_embed_m}"', content, count=1)
+        # Align embed_backend to prevent cloud-model / local-backend mismatch
+        _eb = "openai" if any(x in _embed_m.lower() for x in ("gemini", "openai", "embedding", "qwen")) else "sentence-transformers"
+        content = re.sub(r'embed_backend:\s*".*?"', lambda _: f'embed_backend: "{_eb}"', content, count=1)
+    if model_choices.get("reranker"):
+        content = re.sub(r'ranking_agent:\s*".*?"', lambda _: f'ranking_agent: "{model_choices["reranker"]}"', content, count=1)
 
-    # 4. Operating Mode
-    if profile["operating_mode"] == "autonomous":
-        content = re.sub(r'pair_programming:\s*true', 'pair_programming: false', content)
-        content = re.sub(r'auto_test:\s*false', 'auto_test: true', content)
-        content = re.sub(r'yes_always:\s*false', 'yes_always: true', content)
-        content = re.sub(r'auto_accept_architect:\s*false', 'auto_accept_architect: true', content)
+    # Standardize analyze_bugs template path
+    content = re.sub(
+        r'template:\s*"\.?\.?/?(?:aider_factory/)?markdown/internal/analyze_bugs\.md"',
+        'template: "src/aider_factory/markdown/internal/analyze_bugs.md"',
+        content,
+        count=1,
+    )
 
-    # 5. File Lists
-    def format_yaml_list(items):
-        if not items:
-            return "[]"
-        return "\n" + "\n".join(f'        - "{item}"' for item in items)
+    # Provision .aider_factory directory
+    local_aider_factory_dir = Path(cwd) / ".aider_factory"
+    local_aider_factory_dir.mkdir(parents=True, exist_ok=True)
 
-    content = re.sub(r'target_files:\s*\[\]', lambda _: f'target_files: {format_yaml_list(profile["target_files"])}', content)
-    content = re.sub(r'context_files_job:\s*\[\]', lambda _: f'context_files_job: {format_yaml_list(profile.get("context_files", []))}', content)
-    content = re.sub(r'context_files_test:\s*\[\]', lambda _: f'context_files_test: {format_yaml_list(profile.get("context_files", []))}', content)
-
-    # 6. Knowledge Oracle (RAG)
-    if profile["use_rag"]:
-        content = re.sub(r'collection_name:\s*".*?"', lambda _: f'collection_name: "{profile["rag_collection"]}"', content)
-        content = re.sub(r'run_ocr_rag:\s*false', 'run_ocr_rag: true', content)
-        content = re.sub(r'grounding_agent:\s*".*?"', 'grounding_agent: ""', content)
-        if profile["rag_agent"]:
-            content = re.sub(r'rag_agent:\s*".*?"', lambda _: f'rag_agent: "{profile["rag_agent"]}"', content)
-        if profile["ocr_agent"]:
-            content = re.sub(r'ocr_agent:\s*".*?"', lambda _: f'ocr_agent: "{profile["ocr_agent"]}"', content)
-        if profile["embed_model"]:
-            content = re.sub(r'embed_model:\s*".*?"', lambda _: f'embed_model: "{profile["embed_model"]}"', content)
-        if profile["embed_backend"]:
-            content = re.sub(r'embed_backend:\s*".*?"', lambda _: f'embed_backend: "{profile["embed_backend"]}"', content)
-        if profile["query_prefix"]:
-            content = re.sub(r'query_prefix:\s*".*?"', lambda _: f'query_prefix: "{profile["query_prefix"]}"', content)
-
-    # Standardize the analyze_bugs template path to use the portable src/aider_factory relative path
-    content = re.sub(r'template:\s*"\.?\.?/?(?:aider_factory/)?markdown/internal/analyze_bugs\.md"', 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"', content)
-
+    target_yaml_path = local_aider_factory_dir / f".env_{repo_name}.yml"
     with open(target_yaml_path, "w", encoding="utf-8") as f:
         f.write(content)
-        
-    print(f"✅ Created {target_yaml_path}")
 
-    # Initialize other default files
-    # Add parent directory (src/aider_factory/) to path dynamically to import cli
+    # --- Step 5: Provision + report ---
     _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _parent_dir not in sys.path:
         sys.path.insert(0, _parent_dir)
     from cli import init_user_project
-    init_user_project(target_dir)
-    
-    # Automatically provision the LanceDB directory if RAG is enabled
-    if profile["use_rag"] and profile["rag_collection"]:
-        rag_dir = os.path.join(target_dir, ".aider_factory", "markdown", "lanceDB", profile["rag_collection"])
-        os.makedirs(rag_dir, exist_ok=True)
+    init_user_project(cwd)
 
-    print("\n🎉 Workspace initialized successfully!")
-    if profile["use_rag"]:
-        print(f"👉 Note: Copy your source documents (PDFs, MD, images, etc.) to:\n  .aider_factory/markdown/lanceDB/{profile['rag_collection']}/")
-    print(f"To run your pipeline, execute:\n  .aider_factory/bash/factory .aider_factory/.env_{repo_name}.yml")
-    
-    print("\n💡 Tip: You can customize or change the aider-helper model at any time:")
-    print("  # For local endpoints (e.g., llama.cpp/LM Studio):")
-    print("  export AIDER_HELPER_MODEL=\"qwen3.6-27B-90k-udq4kxl:LATEST\"")
-    print("  export AIDER_HELPER_API_BASE=\"http://192.168.100.1:8080/v1\"")
-    print("  # For other cloud providers (e.g., Anthropic):")
-    print("  export AIDER_HELPER_MODEL=\"anthropic/claude-3-5-sonnet-20241022\"")
-    print("  export ANTHROPIC_API_KEY=\"your-key\"")
-    print("  # To revert back to default cloud settings:")
-    print("  unset AIDER_HELPER_MODEL AIDER_HELPER_API_BASE")
+    # Print structured summary
+    print(f"\n\u2705 .aider_factory/.env_{repo_name}.yml written")
+    print(f"   Framework:  {fw_name} (detected from filesystem)")
+    if model_choices.get("embed"):
+        _em = model_choices["embed"]
+        _src = "cloud/router" if any(x in _em.lower() for x in ("gemini", "openai", "embedding", "qwen")) else "local"
+        print(f"   Embed:      {_em} ({_src})")
+    elif 'embed_backend: "sentence-transformers"' in content:
+        print("   Embed:      sentence-transformers (weights ~2 GB download on first RAG run)")
+    if router_base and available_models:
+        print(f"   Router:     {router_base} ({len(available_models)} models)")
+        print(f"   Architect:  {model_choices.get('architect', 'default')}")
+        print(f"   Editor:     {model_choices.get('editor', 'default')}")
+        if model_choices.get("reranker"):
+            print(f"   Reranker:   {model_choices['reranker']}")
+    elif router_base:
+        print(f"   Router:     {router_base} (unreachable \u2014 template defaults preserved)")
+    else:
+        print(f"   Router:     none detected (placeholder endpoints in file)")
 
     if not key_name:
-        print("\n⚠️  No LLM API key was detected in your environment.")
-        print("If you plan to use cloud models, remember to export your key (e.g., export GEMINI_API_KEY=\"...\")")
-        print("and add it to your ~/.bashrc or ~/.zshrc.")
+        print(f"\n   \u26a0\ufe0f  No API key detected. To enable inference, set:")
+        print(f"      export LITELLM_BASE_URL=\"http://<host>:4000/v1\"")
+        print(f"      export LITELLM_API_KEY=\"sk-...\"")
+        print(f"   Or a cloud provider key (GEMINI_API_KEY, ANTHROPIC_API_KEY, etc.)")
+
+    print(f"\n   Run:  aider-factory .aider_factory/.env_{repo_name}.yml")
+    print(f"   Edit: .aider_factory/.env_{repo_name}.yml\n")
 
 def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=False, master_mode=False, expert_mode=False, repo_map=False):
     """Query configuration or run general terminal assistant using direct litellm session persistence."""
@@ -583,13 +551,21 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
             "stream_options": {"include_usage": True}
         }
         if api_base:
+            _explicit = (
+                os.environ.get(key_name) if key_name != "CUSTOM_LOCAL"
+                else os.environ.get("LITELLM_API_KEY")
+            )
             helper_key = resolve_api_key(
                 model=model,
                 api_base=api_base,
-                explicit_key=os.environ.get(key_name) if key_name != "CUSTOM_LOCAL" else None,
+                explicit_key=_explicit,
             )
             kwargs["api_base"] = api_base
-            kwargs["api_key"] = helper_key or "sk-dummy"
+            if helper_key and not is_dummy_key(helper_key):
+                kwargs["api_key"] = helper_key
+            elif _explicit and not is_dummy_key(_explicit):
+                kwargs["api_key"] = _explicit
+            # else: omit api_key entirely → litellm picks from env / no auth for local
 
         response = litellm.completion(**kwargs)
 

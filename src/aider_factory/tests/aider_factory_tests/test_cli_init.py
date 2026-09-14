@@ -221,6 +221,98 @@ def test_all_cli_tools_help_flags():
     print("✅ All CLI Tools --help / -h Parity PASS")
 
 
+@patch("cli.ensure_searxng_service")
+@patch("cli.ensure_bash_wrappers")
+@patch("subprocess.run")
+def test_init_embed_defaults_are_local(mock_sub, mock_bash, mock_searxng):
+    """The shipped template must ship BAAI/bge-m3 + sentence-transformers (no cloud model)."""
+    pkg_dir = os.path.abspath(os.path.join(script_dir, "..", ".."))
+    template_path = os.path.join(
+        pkg_dir, "default_configs", "sample_yaml_config", "complete_env.yml"
+    )
+    with open(template_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    assert 'embed_model: "BAAI/bge-m3"' in content, \
+        "Template must ship BAAI/bge-m3 as default embed model"
+    assert 'embed_backend: "sentence-transformers"' in content, \
+        "Template must ship sentence-transformers backend"
+    assert "gemini/text-embedding-004" not in content, \
+        "Template must not reference cloud embedder"
+    print("✅ Embed default is BAAI/bge-m3 + sentence-transformers PASS")
+
+
+@patch("cli.ensure_searxng_service")
+@patch("cli.ensure_bash_wrappers")
+@patch("subprocess.run")
+def test_bootstrap_cloud_embedder_flips_backend(mock_sub, mock_bash, mock_searxng):
+    """When probe_router returns a cloud embedder, embed_backend must become openai."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        original_cwd = os.getcwd()
+        os.chdir(tmp_dir)
+        original_env = os.environ.get("LITELLM_BASE_URL")
+        try:
+            os.environ["LITELLM_BASE_URL"] = "http://fake-router:4000/v1"
+            import bootstrap
+            with patch("env_utils.probe_router",
+                       return_value=["gemini/text-embedding-004", "gemini/gemini-3.6-flash"]), \
+                 patch.object(bootstrap, "_detect_framework",
+                              return_value=("py", "uv run --with pytest pytest", "tests/test_{stem}.py", "")), \
+                 patch.object(bootstrap, "detect_api_key",
+                              return_value=("LITELLM_API_KEY", "sk-test")), \
+                 patch("cli.init_user_project"):
+                bootstrap.run_bootstrap(tmp_dir)
+
+            repo_name = os.path.basename(tmp_dir).strip().replace(" ", "_")
+            with open(os.path.join(".aider_factory", f".env_{repo_name}.yml"), "r") as f:
+                content = f.read()
+            assert 'embed_model: "gemini/text-embedding-004"' in content
+            assert 'embed_backend: "openai"' in content
+        finally:
+            if original_env is None:
+                os.environ.pop("LITELLM_BASE_URL", None)
+            else:
+                os.environ["LITELLM_BASE_URL"] = original_env
+            os.chdir(original_cwd)
+    print("✅ Cloud embedder flips backend to openai PASS")
+
+
+@patch("cli.ensure_searxng_service")
+@patch("cli.ensure_bash_wrappers")
+@patch("subprocess.run")
+def test_bootstrap_local_embedder_keeps_backend(mock_sub, mock_bash, mock_searxng):
+    """When probe_router returns a local embedder, embed_backend stays sentence-transformers."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        original_cwd = os.getcwd()
+        os.chdir(tmp_dir)
+        original_env = os.environ.get("LITELLM_BASE_URL")
+        try:
+            os.environ["LITELLM_BASE_URL"] = "http://fake-router:4000/v1"
+            import bootstrap
+            # Model name must contain "embed" so _select_models() picks it,
+            # but must NOT contain gemini/openai/embedding/qwen so backend stays sentence-transformers.
+            with patch("env_utils.probe_router",
+                       return_value=["baai-embed-v1", "qwen3-27b"]), \
+                 patch.object(bootstrap, "_detect_framework",
+                              return_value=("py", "uv run --with pytest pytest", "tests/test_{stem}.py", "")), \
+                 patch.object(bootstrap, "detect_api_key",
+                              return_value=("LITELLM_API_KEY", "sk-test")), \
+                 patch("cli.init_user_project"):
+                bootstrap.run_bootstrap(tmp_dir)
+
+            repo_name = os.path.basename(tmp_dir).strip().replace(" ", "_")
+            with open(os.path.join(".aider_factory", f".env_{repo_name}.yml"), "r") as f:
+                content = f.read()
+            assert 'embed_model: "baai-embed-v1"' in content
+            assert 'embed_backend: "sentence-transformers"' in content
+        finally:
+            if original_env is None:
+                os.environ.pop("LITELLM_BASE_URL", None)
+            else:
+                os.environ["LITELLM_BASE_URL"] = original_env
+            os.chdir(original_cwd)
+    print("✅ Local embedder keeps sentence-transformers backend PASS")
+
+
 if __name__ == "__main__":
     test_init_empty_dir_creates_scratchpad()
     test_init_discovers_existing_files()
@@ -230,4 +322,7 @@ if __name__ == "__main__":
     test_init_markdown_does_not_overwrite_existing()
     test_cli_flags_in_uninitialized_directory_creates_zero_artifacts()
     test_all_cli_tools_help_flags()
+    test_init_embed_defaults_are_local()
+    test_bootstrap_cloud_embedder_flips_backend()
+    test_bootstrap_local_embedder_keeps_backend()
     print("\n🎉 All CLI Quickstart Unit Tests Passed!")

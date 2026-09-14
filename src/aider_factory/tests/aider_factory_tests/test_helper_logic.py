@@ -21,7 +21,7 @@ mock_response = [mock_chunk]
 
 
 def test_01_api_key_detection():
-    old_env = {k: os.environ.get(k) for k in ["GEMINI_API_KEY", "OPENAI_API_KEY", "AIDER_HELPER_API_BASE"]}
+    old_env = {k: os.environ.get(k) for k in ["GEMINI_API_KEY", "OPENAI_API_KEY", "AIDER_HELPER_API_BASE", "LITELLM_API_KEY"]}
     for k in old_env:
         os.environ.pop(k, None)
 
@@ -96,7 +96,8 @@ def test_03_query_prefix_auto_detection():
     assert get_prefix_for_model("custom-model") is None
 
 
-def test_04_dry_framework_mapping():
+def test_04_framework_mapping_from_yaml_content():
+    """Verify the inverse mapping: detecting framework from YAML runner string."""
     framework_map = {
         "Rscript": "R",
         "pytest": "py",
@@ -395,12 +396,256 @@ def test_15_persona_prompt_contract_invariant():
     assert "Do NOT copy unused keys" in bootstrap.PERSONA_PROMPT
 
 
+def test_16_detect_framework_from_filesystem():
+    """_detect_framework() scans filesystem markers and returns correct tuple."""
+    with tempfile.TemporaryDirectory() as tmp:
+        # Empty dir → default py
+        result = bootstrap._detect_framework(tmp)
+        assert result[0] == "py"
+        assert "pytest" in result[1]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        open(os.path.join(tmp, "pytest.ini"), "w").close()
+        result = bootstrap._detect_framework(tmp)
+        assert result[0] == "py"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        open(os.path.join(tmp, "Cargo.toml"), "w").close()
+        result = bootstrap._detect_framework(tmp)
+        assert result[0] == "rs"
+        assert "cargo" in result[1]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        open(os.path.join(tmp, "go.mod"), "w").close()
+        result = bootstrap._detect_framework(tmp)
+        assert result[0] == "go"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        open(os.path.join(tmp, "package.json"), "w").close()
+        result = bootstrap._detect_framework(tmp)
+        assert result[0] == "js"
+
+
+def test_17_bootstrap_router_model_selection():
+    """When router is reachable, bootstrap selects 27b model for architect/editor."""
+    with tempfile.TemporaryDirectory() as tmp:
+        open(os.path.join(tmp, "pytest.ini"), "w").close()
+        with patch("env_utils.probe_router", return_value=[
+            "openai/mock-flash-model",
+            "openai/mock-27b-model",
+            "openai/mock-embed-8b",
+            "openai/mock-reranker-v3",
+        ]):
+            with patch.dict(os.environ, {
+                "LITELLM_BASE_URL": "http://mock-router:4000/v1",
+                "LITELLM_API_KEY": "sk-test",
+            }):
+                bootstrap.run_bootstrap(tmp)
+                yaml_path = os.path.join(
+                    tmp, ".aider_factory", f".env_{os.path.basename(tmp)}.yml"
+                )
+                assert os.path.exists(yaml_path)
+                with open(yaml_path, "r") as f:
+                    content = f.read()
+                assert 'architect_agent: "openai/mock-27b-model"' in content
+                assert 'editor_agent: "openai/mock-27b-model"' in content
+                assert 'embed_model: "openai/mock-embed-8b"' in content
+                assert 'ranking_agent: "openai/mock-reranker-v3"' in content
+                assert "http://mock-router:4000/v1" in content
+
+
+def test_18_bootstrap_zero_key_still_writes_file():
+    """With no keys and no router, bootstrap still produces valid YAML."""
+    old_env = {}
+    for k in ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+              "LITELLM_BASE_URL", "AIDER_HELPER_API_BASE", "LITELLM_API_KEY"]:
+        old_env[k] = os.environ.pop(k, None)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, "pytest.ini"), "w").close()
+            bootstrap.run_bootstrap(tmp)
+            yaml_path = os.path.join(
+                tmp, ".aider_factory", f".env_{os.path.basename(tmp)}.yml"
+            )
+            assert os.path.exists(yaml_path), "Must produce file even with zero keys"
+            import yaml
+            with open(yaml_path, "r") as f:
+                cfg = yaml.safe_load(f)
+            assert cfg["working_directory"] == tmp
+            assert "name:" in open(yaml_path).read()
+    finally:
+        for k, v in old_env.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_19_bootstrap_no_router_preserves_placeholders():
+    """Without LITELLM_BASE_URL, template placeholder endpoints are preserved."""
+    old_env = {}
+    for k in ["LITELLM_BASE_URL", "AIDER_HELPER_API_BASE"]:
+        old_env[k] = os.environ.pop(k, None)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, "pytest.ini"), "w").close()
+            bootstrap.run_bootstrap(tmp)
+            yaml_path = os.path.join(
+                tmp, ".aider_factory", f".env_{os.path.basename(tmp)}.yml"
+            )
+            with open(yaml_path, "r") as f:
+                content = f.read()
+            # Template default placeholder must remain
+            assert "<your-router-host>" in content
+    finally:
+        for k, v in old_env.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_20_probe_router_returns_none_on_failure():
+    """probe_router must never raise; returns None on timeout, DNS, auth, or bad JSON."""
+    from env_utils import probe_router
+
+    # Non-200 response
+    with patch("requests.get") as mock_get:
+        mock_get.return_value = MagicMock(status_code=401)
+        assert probe_router("http://fake:4000/v1", "sk-bad") is None
+
+    # Connection timeout / network error
+    with patch("requests.get", side_effect=Exception("connection timeout")):
+        assert probe_router("http://fake:4000/v1") is None
+
+    # Malformed JSON body
+    with patch("requests.get") as mock_get:
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.side_effect = ValueError("not json")
+        mock_get.return_value = mock_resp
+        assert probe_router("http://fake:4000/v1") is None
+
+    # Empty data list → returns empty list (not None)
+    with patch("requests.get") as mock_get:
+        mock_get.return_value = MagicMock(status_code=200)
+        mock_get.return_value.json.return_value = {"data": []}
+        assert probe_router("http://fake:4000/v1") == []
+
+
+def test_21_probe_router_prepends_openai_prefix():
+    """Bare model IDs get 'openai/' prefix; already-prefixed IDs stay unchanged."""
+    from env_utils import probe_router
+
+    with patch("requests.get") as mock_get:
+        mock_get.return_value = MagicMock(status_code=200)
+        mock_get.return_value.json.return_value = {"data": [
+            {"id": "qwen3-27b"},
+            {"id": "openai/already-prefixed"},
+            {"id": "jinaai/reranker-v3"},
+        ]}
+        result = probe_router("http://fake:4000/v1")
+        assert "openai/qwen3-27b" in result
+        assert "openai/already-prefixed" in result
+        assert "jinaai/reranker-v3" in result
+        # Result must be sorted
+        assert result == sorted(result)
+
+
+def test_22_ambiguous_framework_priority():
+    """When multiple markers exist, first in priority order wins (py > R > rs > js > go)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        open(os.path.join(tmp, "pytest.ini"), "w").close()
+        open(os.path.join(tmp, "Cargo.toml"), "w").close()
+        open(os.path.join(tmp, "go.mod"), "w").close()
+        result = bootstrap._detect_framework(tmp)
+        assert result[0] == "py", "py must win when multiple markers present"
+
+    # R should win over rs when both present
+    with tempfile.TemporaryDirectory() as tmp:
+        open(os.path.join(tmp, "DESCRIPTION"), "w").close()
+        open(os.path.join(tmp, "Cargo.toml"), "w").close()
+        result = bootstrap._detect_framework(tmp)
+        assert result[0] == "R", "R must win over rs"
+
+
+def test_23_select_models_edge_cases():
+    """_select_models handles empty list, no 27b, no embed/reranker gracefully."""
+    # Empty list → empty dict
+    assert bootstrap._select_models([]) == {}
+
+    # No 27b → first model wins as architect/editor
+    result = bootstrap._select_models(["openai/small-model", "openai/medium-model"])
+    assert result["architect"] == "openai/small-model"
+    assert result["editor"] == "openai/small-model"
+    assert result["embed"] is None
+    assert result["reranker"] is None
+
+    # 27b present (case-insensitive) → wins over first
+    result = bootstrap._select_models(["openai/small", "openai/big-27B-v2"])
+    assert result["architect"] == "openai/big-27B-v2"
+    assert result["editor"] == "openai/big-27B-v2"
+
+    # embed and reranker detection
+    result = bootstrap._select_models([
+        "openai/qwen3-27b",
+        "openai/qwen3-embedding-8b",
+        "openai/jina-reranker-v3",
+    ])
+    assert result["embed"] == "openai/qwen3-embedding-8b"
+    assert result["reranker"] == "openai/jina-reranker-v3"
+
+
+def test_24_generated_yaml_is_valid_yaml():
+    """Regex substitution must never corrupt YAML syntax on any path."""
+    import yaml
+    old_env = {k: os.environ.pop(k, None) for k in
+               ["LITELLM_BASE_URL", "AIDER_HELPER_API_BASE", "LITELLM_API_KEY"]}
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, "pytest.ini"), "w").close()
+            bootstrap.run_bootstrap(tmp)
+            yaml_path = os.path.join(
+                tmp, ".aider_factory", f".env_{os.path.basename(tmp)}.yml"
+            )
+            with open(yaml_path, "r") as f:
+                cfg = yaml.safe_load(f)
+            assert isinstance(cfg, dict), "Generated file must be a YAML mapping"
+            assert "phases" in cfg
+            assert "endpoints" in cfg
+            assert "name" in cfg
+            assert "test_runner" in cfg
+            assert isinstance(cfg["phases"], list)
+            assert len(cfg["phases"]) >= 1
+            assert "models" in cfg["phases"][0]
+    finally:
+        for k, v in old_env.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_25_bootstrap_provisions_bash_wrappers():
+    """After run_bootstrap(), .aider_factory/bash/ must contain executable wrappers."""
+    old_env = {k: os.environ.pop(k, None) for k in
+               ["LITELLM_BASE_URL", "AIDER_HELPER_API_BASE", "LITELLM_API_KEY"]}
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, "pytest.ini"), "w").close()
+            bootstrap.run_bootstrap(tmp)
+            bash_dir = os.path.join(tmp, ".aider_factory", "bash")
+            assert os.path.isdir(bash_dir), "bash/ directory must exist"
+            assert os.path.isfile(os.path.join(bash_dir, "factory"))
+            assert os.access(os.path.join(bash_dir, "factory"), os.X_OK)
+            assert os.path.isfile(os.path.join(bash_dir, "oracle"))
+            assert os.path.isfile(os.path.join(bash_dir, "validate"))
+            assert os.path.isfile(os.path.join(bash_dir, "apply"))
+    finally:
+        for k, v in old_env.items():
+            if v is not None:
+                os.environ[k] = v
+
+
 if __name__ == "__main__":
     print("Running helper logic tests...")
     test_01_api_key_detection()
     test_02_helper_session_persistence_and_clear()
     test_03_query_prefix_auto_detection()
-    test_04_dry_framework_mapping()
+    test_04_framework_mapping_from_yaml_content()
     test_05_terminal_mode_session_persistence_and_clear()
     test_06_master_mode_logic()
     test_07_expert_mode_logic()
@@ -412,4 +657,14 @@ if __name__ == "__main__":
     test_13_workspace_doc_override_precedence()
     test_14_reference_schema_fallback_resolution()
     test_15_persona_prompt_contract_invariant()
+    test_16_detect_framework_from_filesystem()
+    test_17_bootstrap_router_model_selection()
+    test_18_bootstrap_zero_key_still_writes_file()
+    test_19_bootstrap_no_router_preserves_placeholders()
+    test_20_probe_router_returns_none_on_failure()
+    test_21_probe_router_prepends_openai_prefix()
+    test_22_ambiguous_framework_priority()
+    test_23_select_models_edge_cases()
+    test_24_generated_yaml_is_valid_yaml()
+    test_25_bootstrap_provisions_bash_wrappers()
     print("All tests passed!")

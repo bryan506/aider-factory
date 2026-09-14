@@ -38,7 +38,7 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         rag_agent: "gemini/gemini-3.6-flash"
         ranking_agent: "jinaai/jina-reranker-v3.5"
         ocr_agent: "gemini/gemini-3.6-flash"
-        embed_model: "gemini/text-embedding-004"
+        embed_model: "BAAI/bge-m3"
         grounding_agent: "openai/minicheck-flan-t5-large"
 
     rag:

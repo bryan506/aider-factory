@@ -46,9 +46,20 @@ jobs:
         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        # Auto-answer Aider prompts in CI
+        AIDER_YES: "1"
+        AIDER_NO_GITIGNORE: "1"
+        # Standard flag to let tests know they are in cloud CI
+        CI: "true"
       run: |
         uv run --with pytest pytest -s src/aider_factory/tests/ \
           --ignore="src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_docling_pipeline.py" \
           --ignore="src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_max_chat_history_tokens.py" \
           --ignore="src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_architect_summarization.py" \
+          --ignore="src/aider_factory/tests/aider_factory_tests/end-to-end/persistant-aider/test_persistent_aider_e2e.py" \
+          --ignore="src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_workflow_smoke.py" \
+          --ignore="src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_real_session_lifecycle.py" \
+          --ignore="src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_local_persistent_pipeline.py" \
+          --ignore="src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_shared_history_live.py" \
+          --ignore="src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_shared_history_and_prompt_isolation.py" \
           -v

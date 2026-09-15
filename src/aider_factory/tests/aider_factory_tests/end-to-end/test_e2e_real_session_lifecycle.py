@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 import yaml
@@ -42,8 +43,25 @@ class TestE2ERealSessionLifecycle(unittest.TestCase):
 
         self.bin_dir = os.path.join(self.test_dir, "bin")
         os.makedirs(self.bin_dir, exist_ok=True)
-        fake_aider = os.path.join(self.bin_dir, "aider")
-        fake_script = """#!/bin/bash
+        fake_aider_path = os.path.join(self.bin_dir, "aider")
+        if sys.platform == "win32":
+            fake_py = fake_aider_path + ".py"
+            with open(fake_py, "w", encoding="utf-8") as f:
+                f.write(textwrap.dedent("""\
+                    import sys
+                    prev = ""
+                    for arg in sys.argv[1:]:
+                        if prev == "--llm-history-file":
+                            with open(arg, "a", encoding="utf-8") as fh:
+                                fh.write('{"mock": "llm_turn"}\\n')
+                        prev = arg
+                    sys.exit(0)
+                """))
+            fake_cmd = fake_aider_path + ".cmd"
+            with open(fake_cmd, "w", encoding="utf-8") as f:
+                f.write(f'@"{sys.executable}" "%~dp0aider.py" %*\n')
+        else:
+            fake_script = """#!/bin/bash
 prev=""
 for i in "$@"; do
     if [[ "$prev" == "--llm-history-file" ]]; then
@@ -53,12 +71,12 @@ for i in "$@"; do
 done
 exit 0
 """
-        with open(fake_aider, "w", encoding="utf-8") as f:
-            f.write(fake_script)
-        os.chmod(fake_aider, 0o755)
+            with open(fake_aider_path, "w", encoding="utf-8") as f:
+                f.write(fake_script)
+            os.chmod(fake_aider_path, 0o755)
 
         self.old_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{self.bin_dir}:{self.old_path}"
+        os.environ["PATH"] = f"{self.bin_dir}{os.pathsep}{self.old_path}"
 
     def tearDown(self):
         os.chdir(self.old_cwd)
@@ -70,7 +88,7 @@ exit 0
 
     def _get_subprocess_env(self, extra_env=None):
         env = os.environ.copy()
-        python_path = f"{repo_root}:{src_dir}:{pkg_dir}:{os.path.join(pkg_dir, 'python')}"
+        python_path = os.pathsep.join([repo_root, src_dir, pkg_dir, os.path.join(pkg_dir, 'python')])
         env["PYTHONPATH"] = python_path
         if extra_env:
             env.update(extra_env)
@@ -531,13 +549,29 @@ exit 0
 
         bin_dir = os.path.join(self.test_dir, "bin")
         os.makedirs(bin_dir, exist_ok=True)
-        fake_aider = os.path.join(bin_dir, "aider")
-        with open(fake_aider, "w", encoding="utf-8") as f:
-            f.write('#!/bin/bash\nTARGET="${@: -1}"\necho "# applied calculation" >> "$TARGET"\ngit add "$TARGET"\ngit commit -m "aider: applied"\nexit 0\n')
-        os.chmod(fake_aider, 0o755)
+        fake_aider_path = os.path.join(bin_dir, "aider")
+        if sys.platform == "win32":
+            fake_py = fake_aider_path + ".py"
+            with open(fake_py, "w", encoding="utf-8") as f:
+                f.write(textwrap.dedent("""\
+                    import subprocess, sys
+                    target = sys.argv[-1]
+                    with open(target, "a", encoding="utf-8") as fh:
+                        fh.write("# applied calculation\\n")
+                    subprocess.run(["git", "add", target], check=True)
+                    subprocess.run(["git", "commit", "-m", "aider: applied"], check=True)
+                    sys.exit(0)
+                """))
+            fake_cmd = fake_aider_path + ".cmd"
+            with open(fake_cmd, "w", encoding="utf-8") as f:
+                f.write(f'@"{sys.executable}" "%~dp0aider.py" %*\n')
+        else:
+            with open(fake_aider_path, "w", encoding="utf-8") as f:
+                f.write('#!/bin/bash\nTARGET="${@: -1}"\necho "# applied calculation" >> "$TARGET"\ngit add "$TARGET"\ngit commit -m "aider: applied"\nexit 0\n')
+            os.chmod(fake_aider_path, 0o755)
 
         old_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{bin_dir}:{old_path}"
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
 
         try:
             sess_dir = os.path.join(self.test_dir, ".aider_factory", "sessions", sess_name)

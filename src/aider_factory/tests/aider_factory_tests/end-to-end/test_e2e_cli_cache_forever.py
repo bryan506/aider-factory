@@ -26,7 +26,7 @@ class TestE2ECLICacheAndForever(unittest.TestCase):
 
         # Ensure package src is in PYTHONPATH
         pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
-        self.env["PYTHONPATH"] = f"{pkg_root}:{self.env.get('PYTHONPATH', '')}"
+        self.env["PYTHONPATH"] = f"{pkg_root}{os.pathsep}{self.env.get('PYTHONPATH', '')}"
 
     def tearDown(self):
         shutil.rmtree(self.temp_root, ignore_errors=True)

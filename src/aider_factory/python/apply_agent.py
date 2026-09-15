@@ -338,7 +338,8 @@ def run_apply(
         # Falls back gracefully if unavailable (CI, headless, redirected stdin).
         tty_fh = None
         try:
-            tty_fh = open("/dev/tty", "w", encoding="utf-8", errors="replace")
+            tty_path = "CONOUT$" if sys.platform == "win32" else "/dev/tty"
+            tty_fh = open(tty_path, "w", encoding="utf-8", errors="replace")
         except OSError:
             pass
 

@@ -16,6 +16,8 @@ _python_dir = os.path.dirname(os.path.abspath(__file__))
 if _python_dir not in sys.path:
     sys.path.insert(0, _python_dir)
 
+from env_utils import is_dummy_key
+
 import yaml
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -486,13 +488,17 @@ class AiderFactory:
         env["PYTHONHASHSEED"] = (
             "0"  # Ensure deterministic set iteration for perfect prefix caching
         )
+        # Resolve real key for LiteLLM routers (Lemonade, OpenRouter, etc.);
+        # fall back to "sk-dummy" for local llama.cpp / LM Studio.
+        _router_key = os.environ.get("LITELLM_API_KEY", "")
+        _router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
         if task.architect_api_base:
             env["OPENAI_API_BASE"] = task.architect_api_base
-            env["OPENAI_API_KEY"] = "sk-dummy"
+            env["OPENAI_API_KEY"] = _router_key
         if task.editor_api_base:
             env["OLLAMA_API_BASE"] = task.editor_api_base
             env["LM_STUDIO_API_BASE"] = task.editor_api_base
-            env["LM_STUDIO_API_KEY"] = "sk-dummy"
+            env["LM_STUDIO_API_KEY"] = _router_key
         print(f"\n{_ARCH_COLOR}┌── architect {label} ──", flush=True)
         try:
             proc = subprocess.Popen(
@@ -536,13 +542,20 @@ class AiderFactory:
         # (saves oracle tokens + keeps the transcript clean) while preserving the PROPOSAL.
         return self._extract_assistant_text(self._strip_thinking("".join(chars)))
 
-    def _gate_run(self, task: "Task", gate_cmd: str):
-        """Run the deterministic gate; return (passed, combined_output)."""
+    def _gate_run(self, task: "Task", gate_cmd):
+        """Run the deterministic gate; return (passed, combined_output).
+
+        gate_cmd may be a list (shell=False, used for internally-constructed
+        commands like the grounding gate) or a string (shell=True, used for
+        user-configured test_cmd which may contain shell syntax like '&&').
+        """
         env = {**os.environ, **(task.rag_env or {})}
+        use_shell = isinstance(gate_cmd, str)
+        cache_key = gate_cmd if use_shell else tuple(gate_cmd)
         try:
             p = subprocess.run(
                 gate_cmd,
-                shell=True,
+                shell=use_shell,
                 cwd=self.project_dir,
                 env=env,
                 stdout=subprocess.PIPE,
@@ -550,10 +563,10 @@ class AiderFactory:
                 text=True,
             )
             passed = p.returncode == 0
-            self.last_test_result[gate_cmd] = passed
+            self.last_test_result[cache_key] = passed
             return passed, p.stdout or ""
         except Exception as e:
-            self.last_test_result[gate_cmd] = False
+            self.last_test_result[cache_key] = False
             return False, f"(gate error: {e})"
 
     def _oracle_turn(
@@ -1524,13 +1537,17 @@ class AiderFactory:
             if task.detect_urls is not None:
                 env["AIDER_DETECT_URLS"] = "true" if task.detect_urls else "false"
 
+            # Resolve real key for LiteLLM routers (Lemonade, OpenRouter, etc.);
+            # fall back to "sk-dummy" for local llama.cpp / LM Studio.
+            _router_key = os.environ.get("LITELLM_API_KEY", "")
+            _router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
             if task.architect_api_base:
                 env["OPENAI_API_BASE"] = task.architect_api_base
-                env["OPENAI_API_KEY"] = "sk-dummy"
+                env["OPENAI_API_KEY"] = _router_key
             if task.editor_api_base:
                 env["OLLAMA_API_BASE"] = task.editor_api_base
                 env["LM_STUDIO_API_BASE"] = task.editor_api_base
-                env["LM_STUDIO_API_KEY"] = "sk-dummy"
+                env["LM_STUDIO_API_KEY"] = _router_key
             # Side-agent (ORACLE_*) config, visible to /run child processes
             if task.rag_env:
                 env.update(task.rag_env)
@@ -1541,18 +1558,50 @@ class AiderFactory:
                     log.info(
                         f"🤝 STARTING INTERACTIVE PAIR-PROGRAMMING [{task.id}] -> Arch: {task.architect_api_base} | Ed: {current_editor}"
                     )
-                    # Wrap Aider in `script` so prompt_toolkit sees a real PTY
-                    # while all output (stdout + stderr) is captured to a file.
-                    # The finally block parses the capture for cost lines and
-                    # emits them to stdout (-> tee -> log -> aggregate_costs.py).
-                    # This captures every cost source: main session, /run
-                    # debates, and oracle turns — no sidecars or chat history.
+                    # Wrap Aider in a PTY capture so prompt_toolkit sees a real
+                    # terminal while all output is captured to a file. The
+                    # finally block parses the capture for cost lines and emits
+                    # them to stdout (-> tee -> log -> aggregate_costs.py).
                     cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
-                    process = subprocess.Popen(
-                        ["script", "-qfe", "-c", cmd_str, _pair_capture],
-                        env=env,
-                        cwd=self.project_dir,
-                    )
+                    if sys.platform == "win32":
+                        # Windows: no script/PTY available; run directly and
+                        # tee stdout to the capture file for cost extraction.
+                        _cap_fh = open(
+                            _pair_capture, "w", encoding="utf-8", errors="replace"
+                        )
+                        process = subprocess.Popen(
+                            cmd,
+                            env=env,
+                            cwd=self.project_dir,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                        )
+                        try:
+                            if process.stdout:
+                                for _line in process.stdout:
+                                    sys.stdout.write(_line)
+                                    sys.stdout.flush()
+                                    _cap_fh.write(_line)
+                                process.stdout.close()
+                        finally:
+                            _cap_fh.close()
+                    elif sys.platform == "darwin":
+                        # macOS BSD script: positional args, no -e/-f flags.
+                        _shell = os.environ.get("SHELL", "/bin/bash")
+                        process = subprocess.Popen(
+                            ["script", "-q", _pair_capture, _shell, "-c", cmd_str],
+                            env=env,
+                            cwd=self.project_dir,
+                        )
+                    else:
+                        # Linux GNU script: flag-based invocation.
+                        process = subprocess.Popen(
+                            ["script", "-qfe", "-c", cmd_str, _pair_capture],
+                            env=env,
+                            cwd=self.project_dir,
+                        )
                     while True:
                         try:
                             process.wait()
@@ -1565,10 +1614,8 @@ class AiderFactory:
                     return process.returncode == 0
 
                 # Start Aider, streaming to terminal
-                cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
                 process = subprocess.Popen(
-                    cmd_str,
-                    shell=True,
+                    cmd,
                     cwd=self.project_dir,
                     env=env,
                     stdin=subprocess.PIPE,

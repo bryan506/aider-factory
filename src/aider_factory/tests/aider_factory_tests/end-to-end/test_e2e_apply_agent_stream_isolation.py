@@ -52,6 +52,21 @@ class _StreamIsolationBase(unittest.TestCase):
 
     NOISE_LINES = 500  # Default noise volume per fake aider invocation
 
+    @staticmethod
+    def _write_fake_binary(path: Path, content: str):
+        """Write a fake binary that works on both POSIX and Windows."""
+        if sys.platform == "win32":
+            py_path = str(path) + ".py"
+            with open(py_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            cmd_path = str(path) + ".cmd"
+            with open(cmd_path, "w", encoding="utf-8") as f:
+                f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n')
+        else:
+            with open(str(path), "w", encoding="utf-8") as f:
+                f.write(content)
+            os.chmod(str(path), os.stat(str(path)).st_mode | stat.S_IEXEC)
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
@@ -86,8 +101,7 @@ class _StreamIsolationBase(unittest.TestCase):
             sys.exit(int(os.environ.get("AIDER_FAKE_EXIT", "0")))
         """)
         self.mock_aider = self.bin_dir / "aider"
-        self.mock_aider.write_text(fake_aider, encoding="utf-8")
-        self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_aider, fake_aider)
 
         # --- Fake git: emits identifiable diff marker ---
         self.mock_git = self.bin_dir / "git"
@@ -101,12 +115,11 @@ class _StreamIsolationBase(unittest.TestCase):
                 print("+E2E_DIFF_MARKER_UNIQUE_7x9")
             sys.exit(0)
         """)
-        self.mock_git.write_text(fake_git, encoding="utf-8")
-        self.mock_git.chmod(self.mock_git.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_git, fake_git)
 
         # --- PATH injection ---
         self._orig_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{self.bin_dir}:{self._orig_path}"
+        os.environ["PATH"] = f"{self.bin_dir}{os.pathsep}{self._orig_path}"
 
         # --- Env scrubbing ---
         self._orig_env = os.environ.copy()
@@ -313,8 +326,7 @@ class TestS06DeadlockPrevention(_StreamIsolationBase):
                     Path(arg).write_text("# edited\\n")
             sys.exit(0)
         """)
-        self.mock_aider.write_text(fake_aider, encoding="utf-8")
-        self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_aider, fake_aider)
 
         target, spec = self._make_target_and_spec()
 
@@ -673,8 +685,7 @@ class TestS25BinaryContentGraceful(_StreamIsolationBase):
                     Path(arg).write_text("# edited\\n")
             sys.exit(0)
         """)
-        self.mock_aider.write_text(fake_aider, encoding="utf-8")
-        self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_aider, fake_aider)
 
         target, spec = self._make_target_and_spec()
 
@@ -871,8 +882,7 @@ class TestS32LineBufferedBehavior(_StreamIsolationBase):
                     Path(arg).write_text("# edited\\n")
             sys.exit(0)
         """)
-        self.mock_aider.write_text(fake_aider, encoding="utf-8")
-        self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_aider, fake_aider)
 
         target, spec = self._make_target_and_spec()
 

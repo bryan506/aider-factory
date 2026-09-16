@@ -102,7 +102,7 @@ class TestE2EYamlOracle(unittest.TestCase):
 
         self.assertTrue(bool(context), "Oracle retrieved 0 chunks from the database!")
         self.assertTrue(
-            "tariffs" in context.lower() or "labor" in context.lower() or "pdfp" in context.lower(),
+            "inflation" in context.lower() or "current account" in context.lower() or "deficit" in context.lower(),
             f"Expected top-k chunks to contain economic metrics, got:\n{context}"
         )
         

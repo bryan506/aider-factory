@@ -877,7 +877,8 @@ class AiderFactory:
 
         # Seed with the real failure; short-circuit if the gate is already green.
         if gate_present:
-            if self.last_test_result.get(gate_cmd) is True:
+            cache_key = gate_cmd if isinstance(gate_cmd, str) else tuple(gate_cmd)
+            if self.last_test_result.get(cache_key) is True:
                 ok = True
                 gate_out = "Gate already passed in preceding task."
             else:

@@ -42,15 +42,20 @@ class TestEnvUtils(unittest.TestCase):
             self.assertEqual(os.environ.get("TEST_UNQUOTED_KEY"), "my-unquoted-val")
 
     def test_resolve_api_key_local_endpoint(self):
-        key = resolve_api_key(model="openai/gpt-4o", api_base="http://localhost:8080/v1")
-        self.assertEqual(key, "sk-dummy")
+        from unittest.mock import patch
+        
+        # 1. Mock load_env_files so it doesn't read your real .env file from disk
+        # 2. Clear os.environ completely for the duration of this test
+        with patch("env_utils.load_env_files"), patch.dict(os.environ, {}, clear=True):
+            key = resolve_api_key(model="openai/gpt-4o", api_base="http://localhost:8080/v1")
+            self.assertEqual(key, "sk-dummy")
 
-        key_explicit = resolve_api_key(
-            model="openai/gpt-4o",
-            api_base="http://localhost:8080/v1",
-            explicit_key="sk-real-local-key",
-        )
-        self.assertEqual(key_explicit, "sk-real-local-key")
+            key_explicit = resolve_api_key(
+                model="openai/gpt-4o",
+                api_base="http://localhost:8080/v1",
+                explicit_key="sk-real-local-key",
+            )
+            self.assertEqual(key_explicit, "sk-real-local-key")
 
     def test_resolve_api_key_cloud_gemini(self):
         for k in ["GEMINI_API_KEY", "GOOGLE_API_KEY", "AIDER_GEMINI_API_KEY", "OPENAI_API_KEY", "ORACLE_AGENT_API_KEY"]:

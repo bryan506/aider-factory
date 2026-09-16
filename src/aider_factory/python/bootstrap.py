@@ -212,6 +212,7 @@ def run_bootstrap(target_dir: str) -> None:
     Always produces a valid YAML file even with zero keys or no router.
     """
     cwd = os.path.abspath(target_dir)
+    os.makedirs(cwd, exist_ok=True)
     repo_name = os.path.basename(cwd).strip().replace(" ", "_")
 
     # --- Step 1: Detect keys ---
@@ -714,10 +715,8 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         
         # Save session history directly
         session_dir = os.path.dirname(session_file)
-        if session_dir and os.path.exists(session_dir):
-            with open(session_file, "w", encoding="utf-8") as f:
-                json.dump(messages, f, ensure_ascii=False, indent=2)
-        elif not ask_mode:
+        # In ask/terminal mode, do not pollute pristine directories with .aider_factory
+        if not ask_mode or not session_dir or os.path.exists(session_dir):
             if session_dir:
                 os.makedirs(session_dir, exist_ok=True)
             with open(session_file, "w", encoding="utf-8") as f:

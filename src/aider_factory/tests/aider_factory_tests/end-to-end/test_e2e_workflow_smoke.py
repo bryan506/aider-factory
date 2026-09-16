@@ -73,6 +73,14 @@ class TestE2EWorkflowSmoke(unittest.TestCase):
             self.assertEqual(res_clear.returncode, 0)
 
     def test_workflow_4stage_pipeline_e2e_smoke(self):
+        active_model = "gemini/gemini-2.5-flash"
+        api_key = resolve_api_key(active_model)
+        if not api_key or is_dummy_key(api_key):
+            self.skipTest(
+                "Live API key required for real cloud model E2E execution. "
+                "Export GEMINI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY to run."
+            )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             proj = Path(tmpdir)
             src_dir = proj / "src"
@@ -260,6 +268,14 @@ class TestE2EWorkflowSmoke(unittest.TestCase):
             self.assertNotIn("OLD", text)
 
     def test_phase_skip_gating_e2e_smoke(self):
+        active_model = "gemini/gemini-2.5-flash"
+        api_key = resolve_api_key(active_model)
+        if not api_key or is_dummy_key(api_key):
+            self.skipTest(
+                "Live API key required for real cloud model E2E execution. "
+                "Export GEMINI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY to run."
+            )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             proj = Path(tmpdir)
             (proj / "src").mkdir(parents=True)

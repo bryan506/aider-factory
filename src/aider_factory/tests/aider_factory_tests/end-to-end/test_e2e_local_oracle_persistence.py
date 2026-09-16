@@ -72,22 +72,13 @@ class TestE2ELocalOraclePersistence(unittest.TestCase):
             else cls.api_base
         )
 
-        env_model = os.environ.get("ORACLE_AGENT_MODEL")
-        if env_model and not any(env_model.startswith(p) for p in ("gemini/", "anthropic/", "groq/", "openrouter/")):
-            cls.model = env_model if "/" in env_model else f"openai/{env_model}"
-        elif discovered_model:
+        if discovered_model:
             cls.model = discovered_model if "/" in discovered_model else f"openai/{discovered_model}"
         else:
-            cls.model = "openai/qwen3.6-27B-90k-udq4kxl-rag:LATEST"
+            cls.model = "gemini/gemini-2.5-flash"
 
-        env_arch = os.environ.get("ORACLE_ARCHITECT_MODEL")
-        if env_arch and not any(env_arch.startswith(p) for p in ("gemini/", "anthropic/", "groq/", "openrouter/")):
-            cls.arch_model = env_arch if "/" in env_arch else f"openai/{env_arch}"
-        else:
-            cls.arch_model = "openai/qwen3.6-27b-90k:LATEST"
-        cls.editor_model = os.environ.get(
-            "ORACLE_EDITOR_MODEL", "lm_studio/qwen3.6-27B-90k-udq4kxl:LATEST"
-        )
+        cls.arch_model = "gemini/gemini-2.5-flash"
+        cls.editor_model = "gemini/gemini-2.5-flash"
 
         os.environ["ORACLE_AGENT_API_BASE"] = cls.api_base
         os.environ["ORACLE_ARCHITECT_API_BASE"] = cls.arch_api_base
@@ -101,6 +92,10 @@ class TestE2ELocalOraclePersistence(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.original_cwd = os.getcwd()
         os.chdir(self.temp_dir)
+
+        # Prevent session leakage from other tests
+        os.environ.pop("AI_FACTORY_SESSION", None)
+        os.environ.pop("ORACLE_SESSION", None)
 
         import cli
         cli.init_user_project(self.temp_dir)
@@ -157,6 +152,15 @@ class TestE2ELocalOraclePersistence(unittest.TestCase):
         self.session_dir = os.path.join(self.temp_dir, ".aider_factory")
         os.makedirs(self.session_dir, exist_ok=True)
         os.environ["ORACLE_SESSION_DIR"] = self.session_dir
+        
+        # CRITICAL: Force absolute paths to defeat CWD leakage from other tests
+        os.environ["ORACLE_SESSION_FILE"] = os.path.join(self.session_dir, ".oracle_session.json")
+        os.environ["ORACLE_DEBATE_SESSION_FILE"] = os.path.join(self.session_dir, ".oracle_debate_session.json")
+        
+        # Guarantee clean slate by deleting any leaked session files
+        for f in [os.environ["ORACLE_SESSION_FILE"], os.environ["ORACLE_DEBATE_SESSION_FILE"]]:
+            if os.path.exists(f):
+                os.remove(f)
 
     def tearDown(self):
         os.chdir(self.original_cwd)
@@ -232,6 +236,9 @@ class TestE2ELocalOraclePersistence(unittest.TestCase):
         print(f"==================================================")
 
         os.environ["ORACLE_SESSION_DIR"] = self.session_dir
+        debate_session = os.path.join(self.session_dir, ".oracle_debate_session.json")
+        os.environ["ORACLE_DEBATE_SESSION_FILE"] = debate_session
+
         abs_target = os.path.join(self.temp_dir, self.target_code)
 
         t0 = time.perf_counter()
@@ -245,12 +252,7 @@ class TestE2ELocalOraclePersistence(unittest.TestCase):
         self.assertEqual(rc, 0, f"Debate returned rc={rc}; check endpoint availability and model config")
         print(f"⏱️ Debate Completed in: {debate_duration:.2f}s")
 
-        debate_session = os.path.join(
-            self.session_dir, ".oracle_debate_session.json"
-        )
-        if not os.path.exists(debate_session):
-            debate_session = os.path.join(".aider_factory", ".oracle_debate_session.json")
-        self.assertTrue(os.path.exists(debate_session))
+        self.assertTrue(os.path.exists(debate_session), f"Debate session file not found at {debate_session}")
         with open(debate_session, "r", encoding="utf-8") as f:
             data = json.load(f)
         self.assertIn("files_hash", data)

@@ -1710,11 +1710,13 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
             pass
 
     # 3. Session state: Aider history file (architect) + persistent oracle session
-    debate_aider_history = os.path.join(
-        project_dir, ".aider_factory", ".debate_aider_history.md"
+    debate_aider_history = os.environ.get(
+        "ORACLE_DEBATE_AIDER_HISTORY",
+        os.path.join(project_dir, ".aider_factory", ".debate_aider_history.md")
     )
-    _debate_session_file = os.path.join(
-        project_dir, ".aider_factory", ".oracle_debate_session.json"
+    _debate_session_file = os.environ.get(
+        "ORACLE_DEBATE_SESSION_FILE",
+        os.path.join(project_dir, ".aider_factory", ".oracle_debate_session.json")
     )
 
     # 4. Determine oracle system prompt (stable across all turns)
@@ -2074,10 +2076,6 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
 def _ensure_oracle_config():
     """Populate missing ORACLE_* environment variables from the active YAML config."""
     load_env_files()
-    # Inject LITELLM_BASE_URL fallback for cluster mode
-    if os.environ.get("LITELLM_BASE_URL"):
-        os.environ.setdefault("ORACLE_AGENT_API_BASE", os.environ["LITELLM_BASE_URL"])
-        os.environ.setdefault("ORACLE_EMBED_API_BASE", os.environ["LITELLM_BASE_URL"])
 
     project_dir = os.getcwd()
     yaml_path = os.environ.get("ORACLE_CONFIG_FILE")
@@ -2181,6 +2179,11 @@ def _ensure_oracle_config():
             os.environ.setdefault("ORACLE_ARCHITECT_API_BASE", endpoints.get("architect_api_base"))
     except Exception:
         pass
+
+    # Inject LITELLM_BASE_URL fallback for cluster mode AFTER yaml
+    if os.environ.get("LITELLM_BASE_URL"):
+        os.environ.setdefault("ORACLE_AGENT_API_BASE", os.environ["LITELLM_BASE_URL"])
+        os.environ.setdefault("ORACLE_EMBED_API_BASE", os.environ["LITELLM_BASE_URL"])
 
 
 def main():

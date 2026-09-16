@@ -67,17 +67,10 @@ class TestE2ELocalHelperPersistence(unittest.TestCase):
                 "No local helper endpoint reachable across cluster candidate addresses."
             )
 
-        env_model = os.environ.get("AIDER_HELPER_MODEL")
-        if (
-            env_model
-            and not any(env_model.startswith(p) for p in ("gemini/", "anthropic/", "groq/", "openrouter/"))
-            and "gemma" not in env_model.lower()
-        ):
-            cls.model = env_model if "/" in env_model else f"openai/{env_model}"
-        elif discovered_model:
+        if discovered_model:
             cls.model = discovered_model if "/" in discovered_model else f"openai/{discovered_model}"
         else:
-            cls.model = "openai/qwen3.6-27b-90k:LATEST"
+            cls.model = "gemini/gemini-2.5-flash"
         os.environ["AIDER_HELPER_API_BASE"] = cls.api_base
         os.environ["AIDER_HELPER_MODEL"] = cls.model
         os.environ["OPENAI_API_KEY"] = "sk-dummy"

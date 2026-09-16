@@ -45,99 +45,109 @@ with open(os.path.join(job_dir, "loose.txt"), "w") as f: f.write("Loose text doc
 with open(os.path.join(job_dir, "paper.pdf"), "w") as f: f.write("Mock PDF")
 with open(os.path.join(repo_dir, "code.py"), "w") as f: f.write("print('hello')\n")
 
-print("--- Test 1: Full multi-table build ---")
-# Force IVF_PQ_MIN_ROWS to 1 so the hook triggers and we verify it doesn't crash ingestion.
-rag_manager.IVF_PQ_MIN_ROWS = 1
-rag_manager.ingest(context_root=base_dir, collection_name="test_col", embed_model="BAAI/bge-m3",
-                   embed_backend="sentence-transformers", ocr_api_base="mock", ocr_agent="mock", batch=True)
+import unittest
 
-import lancedb
-db = lancedb.connect(os.path.join(job_dir, "lancedb"))
-tables = db.table_names()
+class TestRagIngestMocked(unittest.TestCase):
+    def test_rag_ingest_mocked(self):
+        print("--- Test 1: Full multi-table build ---")
+        # Force IVF_PQ_MIN_ROWS to 1 so the hook triggers and we verify it doesn't crash ingestion.
+        rag_manager.IVF_PQ_MIN_ROWS = 1
+        rag_manager.ingest(context_root=base_dir, collection_name="test_col", embed_model="BAAI/bge-m3",
+                           embed_backend="sentence-transformers", ocr_api_base="mock", ocr_agent="mock", batch=True, use_docling=False)
 
-print(f"\n✅ Tables created: {tables}")
-assert "test_col_docs" in tables, "Top-level docs table missing"
-assert "test_col_myrepo_code" in tables, "Repo code table missing"
+        import lancedb
+        db = lancedb.connect(os.path.join(job_dir, "lancedb"))
+        tables = db.table_names() if hasattr(db, "table_names") else db.list_tables()
 
-tbl_docs = db.open_table("test_col_docs")
-files_docs = set(tbl_docs.to_arrow()['source_file'].to_pylist())
-docs_text = " ".join(tbl_docs.to_arrow()['text'].to_pylist())
-print(f"✅ Docs table files: {files_docs}")
-assert "paper.md" not in files_docs, "Data loss bug failed! paper.md sidecar was ingested."
-assert "loose.txt" in files_docs, ".txt bug failed! standalone txt was dropped."
-assert "paper.pdf" in files_docs, "PDF was not ingested into the docs table."
+        print(f"\n✅ Tables created: {tables}")
+        self.assertIn("test_col_docs", tables, "Top-level docs table missing")
+        self.assertIn("test_col_myrepo_code", tables, "Repo code table missing")
 
-# --- Bug B guard: the PDF MUST go through vision-OCR, not the raw text layer ---
-assert _OCR_CALLS["n"] > 0, "REGRESSION: _ocr_image was never called for the PDF (DOC_EXTS bypass?)."
-assert "VISION_OCR_OUTPUT::" in docs_text, "REGRESSION: docs table holds raw text layer, not vision-OCR output."
-assert "reference text layer" not in docs_text, "REGRESSION: raw PyMuPDF text layer leaked into the DB."
-print(f"✅ OCR path exercised: _ocr_image called {_OCR_CALLS['n']}x; vision output stored (bypass fixed).")
+        tbl_docs = db.open_table("test_col_docs")
+        files_docs = set(tbl_docs.to_arrow()['source_file'].to_pylist())
+        docs_text = " ".join(tbl_docs.to_arrow()['text'].to_pylist())
+        print(f"✅ Docs table files: {files_docs}")
+        self.assertNotIn("paper.md", files_docs, "Data loss bug failed! paper.md sidecar was ingested.")
+        self.assertIn("loose.txt", files_docs, ".txt bug failed! standalone txt was dropped.")
+        self.assertIn("paper.pdf", files_docs, "PDF was not ingested into the docs table.")
 
-tbl_code = db.open_table("test_col_myrepo_code")
-code_files = set(tbl_code.to_arrow()['source_file'].to_pylist())
-print(f"✅ Code table files: {code_files}")
-assert "myrepo/code.py" in code_files, "Code file missing from repo table"
+        # --- Bug B guard: the PDF MUST go through vision-OCR, not the raw text layer ---
+        self.assertGreater(_OCR_CALLS["n"], 0, "REGRESSION: _ocr_image was never called for the PDF (DOC_EXTS bypass?).")
+        self.assertIn("VISION_OCR_OUTPUT::", docs_text, "REGRESSION: docs table holds raw text layer, not vision-OCR output.")
+        self.assertNotIn("reference text layer", docs_text, "REGRESSION: raw PyMuPDF text layer leaked into the DB.")
+        print(f"✅ OCR path exercised: _ocr_image called {_OCR_CALLS['n']}x; vision output stored (bypass fixed).")
 
-schema_fields = [f.name for f in tbl_code.schema]
-assert "source_type" in schema_fields and "language" in schema_fields, "New metadata schema failed!"
+        tbl_code = db.open_table("test_col_myrepo_code")
+        code_files = set(tbl_code.to_arrow()['source_file'].to_pylist())
+        print(f"✅ Code table files: {code_files}")
+        self.assertIn("myrepo/code.py", code_files, "Code file missing from repo table")
 
-print("\n--- Test 2: Incremental Append on Multi-Table ---")
-_ocr_before = _OCR_CALLS["n"]
-with open(os.path.join(repo_dir, "code2.py"), "w") as f: f.write("print('world')\n")
-rag_manager.ingest(context_root=base_dir, collection_name="test_col", embed_model="BAAI/bge-m3",
-                   embed_backend="sentence-transformers", ocr_api_base="mock", ocr_agent="mock", batch=True)
+        schema_fields = [f.name for f in tbl_code.schema]
+        self.assertTrue("source_type" in schema_fields and "language" in schema_fields, "New metadata schema failed!")
 
-code_files_updated = set(db.open_table("test_col_myrepo_code").to_arrow()['source_file'].to_pylist())
-print(f"✅ Updated Code table files: {code_files_updated}")
-assert "myrepo/code2.py" in code_files_updated
-# Incremental: the already-embedded PDF must be skipped -> no new OCR calls this run.
-assert _OCR_CALLS["n"] == _ocr_before, "Incremental append re-OCR'd an already-embedded document."
-print(f"✅ Incremental append skipped OCR for embedded docs (calls stayed at {_OCR_CALLS['n']}).")
+        print("\n--- Test 2: Incremental Append on Multi-Table ---")
+        _ocr_before = _OCR_CALLS["n"]
+        with open(os.path.join(repo_dir, "code2.py"), "w") as f: f.write("print('world')\n")
+        rag_manager.ingest(context_root=base_dir, collection_name="test_col", embed_model="BAAI/bge-m3",
+                           embed_backend="sentence-transformers", ocr_api_base="mock", ocr_agent="mock", batch=True, use_docling=False)
 
-print("\n--- Test 2b: Reuse Existing OCR Markdown Sidecar ---")
-_ocr_before_reuse = _OCR_CALLS["n"]
-reuse_job_dir = os.path.join(base_dir, "reuse_col")
-os.makedirs(reuse_job_dir, exist_ok=True)
-with open(os.path.join(reuse_job_dir, "cached.pdf"), "w") as f: f.write("Dummy PDF")
-with open(os.path.join(reuse_job_dir, "cached.md"), "w") as f: f.write("# Pre-computed OCR Content")
+        code_files_updated = set(db.open_table("test_col_myrepo_code").to_arrow()['source_file'].to_pylist())
+        print(f"✅ Updated Code table files: {code_files_updated}")
+        self.assertIn("myrepo/code2.py", code_files_updated)
+        # Incremental: the already-embedded PDF must be skipped -> no new OCR calls this run.
+        self.assertEqual(_OCR_CALLS["n"], _ocr_before, "Incremental append re-OCR'd an already-embedded document.")
+        print(f"✅ Incremental append skipped OCR for embedded docs (calls stayed at {_OCR_CALLS['n']}).")
 
-rag_manager.ingest(context_root=base_dir, collection_name="reuse_col", embed_model="BAAI/bge-m3",
-                   embed_backend="sentence-transformers", ocr_api_base="mock", ocr_agent="mock", batch=True)
+        print("\n--- Test 2b: Reuse Existing OCR Markdown Sidecar ---")
+        _ocr_before_reuse = _OCR_CALLS["n"]
+        reuse_job_dir = os.path.join(base_dir, "reuse_col")
+        os.makedirs(reuse_job_dir, exist_ok=True)
+        with open(os.path.join(reuse_job_dir, "cached.pdf"), "w") as f: f.write("Dummy PDF")
+        with open(os.path.join(reuse_job_dir, "cached.md"), "w") as f: f.write("# Pre-computed OCR Content")
 
-assert _OCR_CALLS["n"] == _ocr_before_reuse, "Failed: _ocr_image was called despite existing .md sidecar."
-print("✅ Existing OCR markdown sidecar successfully reused without re-running vision OCR.")
+        rag_manager.ingest(context_root=base_dir, collection_name="reuse_col", embed_model="BAAI/bge-m3",
+                           embed_backend="sentence-transformers", ocr_api_base="mock", ocr_agent="mock", batch=True, use_docling=False)
 
-print("\n--- Test 3: Old-schema guard ---")
-import pyarrow as pa
+        self.assertEqual(_OCR_CALLS["n"], _ocr_before_reuse, "Failed: _ocr_image was called despite existing .md sidecar.")
+        print("✅ Existing OCR markdown sidecar successfully reused without re-running vision OCR.")
 
-# 1. Setup a fresh collection directory
-legacy_job_dir = os.path.join(base_dir, "legacy_col")
-os.makedirs(legacy_job_dir, exist_ok=True)
-with open(os.path.join(legacy_job_dir, "doc.txt"), "w") as f: 
-    f.write("Legacy doc content")
+        print("\n--- Test 3: Old-schema guard ---")
+        import pyarrow as pa
 
-# 2. Pre-create the table with the EXACT name the ingest loop will target ("legacy_col_docs")
-legacy_db = lancedb.connect(os.path.join(legacy_job_dir, "lancedb"))
-old_schema = pa.schema([
-    pa.field("vector", pa.list_(pa.float32(), 1024)),
-    pa.field("text", pa.string()),
-    pa.field("source_file", pa.string())
-])
-legacy_db.create_table("legacy_col_docs", schema=old_schema)
+        # 1. Setup a fresh collection directory
+        legacy_job_dir = os.path.join(base_dir, "legacy_col")
+        os.makedirs(legacy_job_dir, exist_ok=True)
+        with open(os.path.join(legacy_job_dir, "doc.txt"), "w") as f: 
+            f.write("Legacy doc content")
 
-# 3. Call ingest without overwrite=True on the new collection
-rag_manager.ingest(context_root=base_dir, collection_name="legacy_col", embed_model="BAAI/bge-m3",
-                   embed_backend="sentence-transformers", ocr_api_base="mock", ocr_agent="mock", batch=True)
+        # 2. Pre-create the table with the EXACT name the ingest loop will target ("legacy_col_docs")
+        legacy_db = lancedb.connect(os.path.join(legacy_job_dir, "lancedb"))
+        old_schema = pa.schema([
+            pa.field("vector", pa.list_(pa.float32(), 1024)),
+            pa.field("text", pa.string()),
+            pa.field("source_file", pa.string())
+        ])
+        legacy_db.create_table("legacy_col_docs", schema=old_schema)
 
-# 4. Assert the table remains untouched because the guard fired
-legacy_tbl = legacy_db.open_table("legacy_col_docs")
-assert legacy_tbl.count_rows() == 0, "Failed: old-schema guard was bypassed and rows were added."
-print("✅ Old-schema guard successfully prevented appends on the target table.")
+        # 3. Call ingest without overwrite=True on the new collection
+        rag_manager.ingest(context_root=base_dir, collection_name="legacy_col", embed_model="BAAI/bge-m3",
+                           embed_backend="sentence-transformers", ocr_api_base="mock", ocr_agent="mock", batch=True, use_docling=False)
 
-# RESTORE ORIGINAL FUNCTIONS TO PREVENT LEAKING INTO OTHER TESTS
-rag_manager._rasterize = _orig_rasterize
-rag_manager._ocr_image = _orig_ocr
-rag_manager._ast_chunk = _orig_ast
+        # 4. Assert the table remains untouched because the guard fired
+        legacy_tbl = legacy_db.open_table("legacy_col_docs")
+        self.assertEqual(legacy_tbl.count_rows(), 0, "Failed: old-schema guard was bypassed and rows were added.")
+        print("✅ Old-schema guard successfully prevented appends on the target table.")
 
-shutil.rmtree(base_dir)
-print("\n🎉 All Phase 3+4 ingest integration tests passed!")
+    @classmethod
+    def tearDownClass(cls):
+        # RESTORE ORIGINAL FUNCTIONS TO PREVENT LEAKING INTO OTHER TESTS
+        rag_manager._rasterize = _orig_rasterize
+        rag_manager._ocr_image = _orig_ocr
+        rag_manager._ast_chunk = _orig_ast
+
+        if os.path.exists(base_dir):
+            shutil.rmtree(base_dir)
+        print("\n🎉 All Phase 3+4 ingest integration tests passed!")
+
+if __name__ == "__main__":
+    unittest.main()

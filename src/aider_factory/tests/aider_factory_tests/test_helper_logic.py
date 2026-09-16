@@ -5,6 +5,18 @@ import sys
 import tempfile
 from unittest.mock import MagicMock, patch
 
+ALL_KEYS_TO_POP = [
+    "GEMINI_API_KEY", "GOOGLE_API_KEY", "AIDER_GEMINI_API_KEY", "GOOGLE_GEMINI_API_KEY",
+    "ANTHROPIC_API_KEY", "AIDER_ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY", "AIDER_OPENAI_API_KEY",
+    "OPENROUTER_API_KEY", "AIDER_OPENROUTER_API_KEY",
+    "GROQ_API_KEY", "AIDER_GROQ_API_KEY",
+    "DEEPSEEK_API_KEY", "AIDER_DEEPSEEK_API_KEY",
+    "MISTRAL_API_KEY", "AIDER_MISTRAL_API_KEY",
+    "OPENCODE_API_KEY", "LITELLM_API_KEY", "LITELLM_BASE_URL",
+    "AIDER_HELPER_API_BASE", "AIDER_HELPER_MODEL"
+]
+
 script_dir = os.path.dirname(os.path.abspath(__file__))
 python_module_dir = os.path.abspath(os.path.join(script_dir, "../../python"))
 if python_module_dir not in sys.path:
@@ -21,7 +33,7 @@ mock_response = [mock_chunk]
 
 
 def test_01_api_key_detection():
-    old_env = {k: os.environ.get(k) for k in ["GEMINI_API_KEY", "OPENAI_API_KEY", "AIDER_HELPER_API_BASE", "LITELLM_API_KEY"]}
+    old_env = {k: os.environ.get(k) for k in ALL_KEYS_TO_POP}
     for k in old_env:
         os.environ.pop(k, None)
 
@@ -325,13 +337,19 @@ def test_11_ask_and_terminal_zero_directory_creation():
 
 def test_12_helper_cloud_model_omits_api_key():
     with patch("litellm.completion", return_value=mock_response) as mock_comp:
-        for k in ["AIDER_HELPER_API_BASE", "AIDER_HELPER_MODEL"]:
-            os.environ.pop(k, None)
-        os.environ["GEMINI_API_KEY"] = "test-key"
-        bootstrap.run_query("Explain concepts", None, "", ask_mode=True)
-        mock_comp.assert_called()
-        kwargs = mock_comp.call_args[1]
-        assert "api_key" not in kwargs, "Cloud helper queries must not pass explicit api_key in kwargs!"
+        old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
+        try:
+            os.environ["GEMINI_API_KEY"] = "test-key"
+            bootstrap.run_query("Explain concepts", None, "", ask_mode=True)
+            mock_comp.assert_called()
+            kwargs = mock_comp.call_args[1]
+            assert "api_key" not in kwargs, "Cloud helper queries must not pass explicit api_key in kwargs!"
+        finally:
+            for k, v in old_env.items():
+                if v is not None:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
 
 
 def test_13_workspace_doc_override_precedence():
@@ -456,10 +474,7 @@ def test_17_bootstrap_router_model_selection():
 
 def test_18_bootstrap_zero_key_still_writes_file():
     """With no keys and no router, bootstrap still produces valid YAML."""
-    old_env = {}
-    for k in ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-              "LITELLM_BASE_URL", "AIDER_HELPER_API_BASE", "LITELLM_API_KEY"]:
-        old_env[k] = os.environ.pop(k, None)
+    old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
     try:
         with tempfile.TemporaryDirectory() as tmp:
             open(os.path.join(tmp, "pytest.ini"), "w").close()
@@ -481,9 +496,7 @@ def test_18_bootstrap_zero_key_still_writes_file():
 
 def test_19_bootstrap_no_router_preserves_placeholders():
     """Without LITELLM_BASE_URL, template placeholder endpoints are preserved."""
-    old_env = {}
-    for k in ["LITELLM_BASE_URL", "AIDER_HELPER_API_BASE"]:
-        old_env[k] = os.environ.pop(k, None)
+    old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
     try:
         with tempfile.TemporaryDirectory() as tmp:
             open(os.path.join(tmp, "pytest.ini"), "w").close()
@@ -594,8 +607,7 @@ def test_23_select_models_edge_cases():
 def test_24_generated_yaml_is_valid_yaml():
     """Regex substitution must never corrupt YAML syntax on any path."""
     import yaml
-    old_env = {k: os.environ.pop(k, None) for k in
-               ["LITELLM_BASE_URL", "AIDER_HELPER_API_BASE", "LITELLM_API_KEY"]}
+    old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
     try:
         with tempfile.TemporaryDirectory() as tmp:
             open(os.path.join(tmp, "pytest.ini"), "w").close()
@@ -621,8 +633,7 @@ def test_24_generated_yaml_is_valid_yaml():
 
 def test_25_bootstrap_provisions_bash_wrappers():
     """After run_bootstrap(), .aider_factory/bash/ must contain executable wrappers."""
-    old_env = {k: os.environ.pop(k, None) for k in
-               ["LITELLM_BASE_URL", "AIDER_HELPER_API_BASE", "LITELLM_API_KEY"]}
+    old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
     try:
         with tempfile.TemporaryDirectory() as tmp:
             open(os.path.join(tmp, "pytest.ini"), "w").close()

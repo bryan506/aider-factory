@@ -819,10 +819,14 @@ class TestRunApplyGaps(unittest.TestCase):
         self.mock_aider.write_text(fake_aider, encoding="utf-8")
         self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
 
+        self._git_args_dump = self.root / "git_args_dump.txt"
         self.mock_git = self.bin_dir / "git"
-        fake_git = textwrap.dedent("""\
+        fake_git = textwrap.dedent(f"""\
             #!/usr/bin/env python3
             import sys
+            with open(r"{self._git_args_dump}", "w") as f:
+                for arg in sys.argv[1:]:
+                    f.write(f"{{arg}}\\n")
             if "diff" in sys.argv:
                 print("diff --git FAKE_DIFF_MARKER b/test.py")
                 print("+ edited line")
@@ -1081,6 +1085,21 @@ class TestRunApplyGaps(unittest.TestCase):
         args_text = self._args_dump.read_text(encoding="utf-8").splitlines()
         self.assertIn("--exit", args_text)
         self.assertNotIn("--yes-always", args_text)
+
+    def test_d13_diff_flags_no_color_and_no_ext_diff(self):
+        target, spec = self._make_target_and_spec()
+        run_apply(
+            files=[str(target)],
+            spec_file=str(spec),
+            no_diff=False,
+            cwd=str(self.root),
+        )
+        self.assertTrue(self._git_args_dump.exists())
+        git_args = self._git_args_dump.read_text(encoding="utf-8").splitlines()
+        self.assertIn("diff", git_args)
+        self.assertIn("--no-color", git_args)
+        self.assertIn("--no-ext-diff", git_args)
+        self.assertIn("--no-pager", git_args)
 
 
 # ===========================================================================

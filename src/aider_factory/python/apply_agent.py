@@ -369,13 +369,17 @@ def run_apply(
         )
         return False
 
-    # Only the git diff reaches stdout (~3–4k tokens, ANSI colors preserved
-    # for readability; outer aider captures this as the sole "command output").
+    # Only the git diff reaches stdout (~3–4k tokens, plain text without ANSI
+    # escape codes or external pagers to prevent token bloat and optimize for
+    # LLM reasoning; outer aider captures this as the sole "command output").
     if not no_diff:
         print("\n" + "=" * 70)
         print("Git Diff Result (HEAD~1):")
         print("=" * 70)
-        subprocess.run(["git", "--no-pager", "diff", "HEAD~1"], cwd=cwd)
+        subprocess.run(
+            ["git", "--no-pager", "diff", "--no-color", "--no-ext-diff", "HEAD~1"],
+            cwd=cwd,
+        )
 
     return True
 

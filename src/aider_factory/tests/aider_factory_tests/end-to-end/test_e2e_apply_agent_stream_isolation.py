@@ -104,10 +104,14 @@ class _StreamIsolationBase(unittest.TestCase):
         self._write_fake_binary(self.mock_aider, fake_aider)
 
         # --- Fake git: emits identifiable diff marker ---
+        self._git_args_dump = self.root / "git_args_dump.txt"
         self.mock_git = self.bin_dir / "git"
-        fake_git = textwrap.dedent("""\
+        fake_git = textwrap.dedent(f"""\
             #!/usr/bin/env python3
             import sys
+            with open(r"{self._git_args_dump}", "w") as f:
+                for arg in sys.argv[1:]:
+                    f.write(f"{{arg}}\\n")
             if "diff" in sys.argv:
                 print("diff --git a/target.py b/target.py")
                 print("@@ -1 +1 @@")
@@ -904,6 +908,29 @@ class TestS32LineBufferedBehavior(_StreamIsolationBase):
             cwd=str(self.root),
         )
         self.assertTrue(success)
+
+
+# ===========================================================================
+# S33: Git diff plain-text flags (--no-color, --no-ext-diff)
+# ===========================================================================
+class TestS33GitDiffPlaintextFlags(_StreamIsolationBase):
+    """Verify git diff is always called with --no-color and --no-ext-diff."""
+
+    def test_s33_git_diff_no_color_flags_present(self):
+        target, spec = self._make_target_and_spec()
+        from apply_agent import run_apply
+        run_apply(
+            files=[str(target)],
+            spec_file=str(spec),
+            no_diff=False,
+            stream=False,
+            cwd=str(self.root),
+        )
+        self.assertTrue(self._git_args_dump.exists())
+        git_args = self._git_args_dump.read_text(encoding="utf-8").splitlines()
+        self.assertIn("--no-color", git_args)
+        self.assertIn("--no-ext-diff", git_args)
+        self.assertIn("--no-pager", git_args)
 
 
 if __name__ == "__main__":

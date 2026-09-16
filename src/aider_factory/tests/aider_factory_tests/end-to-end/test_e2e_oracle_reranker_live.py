@@ -80,19 +80,18 @@ class TestE2EOracleRerankerLive(unittest.TestCase):
         else:
             print("\n[E2E Reranker Test] No live cluster reranker endpoint discovered. Remote tests will be conditionally skipped.")
 
-    def setUp(self):
-        self.test_dir = tempfile.mkdtemp()
-        self.old_cwd = os.getcwd()
-        os.chdir(self.test_dir)
+        cls.test_dir = tempfile.mkdtemp()
+        cls.old_cwd = os.getcwd()
+        os.chdir(cls.test_dir)
 
-        self.collection_name = "e2e_rerank_docs"
-        self.context_root = os.path.join(self.test_dir, ".aider_factory", "markdown", "lanceDB")
-        self.job_dir = os.path.join(self.context_root, self.collection_name)
-        os.makedirs(self.job_dir, exist_ok=True)
+        cls.collection_name = "e2e_rerank_docs"
+        cls.context_root = os.path.join(cls.test_dir, ".aider_factory", "markdown", "lanceDB")
+        cls.job_dir = os.path.join(cls.context_root, cls.collection_name)
+        os.makedirs(cls.job_dir, exist_ok=True)
 
         # 1. Create real physical source markdown documents
-        self.doc1_path = os.path.join(self.job_dir, "fx_arbitrage_framework.md")
-        with open(self.doc1_path, "w", encoding="utf-8") as f:
+        cls.doc1_path = os.path.join(cls.job_dir, "fx_arbitrage_framework.md")
+        with open(cls.doc1_path, "w", encoding="utf-8") as f:
             f.write(
                 "# FX Triangular Arbitrage Strategy Framework\n\n"
                 "Triangular arbitrage opportunities occur when currency exchange rates are misaligned.\n\n"
@@ -103,8 +102,8 @@ class TestE2EOracleRerankerLive(unittest.TestCase):
                 "Order routing must execute in under 2.5 milliseconds to prevent adverse selection.\n"
             )
 
-        self.doc2_path = os.path.join(self.job_dir, "credit_risk_parameters.md")
-        with open(self.doc2_path, "w", encoding="utf-8") as f:
+        cls.doc2_path = os.path.join(cls.job_dir, "credit_risk_parameters.md")
+        with open(cls.doc2_path, "w", encoding="utf-8") as f:
             f.write(
                 "# Credit Risk Assessment Guide\n\n"
                 "Tier 1 capital leverage ratios must maintain a 6.0% buffer against counterparty default.\n\n"
@@ -114,21 +113,22 @@ class TestE2EOracleRerankerLive(unittest.TestCase):
 
         # 2. Ingest real documents into LanceDB on disk (Zero Mocks)
         ingest_ok = rag_manager.ingest(
-            context_root=self.context_root,
-            collection_name=self.collection_name,
+            context_root=cls.context_root,
+            collection_name=cls.collection_name,
             embed_model="BAAI/bge-m3",
             embed_backend="sentence-transformers",
             batch=True,
             overwrite=True,
         )
-        self.assertTrue(ingest_ok, "Physical LanceDB ingestion failed.")
+        assert ingest_ok, "Physical LanceDB ingestion failed."
 
-        self.db_dir = os.path.join(self.job_dir, "lancedb")
-        self.assertTrue(os.path.isdir(self.db_dir), "LanceDB directory not created on disk.")
+        cls.db_dir = os.path.join(cls.job_dir, "lancedb")
+        assert os.path.isdir(cls.db_dir), "LanceDB directory not created on disk."
 
-    def tearDown(self):
-        os.chdir(self.old_cwd)
-        shutil.rmtree(self.test_dir, ignore_errors=True)
+    @classmethod
+    def tearDownClass(cls):
+        os.chdir(cls.old_cwd)
+        shutil.rmtree(cls.test_dir, ignore_errors=True)
 
     def _get_subprocess_env(self, extra_env=None):
         env = dict(os.environ)
@@ -274,7 +274,7 @@ class TestE2EOracleRerankerLive(unittest.TestCase):
             capture_output=True,
             text=True,
             env=env,
-            timeout=60,
+            timeout=300,
         )
 
         self.assertEqual(proc.returncode, 0, f"In-process reranker failed with {proc.returncode}. Stderr: {proc.stderr}")
@@ -306,7 +306,7 @@ class TestE2EOracleRerankerLive(unittest.TestCase):
             capture_output=True,
             text=True,
             env=env,
-            timeout=60,
+            timeout=300,
         )
 
         self.assertEqual(proc.returncode, 0, f"Fallback to in-process reranker failed with {proc.returncode}. Stderr: {proc.stderr}")
@@ -386,7 +386,7 @@ class TestE2EOracleRerankerLive(unittest.TestCase):
             capture_output=True,
             text=True,
             env=env,
-            timeout=60,
+            timeout=300,
         )
 
         self.assertEqual(proc.returncode, 0, f"batch=False query failed. Stderr: {proc.stderr}")

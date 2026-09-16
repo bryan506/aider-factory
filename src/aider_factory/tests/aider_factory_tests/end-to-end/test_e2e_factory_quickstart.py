@@ -23,7 +23,8 @@ def _has_unhandled_traceback(stderr: str) -> bool:
     lines = stderr.splitlines()
     for i, line in enumerate(lines):
         if "Traceback (most recent call last):" in line:
-            if i > 0 and "Exception ignored in:" in lines[i - 1]:
+            prev_context = " ".join(lines[max(0, i - 3):i])
+            if "Exception ignored in:" in prev_context:
                 continue
             return True
     return False

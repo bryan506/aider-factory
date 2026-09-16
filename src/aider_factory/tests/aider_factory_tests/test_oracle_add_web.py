@@ -59,8 +59,12 @@ class TestOracleAddWebCLI(unittest.TestCase):
                 f.write("\n")
                 f.write("  https://example.com/page2.html  \n")
 
+            fake_md = os.path.join(temp_dir, "fake_doc.md")
+            with open(fake_md, "w", encoding="utf-8") as f:
+                f.write("# Fake Doc Content\n")
+
             with patch("rag_web.fetch_and_convert_url") as mock_fetch, patch("rag_manager.ingest") as mock_ingest:
-                mock_fetch.return_value = ("/fake/path.md", "text_doc")
+                mock_fetch.return_value = (fake_md, "text_doc")
                 mock_ingest.return_value = True
 
                 rc = oracle_agent._add_web_maintenance([f"--file:{urls_file}"])
@@ -95,8 +99,12 @@ class TestOracleAddWebCLI(unittest.TestCase):
             os.environ["ORACLE_COLLECTION"] = "response_template"
             os.environ.pop("ORACLE_EXPLICIT_COLLECTION", None)
 
+            fake_md = os.path.join(temp_dir, "fake_doc.md")
+            with open(fake_md, "w", encoding="utf-8") as f:
+                f.write("# Fake Doc Content\n")
+
             with patch("rag_web.fetch_and_convert_url") as mock_fetch, patch("rag_manager.ingest") as mock_ingest:
-                mock_fetch.return_value = ("/fake/path.md", "text_doc")
+                mock_fetch.return_value = (fake_md, "text_doc")
                 mock_ingest.return_value = True
 
                 rc = oracle_agent._add_web_maintenance([f"--file:{urls_file}"])

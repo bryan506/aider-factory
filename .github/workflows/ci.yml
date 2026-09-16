@@ -40,6 +40,14 @@ jobs:
     - name: Install Playwright Browsers
       run: uv run playwright install chromium
 
+    - name: Cache Hugging Face models
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/huggingface
+        key: ${{ runner.os }}-hf-models-${{ hashFiles('pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-hf-models-
+
     - name: Run Test Suite
       env:
         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

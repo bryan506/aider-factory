@@ -31,6 +31,7 @@ def main():
         "test_e2e_local_persistent_pipeline.py",
         "test_e2e_shared_history_live.py",
         "test_e2e_shared_history_and_prompt_isolation.py",
+        "test_e2e_oracle_reranker_live.py",
         "test_e2e_pipeline.py"
     }
 

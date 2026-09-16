@@ -150,12 +150,12 @@ def _load_local_reranker(model: str):
         try:
             # 1. Offline-first: load directly from local cache.
             return AutoModel.from_pretrained(
-                model, dtype="auto", trust_remote_code=True, local_files_only=True
+                model, torch_dtype="auto", trust_remote_code=True, local_files_only=True
             ).eval()
         except Exception:
             # 2. Cold-start: download the model + trusted remote code once, then cache.
             return AutoModel.from_pretrained(
-                model, dtype="auto", trust_remote_code=True, local_files_only=False
+                model, torch_dtype="auto", trust_remote_code=True, local_files_only=False
             ).eval()
 
     from sentence_transformers import CrossEncoder

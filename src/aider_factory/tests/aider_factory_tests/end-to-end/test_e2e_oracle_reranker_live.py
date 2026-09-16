@@ -252,6 +252,8 @@ class TestE2EOracleRerankerLive(unittest.TestCase):
 
     def test_live_in_process_jina_reranker_cli(self):
         """Execute physical oracle CLI using in-process local CrossEncoder."""
+        if os.environ.get("CI") == "true":
+            self.skipTest("Heavyweight in-process reranker download skipped in CI.")
         try:
             import sentence_transformers  # noqa: F401
         except ImportError:
@@ -284,6 +286,8 @@ class TestE2EOracleRerankerLive(unittest.TestCase):
     def test_live_remote_failure_fallback_to_in_process_reranker_cli(self):
         """Execute physical oracle CLI with unreachable/failing remote ranking base and verify
         it seamlessly falls through to local in-process CrossEncoder without warning or error."""
+        if os.environ.get("CI") == "true":
+            self.skipTest("Heavyweight in-process reranker download skipped in CI.")
         try:
             import sentence_transformers  # noqa: F401
         except ImportError:
@@ -315,6 +319,8 @@ class TestE2EOracleRerankerLive(unittest.TestCase):
 
     def test_live_batch_false_multi_table_e2e(self):
         """Zero-mock physical test of batch=False (per-document tables) with multi-table RRF and in-process CrossEncoder."""
+        if os.environ.get("CI") == "true":
+            self.skipTest("Heavyweight in-process reranker download skipped in CI.")
         try:
             import sentence_transformers  # noqa: F401
             import lancedb

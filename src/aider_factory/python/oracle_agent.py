@@ -1262,17 +1262,17 @@ def _add_maintenance(action, paths):
     if not os.path.exists(config_path):
         config_path = os.path.join(project_dir, ".env.yml")
 
-    if not os.path.exists(config_path):
-        print(f"[oracle] config file not found: {config_path}", file=sys.stderr)
-        return 1
-
-    print(f"[oracle] Loading configuration from: {config_path}", file=sys.stderr)
-    try:
-        with open(config_path, "r") as f:
-            cfg = yaml.safe_load(f) or {}
-    except Exception as e:
-        print(f"[oracle] failed to load config: {e}", file=sys.stderr)
-        return 1
+    cfg = {}
+    if config_path and os.path.exists(config_path):
+        print(f"[oracle] Loading configuration from: {config_path}", file=sys.stderr)
+        try:
+            with open(config_path, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"[oracle] failed to load config: {e}", file=sys.stderr)
+            return 1
+    else:
+        print(f"[oracle] Config file not found; using default configuration.", file=sys.stderr)
 
     project_dir = str(cfg.get("working_directory", project_dir))
     context_root = os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB")
@@ -1463,16 +1463,17 @@ def _add_web_maintenance(urls):
     if not os.path.exists(config_path):
         config_path = os.path.join(project_dir, ".env.yml")
 
-    if not os.path.exists(config_path):
-        print(f"[oracle] config file not found: {config_path}", file=sys.stderr)
-        return 1
-
-    try:
-        with open(config_path, "r") as f:
-            cfg = yaml.safe_load(f) or {}
-    except Exception as e:
-        print(f"[oracle] failed to load config: {e}", file=sys.stderr)
-        return 1
+    cfg = {}
+    if config_path and os.path.exists(config_path):
+        print(f"[oracle] Loading configuration from: {config_path}", file=sys.stderr)
+        try:
+            with open(config_path, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"[oracle] failed to load config: {e}", file=sys.stderr)
+            return 1
+    else:
+        print(f"[oracle] Config file not found; using default configuration.", file=sys.stderr)
 
     project_dir = str(cfg.get("working_directory", project_dir))
     context_root = os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB")

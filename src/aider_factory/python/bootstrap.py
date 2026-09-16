@@ -737,3 +737,14 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
 
     except Exception as e:
         print(f"\n❌ Helper call failed: {e}", file=sys.stderr)
+    finally:
+        try:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop and not loop.is_closed():
+                    loop.close()
+            except RuntimeError:
+                pass
+        except Exception:
+            pass

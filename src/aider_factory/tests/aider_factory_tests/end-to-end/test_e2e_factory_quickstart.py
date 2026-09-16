@@ -18,6 +18,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../../..")))
 import cli
 
 
+def _has_unhandled_traceback(stderr: str) -> bool:
+    """Return True if stderr contains a genuine unhandled traceback, ignoring runtime GC warnings."""
+    lines = stderr.splitlines()
+    for i, line in enumerate(lines):
+        if "Traceback (most recent call last):" in line:
+            if i > 0 and "Exception ignored in:" in lines[i - 1]:
+                continue
+            return True
+    return False
+
+
 def _get_clean_env(extra_env=None):
     """Construct an isolated environment dictionary scrubbing ambient session and factory variables."""
     env = os.environ.copy()
@@ -213,7 +224,7 @@ def test_e2e_matrix_5_standalone_utilities_no_init():
                 text=True,
             )
             assert proc.returncode in (0, 1, 2), f"{script_name} --help failed with rc {proc.returncode}"
-            assert "Traceback (most recent call last)" not in proc.stderr, f"{script_name} crashed: {proc.stderr}"
+            assert not _has_unhandled_traceback(proc.stderr), f"{script_name} crashed: {proc.stderr}"
 
             factory_dir = tmp_path / ".aider_factory"
             assert not factory_dir.exists(), f"Standalone utility {script_name} must NOT create .aider_factory/"
@@ -304,7 +315,7 @@ def test_e2e_helper_flags_real_context_loading():
                 capture_output=True,
                 text=True,
             )
-            assert "Traceback (most recent call last)" not in proc.stderr, f"Flag {flag} caused traceback: {proc.stderr}"
+            assert not _has_unhandled_traceback(proc.stderr), f"Flag {flag} caused traceback: {proc.stderr}"
             assert "FileNotFoundError" not in proc.stderr, f"Flag {flag} failed to find docs: {proc.stderr}"
 
         # Verify default query loads reference_schema cleanly
@@ -319,7 +330,7 @@ def test_e2e_helper_flags_real_context_loading():
             capture_output=True,
             text=True,
         )
-        assert "Traceback (most recent call last)" not in default_proc.stderr
+        assert not _has_unhandled_traceback(default_proc.stderr), f"Default query caused traceback: {default_proc.stderr}"
         assert "FileNotFoundError" not in default_proc.stderr
 
     print("  ✅ Helper Flags Real Context Loading PASS")

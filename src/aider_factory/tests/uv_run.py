@@ -3,6 +3,12 @@ import os
 import subprocess
 import sys
 
+# Force UTF-8 on Windows consoles to prevent cp1252 UnicodeEncodeError with emojis
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 def main():
     # Ensure we are running from the project root
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -46,10 +52,14 @@ def main():
             print(f"⚠️ Could not find '{start_target}' in the test list. Running all.")
 
     failed_files = []
+    sub_env = os.environ.copy()
+    sub_env["PYTHONUTF8"] = "1"
+    sub_env["PYTHONIOENCODING"] = "utf-8"
+
     for f in test_files:
         print(f"\n{'='*80}\n🚀 RUNNING: {f}\n{'='*80}")
         cmd = ["uv", "run", "--with", "pytest", "pytest", "-s", "-v", f]
-        rc = subprocess.call(cmd)
+        rc = subprocess.call(cmd, env=sub_env)
         if rc != 0:
             print(f"\n❌ FAILED: {f}")
             failed_files.append(f)

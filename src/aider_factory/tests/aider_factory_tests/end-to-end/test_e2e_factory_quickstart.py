@@ -70,12 +70,13 @@ def test_e2e_matrix_1_cli_aider_factory():
         test_dir = factory_dir / "tests"
         assert test_dir.is_dir(), ".aider_factory/tests directory must be provisioned"
 
-        # 3. Assert bash wrappers with +x permissions
-        bash_dir = factory_dir / "bash"
-        for wrapper_name in ["factory", "oracle", "validate", "research", "apply"]:
-            wrapper_path = bash_dir / wrapper_name
-            assert wrapper_path.is_file(), f"Wrapper script {wrapper_name} must exist"
-            assert bool(os.stat(wrapper_path).st_mode & stat.S_IXUSR), f"{wrapper_name} must be executable (+x)"
+        # 3. Assert bash wrappers with +x permissions (POSIX only)
+        if sys.platform != "win32":
+            bash_dir = factory_dir / "bash"
+            for wrapper_name in ["factory", "oracle", "validate", "research", "apply"]:
+                wrapper_path = bash_dir / wrapper_name
+                assert wrapper_path.is_file(), f"Wrapper script {wrapper_name} must exist"
+                assert bool(os.stat(wrapper_path).st_mode & stat.S_IXUSR), f"{wrapper_name} must be executable (+x)"
 
         # 4. Assert markdown tree and subdirectories
         markdown_dir = factory_dir / "markdown"

@@ -161,6 +161,11 @@ def test_lancedb_operations():
     assert t2_name not in _current_tables(db)
     print("  [Integration] Table drop verified.")
 
+    # Release open table and connection handles before directory removal on Windows
+    del tbl1, tbl2, tbl3, tbl3_opened, db
+    import gc
+    gc.collect()
+
     # 5. Test removing the entire database
     rc = _remove_db()
     assert rc == 0

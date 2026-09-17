@@ -54,6 +54,7 @@ def _expand_file_list(file_patterns, base_dir):
     for pat in file_patterns:
         if glob.has_magic(pat):
             abs_pat = pat if os.path.isabs(pat) else os.path.join(str(base_dir), pat)
+            abs_pat = os.path.normpath(abs_pat)
             for match in sorted(glob.glob(abs_pat)):
                 rel_path = os.path.relpath(match, str(base_dir)).replace("\\", "/")
                 if rel_path not in expanded:
@@ -150,10 +151,10 @@ def _resolve_job_debate_collection(
             chosen = raw.strip()
 
     if chosen and chosen != "*" and not os.path.isabs(chosen):
-        db_dir = os.path.join(rag_context_root, chosen, "lancedb")
+        db_dir = os.path.join(rag_context_root, chosen, "lancedb").replace("\\", "/")
     else:
         db_dir = (
-            os.path.join(rag_context_root, default_collection, "lancedb")
+            os.path.join(rag_context_root, default_collection, "lancedb").replace("\\", "/")
             if default_collection and default_collection != "*"
             else ""
         )
@@ -229,7 +230,7 @@ def resolve_template_path(path_val, project_directory=None):
 
     for cand in workspace_candidates:
         if os.path.isfile(cand):
-            return cand
+            return cand.replace("\\", "/")
 
     # Package Fallback Candidates (Checked only if workspace has no matching file)
     pkg_candidates = [
@@ -241,9 +242,9 @@ def resolve_template_path(path_val, project_directory=None):
 
     for cand in pkg_candidates:
         if os.path.isfile(cand):
-            return cand
+            return cand.replace("\\", "/")
 
-    return os.path.join(base_proj, path_val)
+    return os.path.join(base_proj, path_val).replace("\\", "/")
 
 
 class _TeeWriter:

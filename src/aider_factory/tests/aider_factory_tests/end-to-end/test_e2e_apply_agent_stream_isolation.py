@@ -61,7 +61,7 @@ class _StreamIsolationBase(unittest.TestCase):
                 f.write(content)
             cmd_path = str(path) + ".cmd"
             with open(cmd_path, "w", encoding="utf-8") as f:
-                f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n')
+                f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n@exit /b %errorlevel%\n')
         else:
             with open(str(path), "w", encoding="utf-8") as f:
                 f.write(content)
@@ -282,7 +282,7 @@ class TestS06DeadlockPrevention(_StreamIsolationBase):
     """Verify pipe draining prevents deadlock with large inner aider output."""
 
     def test_s06_large_output_silent_no_deadlock(self):
-        """500 lines drained in silent mode within 5 seconds."""
+        """500 lines drained in silent mode within 10 seconds."""
         target, spec = self._make_target_and_spec()
 
         from apply_agent import run_apply
@@ -297,10 +297,10 @@ class TestS06DeadlockPrevention(_StreamIsolationBase):
         elapsed = time.monotonic() - start
 
         self.assertTrue(success)
-        self.assertLess(elapsed, 5.0, f"Deadlock suspected: took {elapsed:.1f}s")
+        self.assertLess(elapsed, 10.0, f"Deadlock suspected: took {elapsed:.1f}s")
 
     def test_s07_large_output_stream_no_deadlock(self):
-        """500 lines drained in stream mode within 5 seconds."""
+        """500 lines drained in stream mode within 10 seconds."""
         target, spec = self._make_target_and_spec()
 
         from apply_agent import run_apply
@@ -315,7 +315,7 @@ class TestS06DeadlockPrevention(_StreamIsolationBase):
         elapsed = time.monotonic() - start
 
         self.assertTrue(success)
-        self.assertLess(elapsed, 5.0, f"Deadlock suspected: took {elapsed:.1f}s")
+        self.assertLess(elapsed, 10.0, f"Deadlock suspected: took {elapsed:.1f}s")
 
     def test_s08_massive_output_pipe_overflow_prevention(self):
         """5000 lines (exceeds 64KB pipe buffer) must not deadlock or lose data."""

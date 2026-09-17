@@ -554,7 +554,7 @@ class TestRunApplyAndMain(unittest.TestCase):
                 f.write(content)
             cmd_path = str(path) + ".cmd"
             with open(cmd_path, "w", encoding="utf-8") as f:
-                f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n')
+                f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n@exit /b %errorlevel%\n')
         else:
             with open(str(path), "w", encoding="utf-8") as f:
                 f.write(content)
@@ -625,7 +625,7 @@ class TestRunApplyAndMain(unittest.TestCase):
         self._write_fake_binary(self.mock_git, fake_git)
 
         self._orig_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{self.bin_dir}:{self._orig_path}"
+        os.environ["PATH"] = f"{self.bin_dir}{os.pathsep}{self._orig_path}"
 
     def tearDown(self):
         os.environ["PATH"] = self._orig_path
@@ -1159,8 +1159,7 @@ class TestStreamFlag(unittest.TestCase):
             sys.exit(0)
         """)
         self.mock_aider = self.bin_dir / "aider"
-        self.mock_aider.write_text(fake_aider, encoding="utf-8")
-        self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
+        TestRunApplyAndMain._write_fake_binary(self.mock_aider, fake_aider)
 
         # Fake git
         self.mock_git = self.bin_dir / "git"
@@ -1172,11 +1171,10 @@ class TestStreamFlag(unittest.TestCase):
                 print("+ edited line")
             sys.exit(0)
         """)
-        self.mock_git.write_text(fake_git, encoding="utf-8")
-        self.mock_git.chmod(self.mock_git.stat().st_mode | stat.S_IEXEC)
+        TestRunApplyAndMain._write_fake_binary(self.mock_git, fake_git)
 
         self._orig_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{self.bin_dir}:{self._orig_path}"
+        os.environ["PATH"] = f"{self.bin_dir}{os.pathsep}{self._orig_path}"
         self._orig_env = os.environ.copy()
 
     def tearDown(self):

@@ -50,3 +50,7 @@ aider-clean-lancedb = "aider_factory.python.clean_lancedb:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aider_factory"]
+
+[tool.pytest.ini_options]
+testpaths = ["src/aider_factory/tests/aider_factory_tests"]
+norecursedirs = [".git", ".aider_factory", "temp", "tmp", "node_modules", ".venv"]

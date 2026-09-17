@@ -31,19 +31,30 @@ class TestE2EApplyAgent(unittest.TestCase):
         # 3. Create mock aider binary in PATH
         self.bin_dir = os.path.join(self.test_dir, "bin")
         os.makedirs(self.bin_dir, exist_ok=True)
-        self.fake_aider = os.path.join(self.bin_dir, "aider")
-        fake_aider_script = """#!/bin/bash
-TARGET="${@: -1}"
-echo "# Patched by fake aider" >> "$TARGET"
-git add "$TARGET"
-git commit -m "aider: applied edit"
-exit 0
+        fake_py = os.path.join(self.bin_dir, "fake_aider.py")
+        fake_script = """import sys, subprocess
+from pathlib import Path
+for arg in sys.argv:
+    if arg.endswith(".py") and not arg.startswith("-"):
+        with open(arg, "a", encoding="utf-8") as f:
+            f.write("\\n# Patched by fake aider\\n")
+        subprocess.run(["git", "add", arg], check=True)
+        subprocess.run(["git", "commit", "-m", "aider: applied edit"], check=True)
+sys.exit(0)
 """
-        with open(self.fake_aider, "w", encoding="utf-8") as f:
-            f.write(fake_aider_script)
-        os.chmod(self.fake_aider, 0o755)
+        with open(fake_py, "w", encoding="utf-8") as f:
+            f.write(fake_script)
 
-        os.environ["PATH"] = f"{self.bin_dir}:{os.environ.get('PATH', '')}"
+        if sys.platform == "win32":
+            with open(os.path.join(self.bin_dir, "aider.cmd"), "w", encoding="utf-8") as f:
+                f.write(f'@"{sys.executable}" "%~dp0fake_aider.py" %*\n@exit /b %errorlevel%\n')
+        else:
+            aider_sh = os.path.join(self.bin_dir, "aider")
+            with open(aider_sh, "w", encoding="utf-8") as f:
+                f.write(f'#!/bin/sh\n"{sys.executable}" "{fake_py}" "$@"\n')
+            os.chmod(aider_sh, 0o755)
+
+        os.environ["PATH"] = f"{self.bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 
     def tearDown(self):
         os.chdir(self.old_cwd)

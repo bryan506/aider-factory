@@ -266,32 +266,33 @@ class TestE2ECLICacheAndForever(unittest.TestCase):
             self.assertIn("aider-research: SearXNG search client", res.stdout)
 
         # 4. Bash Wrappers: Generate wrappers in workspace and execute them directly
-        import aider_factory.cli as cli
-        cli.ensure_bash_wrappers(self.af_dir)
-        bash_dir = os.path.join(self.af_dir, "bash")
+        if sys.platform != "win32":
+            import aider_factory.cli as cli
+            cli.ensure_bash_wrappers(self.af_dir)
+            bash_dir = os.path.join(self.af_dir, "bash")
 
-        wrapper_expectations = [
-            ("oracle", "aider-oracle: Knowledge Oracle"),
-            ("research", "aider-research: SearXNG search client"),
-            ("validate", "Evidence grounding audit"),
-            ("apply", "aider-apply: Execute headless Aider"),
-            ("factory", "aider-factory: Multi-agent orchestration"),
-        ]
+            wrapper_expectations = [
+                ("oracle", "aider-oracle: Knowledge Oracle"),
+                ("research", "aider-research: SearXNG search client"),
+                ("validate", "Evidence grounding audit"),
+                ("apply", "aider-apply: Execute headless Aider"),
+                ("factory", "aider-factory: Multi-agent orchestration"),
+            ]
 
-        for wrapper_name, expected_snippet in wrapper_expectations:
-            wrapper_path = os.path.join(bash_dir, wrapper_name)
-            for flag in ["--help", "-h"]:
-                res = subprocess.run(
-                    [wrapper_path, flag],
-                    cwd=empty_dir,
-                    env=self.env,
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                self.assertEqual(res.returncode, 0, msg=f"Bash wrapper {wrapper_name} {flag} failed: {res.stderr}")
-                self.assertIn(expected_snippet, res.stdout)
+            for wrapper_name, expected_snippet in wrapper_expectations:
+                wrapper_path = os.path.join(bash_dir, wrapper_name)
+                for flag in ["--help", "-h"]:
+                    res = subprocess.run(
+                        [wrapper_path, flag],
+                        cwd=empty_dir,
+                        env=self.env,
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    self.assertEqual(res.returncode, 0, msg=f"Bash wrapper {wrapper_name} {flag} failed: {res.stderr}")
+                    self.assertIn(expected_snippet, res.stdout)
 
         # Final assertion: pristine directory must remain completely empty throughout all executions
         self.assertEqual(os.listdir(empty_dir), [])

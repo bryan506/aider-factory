@@ -310,7 +310,7 @@ def run_bootstrap(target_dir: str) -> None:
             for fname in files:
                 if os.path.splitext(fname)[1].lower() not in _SOURCE_EXTS:
                     continue
-                rel = os.path.relpath(os.path.join(root, fname), base_dir)
+                rel = os.path.relpath(os.path.join(root, fname), base_dir).replace("\\", "/")
                 if _EXCLUDE_RE.search(rel):
                     continue
                 found.append(rel)
@@ -326,7 +326,7 @@ def run_bootstrap(target_dir: str) -> None:
         if os.path.isdir(docs_dir):
             for sub in sorted(os.listdir(docs_dir)):
                 if sub.endswith(".md"):
-                    ctx.append(os.path.join("docs", sub))
+                    ctx.append(os.path.join("docs", sub).replace("\\", "/"))
         return ctx
 
     target_files = _discover_target_files(cwd)
@@ -527,11 +527,15 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
             persistent_additions += f"<skills_reference>\n{skills_content.strip()}\n</skills_reference>\n\n"
 
     if expert_mode and "<factory_service_manual>" not in history_text:
+        repo_root = os.path.dirname(os.path.dirname(pkg_dir))
         candidate_paths = [
             os.path.join(".aider_factory", "markdown", "docs", "factory_service_manual.md"),
             os.path.join(pkg_dir, "markdown", "docs", "factory_service_manual.md"),
-            os.path.join(os.path.dirname(os.path.dirname(pkg_dir)), "docs", "factory_service_manual.md"),
+            os.path.join(repo_root, "docs", "factory_service_manual.md"),
             os.path.join(pkg_dir, "markdown", "factory_service_manual.md"),
+            os.path.join(pkg_dir, "docs", "factory_service_manual.md"),
+            os.path.join(repo_root, "src", "aider_factory", "markdown", "docs", "factory_service_manual.md"),
+            os.path.join(repo_root, "src", "aider_factory", "docs", "factory_service_manual.md"),
         ]
         manual_path = next((p for p in candidate_paths if os.path.exists(p)), None)
         if manual_path:

@@ -101,11 +101,11 @@ class TestWorkflow4JobUnits(unittest.TestCase):
         c3, db3 = _resolve_job_debate_collection(cfg_list, 3, "default_coll", root)
 
         self.assertEqual(c1, "coll_exchange")
-        self.assertEqual(db1, "/tmp/lanceDB/coll_exchange/lancedb")
+        self.assertEqual(db1.replace("\\", "/"), "/tmp/lanceDB/coll_exchange/lancedb")
         self.assertEqual(c2, "coll_risk_math")
-        self.assertEqual(db2, "/tmp/lanceDB/coll_risk_math/lancedb")
+        self.assertEqual(db2.replace("\\", "/"), "/tmp/lanceDB/coll_risk_math/lancedb")
         self.assertEqual(c3, "coll_mocks")
-        self.assertEqual(db3, "/tmp/lanceDB/coll_mocks/lancedb")
+        self.assertEqual(db3.replace("\\", "/"), "/tmp/lanceDB/coll_mocks/lancedb")
 
     def test_render_validate_template_non_existent(self):
         """T01: Non-existent template path returns original path without writing."""

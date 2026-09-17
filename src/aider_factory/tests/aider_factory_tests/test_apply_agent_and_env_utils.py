@@ -842,8 +842,7 @@ class TestRunApplyGaps(unittest.TestCase):
             sys.exit(int(os.environ.get("AIDER_FAKE_EXIT", "0")))
         """)
         self.mock_aider = self.bin_dir / "aider"
-        self.mock_aider.write_text(fake_aider, encoding="utf-8")
-        self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_aider, fake_aider)
 
         self._git_args_dump = self.root / "git_args_dump.txt"
         self.mock_git = self.bin_dir / "git"
@@ -858,8 +857,7 @@ class TestRunApplyGaps(unittest.TestCase):
                 print("+ edited line")
             sys.exit(0)
         """)
-        self.mock_git.write_text(fake_git, encoding="utf-8")
-        self.mock_git.chmod(self.mock_git.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_git, fake_git)
 
         self._orig_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{self.bin_dir}:{self._orig_path}"

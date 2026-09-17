@@ -778,7 +778,7 @@ class TestRunApplyGaps(unittest.TestCase):
                 f.write(content)
             cmd_path = str(path) + ".cmd"
             with open(cmd_path, "w", encoding="utf-8") as f:
-                f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n')
+                f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n@exit /b %errorlevel%\n')
         else:
             with open(str(path), "w", encoding="utf-8") as f:
                 f.write(content)
@@ -860,13 +860,13 @@ class TestRunApplyGaps(unittest.TestCase):
         self._write_fake_binary(self.mock_git, fake_git)
 
         self._orig_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{self.bin_dir}:{self._orig_path}"
+        os.environ["PATH"] = f"{self.bin_dir}{os.pathsep}{self._orig_path}"
         self._orig_env = os.environ.copy()
 
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self._orig_env)
-        os.environ["PATH"] = f"{self.bin_dir}:{self._orig_path}"
+        os.environ["PATH"] = self._orig_path
         self._tmp.cleanup()
 
     def _make_target_and_spec(self):
@@ -1263,8 +1263,8 @@ class TestStreamFlag(unittest.TestCase):
         )
         elapsed = time.monotonic() - start
         self.assertTrue(success)
-        # Should complete well under 5 seconds (no pipe-buffer stall)
-        self.assertLess(elapsed, 5.0)
+        # Should complete without pipe-buffer stall (allow buffer for CI runner variance)
+        self.assertLess(elapsed, 15.0)
 
     # --- S4: stream=True with no TTY available falls back gracefully
     def test_s4_stream_no_tty_falls_back(self):

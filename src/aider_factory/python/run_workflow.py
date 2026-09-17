@@ -55,11 +55,13 @@ def _expand_file_list(file_patterns, base_dir):
         if glob.has_magic(pat):
             abs_pat = pat if os.path.isabs(pat) else os.path.join(str(base_dir), pat)
             for match in sorted(glob.glob(abs_pat)):
-                rel_path = os.path.relpath(match, str(base_dir))
+                rel_path = os.path.relpath(match, str(base_dir)).replace("\\", "/")
                 if rel_path not in expanded:
                     expanded.append(rel_path)
-        elif pat not in expanded:
-            expanded.append(pat)
+        else:
+            clean_pat = pat.replace("\\", "/")
+            if clean_pat not in expanded:
+                expanded.append(clean_pat)
 
     return expanded
 

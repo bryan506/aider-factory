@@ -56,8 +56,8 @@ def run_test(test_name, yaml_content, expected_mapping):
         for t_id, task in tasks.items():
             if "job3" in t_id:
                 if len(task.files) >= 2:
-                    test_file = task.files[0]
-                    target_file = task.files[1]
+                    test_file = task.files[0].replace("\\", "/")
+                    target_file = task.files[1].replace("\\", "/")
                     actual_mapping[target_file] = test_file
 
         print(f"Test {test_name}:")

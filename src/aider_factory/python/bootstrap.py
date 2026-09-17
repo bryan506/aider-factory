@@ -243,7 +243,8 @@ def run_bootstrap(target_dir: str) -> None:
     # Project identity
     sensible_name = f"{repo_name.replace('_', ' ').replace('-', ' ').title()} Pipeline"
     content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{sensible_name}"', content, count=1)
-    content = re.sub(r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd}"', content, count=1)
+    cwd_forward = cwd.replace("\\", "/")
+    content = re.sub(r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd_forward}"', content, count=1)
 
     # Test framework
     content = re.sub(r'test_command_prefix:\s*".*?"', lambda _: f'test_command_prefix: "{fw_prefix}"', content, count=1)
@@ -443,10 +444,11 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
                     os.makedirs(".aider_factory", exist_ok=True)
                     sensible_name = f"{repo_name.replace('_', ' ').replace('-', ' ').title()} Pipeline"
                     cwd = os.getcwd()
+                    cwd_forward = cwd.replace("\\", "/")
                     with open(master_env_path, "r", encoding="utf-8") as f:
                         content = f.read()
                     content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{sensible_name}"', content)
-                    content = re.sub(r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd}"', content)
+                    content = re.sub(r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd_forward}"', content)
                     with open(file_path, "w", encoding="utf-8") as f:
                         f.write(content)
                     print(f"ℹ️ Created configuration file from template: {file_path}")
@@ -737,14 +739,3 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
 
     except Exception as e:
         print(f"\n❌ Helper call failed: {e}", file=sys.stderr)
-    finally:
-        try:
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                if loop and not loop.is_closed():
-                    loop.close()
-            except RuntimeError:
-                pass
-        except Exception:
-            pass

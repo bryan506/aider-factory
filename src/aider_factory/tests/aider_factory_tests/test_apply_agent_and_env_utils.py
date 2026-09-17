@@ -546,6 +546,20 @@ class TestResolveEditorConfigGaps(unittest.TestCase):
 class TestRunApplyAndMain(unittest.TestCase):
     """Integration test suite for run_apply and main CLI entry point."""
 
+    @staticmethod
+    def _write_fake_binary(path: Path, content: str):
+        if sys.platform == "win32":
+            py_path = str(path) + ".py"
+            with open(py_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            cmd_path = str(path) + ".cmd"
+            with open(cmd_path, "w", encoding="utf-8") as f:
+                f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n')
+        else:
+            with open(str(path), "w", encoding="utf-8") as f:
+                f.write(content)
+            os.chmod(str(path), os.stat(str(path)).st_mode | stat.S_IEXEC)
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
@@ -596,8 +610,7 @@ class TestRunApplyAndMain(unittest.TestCase):
                     Path(arg).write_text("# edited by mock aider\\n")
             sys.exit(0)
         """)
-        self.mock_aider.write_text(fake_script, encoding="utf-8")
-        self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_aider, fake_script)
 
         # Create mock git binary
         self.mock_git = self.bin_dir / "git"
@@ -609,8 +622,7 @@ class TestRunApplyAndMain(unittest.TestCase):
                 print("+ # edited by mock aider")
             sys.exit(0)
         """)
-        self.mock_git.write_text(fake_git, encoding="utf-8")
-        self.mock_git.chmod(self.mock_git.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_git, fake_git)
 
         self._orig_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{self.bin_dir}:{self._orig_path}"
@@ -757,6 +769,20 @@ class TestRunApplyAndMain(unittest.TestCase):
 
 class TestRunApplyGaps(unittest.TestCase):
     """Fill gaps D2–D10 for run_apply()."""
+
+    @staticmethod
+    def _write_fake_binary(path: Path, content: str):
+        if sys.platform == "win32":
+            py_path = str(path) + ".py"
+            with open(py_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            cmd_path = str(path) + ".cmd"
+            with open(cmd_path, "w", encoding="utf-8") as f:
+                f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n')
+        else:
+            with open(str(path), "w", encoding="utf-8") as f:
+                f.write(content)
+            os.chmod(str(path), os.stat(str(path)).st_mode | stat.S_IEXEC)
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

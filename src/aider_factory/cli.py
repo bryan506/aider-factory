@@ -700,8 +700,9 @@ def init_user_project(cwd=None):
 
         # Standardized dynamic instantiation
         content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{sensible_name}"', content)
+        cwd_forward = cwd.replace("\\", "/")
         content = re.sub(
-            r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd}"', content
+            r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd_forward}"', content
         )
 
         # Quickstart: Auto-discover a target file and context file

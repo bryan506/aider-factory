@@ -59,39 +59,40 @@ def test_02_helper_session_persistence_and_clear():
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp_session, \
          tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as tmp_yaml:
         tmp_yaml.write("name: test")
-        tmp_yaml.flush()
+        session_path = tmp_session.name
+        yaml_path = tmp_yaml.name
 
-        try:
-            with patch("bootstrap.get_helper_session_file", return_value=tmp_session.name), \
-                 patch("litellm.completion", return_value=mock_response), \
-                 patch("os.environ", {"GEMINI_API_KEY": "test-key"}):
+    try:
+        with patch("bootstrap.get_helper_session_file", return_value=session_path), \
+             patch("litellm.completion", return_value=mock_response), \
+             patch("os.environ", {"GEMINI_API_KEY": "test-key"}):
 
-                # Turn 1
-                bootstrap.run_query("instruction", tmp_yaml.name, "context_a.py", ask_mode=True)
-                with open(tmp_session.name, "r") as f:
-                    sess_data_1 = json.load(f)
-                assert len(sess_data_1) == 3, "Should initialize system + turn 1 prompt/response"
-                assert "<reference_schema>" in sess_data_1[1]["content"], "Reference schema must be persistently appended on Turn 1"
-                assert "endpoints:" in sess_data_1[1]["content"], "Must load complete_env.yml into reference schema"
-                assert "<yaml_documentation>" not in sess_data_1[1]["content"], "YAML docs must NOT be loaded in default mode"
+            # Turn 1
+            bootstrap.run_query("instruction", yaml_path, "context_a.py", ask_mode=True)
+            with open(session_path, "r") as f:
+                sess_data_1 = json.load(f)
+            assert len(sess_data_1) == 3, "Should initialize system + turn 1 prompt/response"
+            assert "<reference_schema>" in sess_data_1[1]["content"], "Reference schema must be persistently appended on Turn 1"
+            assert "endpoints:" in sess_data_1[1]["content"], "Must load complete_env.yml into reference schema"
+            assert "<yaml_documentation>" not in sess_data_1[1]["content"], "YAML docs must NOT be loaded in default mode"
 
-                # Turn 2
-                bootstrap.run_query("instruction 2", tmp_yaml.name, "context_a.py", ask_mode=True)
-                with open(tmp_session.name, "r") as f:
-                    sess_data_2 = json.load(f)
-                assert len(sess_data_2) == 5, "Session must accumulate messages directly without hashing reset"
-                assert "<reference_schema>" not in sess_data_2[3]["content"], "Reference schema must NOT be appended again on Turn 2"
+            # Turn 2
+            bootstrap.run_query("instruction 2", yaml_path, "context_a.py", ask_mode=True)
+            with open(session_path, "r") as f:
+                sess_data_2 = json.load(f)
+            assert len(sess_data_2) == 5, "Session must accumulate messages directly without hashing reset"
+            assert "<reference_schema>" not in sess_data_2[3]["content"], "Reference schema must NOT be appended again on Turn 2"
 
-                # Test session clearing
-                bootstrap.clear_helper_session()
-                assert not os.path.exists(tmp_session.name), "Clear must remove the session file from disk"
-        finally:
-            for f in [tmp_session.name, tmp_yaml.name]:
-                if os.path.exists(f):
-                    try:
-                        os.remove(f)
-                    except OSError:
-                        pass
+            # Test session clearing
+            bootstrap.clear_helper_session()
+            assert not os.path.exists(session_path), "Clear must remove the session file from disk"
+    finally:
+        for f in [session_path, yaml_path]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
 
 
 def test_03_query_prefix_auto_detection():
@@ -638,13 +639,14 @@ def test_25_bootstrap_provisions_bash_wrappers():
         with tempfile.TemporaryDirectory() as tmp:
             open(os.path.join(tmp, "pytest.ini"), "w").close()
             bootstrap.run_bootstrap(tmp)
-            bash_dir = os.path.join(tmp, ".aider_factory", "bash")
-            assert os.path.isdir(bash_dir), "bash/ directory must exist"
-            assert os.path.isfile(os.path.join(bash_dir, "factory"))
-            assert os.access(os.path.join(bash_dir, "factory"), os.X_OK)
-            assert os.path.isfile(os.path.join(bash_dir, "oracle"))
-            assert os.path.isfile(os.path.join(bash_dir, "validate"))
-            assert os.path.isfile(os.path.join(bash_dir, "apply"))
+            if sys.platform != "win32":
+                bash_dir = os.path.join(tmp, ".aider_factory", "bash")
+                assert os.path.isdir(bash_dir), "bash/ directory must exist"
+                assert os.path.isfile(os.path.join(bash_dir, "factory"))
+                assert os.access(os.path.join(bash_dir, "factory"), os.X_OK)
+                assert os.path.isfile(os.path.join(bash_dir, "oracle"))
+                assert os.path.isfile(os.path.join(bash_dir, "validate"))
+                assert os.path.isfile(os.path.join(bash_dir, "apply"))
     finally:
         for k, v in old_env.items():
             if v is not None:

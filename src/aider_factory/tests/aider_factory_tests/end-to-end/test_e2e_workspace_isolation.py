@@ -39,7 +39,7 @@ def _write_fake_binary(path, content):
             f.write(content)
         cmd_path = str(path) + ".cmd"
         with open(cmd_path, "w", encoding="utf-8") as f:
-            f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n')
+            f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n@exit /b %errorlevel%\n')
     else:
         with open(str(path), "w", encoding="utf-8") as f:
             f.write(content)

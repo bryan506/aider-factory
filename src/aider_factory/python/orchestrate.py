@@ -1560,6 +1560,11 @@ class AiderFactory:
             # env["AIDER_EDITOR_TEMPERATURE"] = "0.2"  # Force deterministic execution
 
             try:
+                aider_bin = shutil.which("aider") or "aider"
+                cmd[0] = aider_bin
+                if sys.platform == "win32" and aider_bin.lower().endswith((".cmd", ".bat")):
+                    cmd = ["cmd.exe", "/c"] + cmd
+
                 if task.pair_programming:
                     log.info(
                         f"🤝 STARTING INTERACTIVE PAIR-PROGRAMMING [{task.id}] -> Arch: {task.architect_api_base} | Ed: {current_editor}"
@@ -1620,11 +1625,6 @@ class AiderFactory:
                     return process.returncode == 0
 
                 # Start Aider, streaming to terminal
-                aider_bin = shutil.which("aider") or "aider"
-                cmd[0] = aider_bin
-                if sys.platform == "win32" and aider_bin.lower().endswith((".cmd", ".bat")):
-                    cmd = ["cmd.exe", "/c"] + cmd
-
                 process = subprocess.Popen(
                     cmd,
                     cwd=self.project_dir,

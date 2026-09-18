@@ -49,7 +49,7 @@ class TestE2EFactoryLauncher(unittest.TestCase):
 
         # Create a patched launcher that uses our fakes
         self.launcher_script = os.path.join(self.tmpdir, "test_launcher.py")
-        launcher_src = Path(os.path.join(_python_dir, "factory_launcher.py")).read_text()
+        launcher_src = Path(os.path.join(_python_dir, "factory_launcher.py")).read_text(encoding="utf-8").replace("\r\n", "\n")
         # Patch the workflow and aggregate script paths
         fake_wf = str(self.fake_workflow).replace("\\", "/")
         fake_ag = str(self.fake_agg).replace("\\", "/")
@@ -60,7 +60,7 @@ class TestE2EFactoryLauncher(unittest.TestCase):
             'os.path.join(\n        os.path.dirname(os.path.abspath(__file__)), "aggregate_costs.py"\n    )',
             f'"{fake_ag}"',
         )
-        Path(self.launcher_script).write_text(patched)
+        Path(self.launcher_script).write_text(patched, encoding="utf-8")
 
     def tearDown(self):
         os.chdir(self._orig_cwd)

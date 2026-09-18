@@ -156,8 +156,8 @@ class TestContextFileDiscovery:
         with tempfile.TemporaryDirectory() as tmp:
             _make_project(tmp)
             ctx = _discover_context_files(tmp)
-            assert os.path.join("docs", "guide.md") in ctx
-            assert os.path.join("docs", "api.md") in ctx
+            assert "docs/guide.md" in ctx
+            assert "docs/api.md" in ctx
 
     def test_no_docs_dir(self):
         with tempfile.TemporaryDirectory() as tmp:

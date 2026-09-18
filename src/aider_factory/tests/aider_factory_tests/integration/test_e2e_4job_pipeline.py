@@ -57,7 +57,7 @@ class TestE2E4JobPipeline(unittest.TestCase):
             factory = AiderFactory(project_dir=str(proj), session_name="test_session", session_dir=str(sess_dir))
 
             # Simulate Phase 0 completion
-            completed_files = [str(strat_file.relative_to(proj))]
+            completed_files = [strat_file.relative_to(proj).as_posix()]
 
             # Build Phase 1 DAG Tasks manually following run_workflow logic
             env_prefix = "phase1"
@@ -591,21 +591,21 @@ class TestE2E4JobPipeline(unittest.TestCase):
                 self.assertTrue(t_j1.deliberate["template"].endswith("implement.md"))
                 self.assertEqual(t_j1.deliberate["loops"], 0)
                 self.assertEqual(t_j1.rag_env["ORACLE_COLLECTION"], "coll_exchange")
-                self.assertIn("coll_exchange/lancedb", t_j1.rag_env["ORACLE_RAG_DB_DIR"])
+                self.assertIn("coll_exchange/lancedb", t_j1.rag_env["ORACLE_RAG_DB_DIR"].replace("\\", "/"))
 
                 # Verify Job 2 Heterogeneous Debate
                 t_j2 = tasks["p0_job2_debate_mod_a"]
                 self.assertTrue(t_j2.deliberate["template"].endswith("validate.md"))
                 self.assertEqual(t_j2.deliberate["loops"], 0)
                 self.assertEqual(t_j2.rag_env["ORACLE_COLLECTION"], "coll_risk_math")
-                self.assertIn("coll_risk_math/lancedb", t_j2.rag_env["ORACLE_RAG_DB_DIR"])
+                self.assertIn("coll_risk_math/lancedb", t_j2.rag_env["ORACLE_RAG_DB_DIR"].replace("\\", "/"))
 
                 # Verify Job 3 Heterogeneous Debate
                 t_j3 = tasks["p0_job3_debate_mod_a"]
                 self.assertTrue(t_j3.deliberate["template"].endswith("testing.md"))
                 self.assertEqual(t_j3.deliberate["loops"], 0)
                 self.assertEqual(t_j3.rag_env["ORACLE_COLLECTION"], "coll_mocks")
-                self.assertIn("coll_mocks/lancedb", t_j3.rag_env["ORACLE_RAG_DB_DIR"])
+                self.assertIn("coll_mocks/lancedb", t_j3.rag_env["ORACLE_RAG_DB_DIR"].replace("\\", "/"))
             finally:
                 sys.argv = orig_argv
                 os.chdir(orig_cwd)

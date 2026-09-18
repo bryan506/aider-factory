@@ -4,6 +4,7 @@
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import yaml
@@ -313,6 +314,11 @@ def run_apply(
         file=sys.stderr,
     )
 
+    aider_bin = shutil.which("aider") or "aider"
+    cmd[0] = aider_bin
+    if sys.platform == "win32" and aider_bin.lower().endswith((".cmd", ".bat")):
+        cmd = ["cmd.exe", "/c"] + cmd
+
     proc = subprocess.Popen(
         cmd,
         cwd=cwd,
@@ -376,10 +382,11 @@ def run_apply(
         print("\n" + "=" * 70)
         print("Git Diff Result (HEAD~1):")
         print("=" * 70)
-        subprocess.run(
-            ["git", "--no-pager", "diff", "--no-color", "--no-ext-diff", "HEAD~1"],
-            cwd=cwd,
-        )
+        git_bin = shutil.which("git") or "git"
+        git_cmd = [git_bin, "--no-pager", "diff", "--no-color", "--no-ext-diff", "HEAD~1"]
+        if sys.platform == "win32" and git_bin.lower().endswith((".cmd", ".bat")):
+            git_cmd = ["cmd.exe", "/c"] + git_cmd
+        subprocess.run(git_cmd, cwd=cwd)
 
     return True
 

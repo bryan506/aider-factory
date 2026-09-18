@@ -21,7 +21,9 @@ class TestE2EHelper(unittest.TestCase):
         print("==================================================")
 
         env = os.environ.copy()
-        python_path = f"{repo_root}:{src_dir}:{pkg_dir}:{os.path.join(pkg_dir, 'python')}"
+        python_path = os.pathsep.join([
+            repo_root, src_dir, pkg_dir, os.path.join(pkg_dir, "python")
+        ])
         env["PYTHONPATH"] = python_path
 
         # 1. Test CLI Help Invariant via Real Subprocess

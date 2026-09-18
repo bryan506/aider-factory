@@ -298,7 +298,7 @@ def run_bootstrap(target_dir: str) -> None:
         "site-packages", ".eggs",
     })
     _EXCLUDE_RE = re.compile(
-        r"(?:^|/)(?:tests?/|test_|conftest\.py|setup\.py|__init__\.py$)"
+        r"(?:^|[\\/])(?:tests?[\\/]|test_|conftest\.py|setup\.py|__init__\.py$)"
     )
 
     def _discover_target_files(base_dir: str) -> list:
@@ -475,11 +475,13 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
     history_text = "".join([m.get("content", "") for m in messages if m.get("role") != "system"])
     persistent_additions = ""
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    repo_root = os.path.dirname(os.path.dirname(pkg_dir))
     
     if not terminal_mode and "<reference_schema>" not in history_text:
         candidate_ref_schemas = [
             os.path.join(".aider_factory", "sample_yaml_config", "complete_env.yml"),
             os.path.join(pkg_dir, "default_configs", "sample_yaml_config", "complete_env.yml"),
+            os.path.join(repo_root, "src", "aider_factory", "default_configs", "sample_yaml_config", "complete_env.yml"),
             os.path.join(pkg_dir, "sample_yaml_config", "complete_env.yml"),
             os.path.join(pkg_dir, "default_configs", "env.yml"),
         ]
@@ -498,6 +500,7 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         candidate_yaml_docs = [
             os.path.join(".aider_factory", "markdown", "docs", "yaml_docs_sample.md"),
             os.path.join(pkg_dir, "markdown", "docs", "yaml_docs_sample.md"),
+            os.path.join(repo_root, "src", "aider_factory", "markdown", "docs", "yaml_docs_sample.md"),
             os.path.join(pkg_dir, "markdown", "yaml_docs_sample.md"),
         ]
         yaml_docs_path = next((p for p in candidate_yaml_docs if os.path.exists(p)), None)
@@ -515,6 +518,7 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         candidate_skills_dirs = [
             os.path.join(".aider_factory", "markdown", "skills"),
             os.path.join(pkg_dir, "markdown", "skills"),
+            os.path.join(repo_root, "src", "aider_factory", "markdown", "skills"),
         ]
         skills_dir = next((d for d in candidate_skills_dirs if os.path.isdir(d)), None)
         skills_content = ""

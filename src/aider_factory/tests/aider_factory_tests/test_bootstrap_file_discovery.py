@@ -56,7 +56,7 @@ _EXCLUDE_DIRS = frozenset({
     "site-packages", ".eggs",
 })
 _EXCLUDE_RE = __import__("re").compile(
-    r"(?:^|/)(?:tests?/|test_|conftest\.py|setup\.py|__init__\.py$)"
+    r"(?:^|[\\/])(?:tests?[\\/]|test_|conftest\.py|setup\.py|__init__\.py$)"
 )
 
 
@@ -68,7 +68,7 @@ def _discover_target_files(base_dir):
         for fname in files:
             if os.path.splitext(fname)[1].lower() not in _SOURCE_EXTS:
                 continue
-            rel = os.path.relpath(os.path.join(root, fname), base_dir)
+            rel = os.path.relpath(os.path.join(root, fname), base_dir).replace("\\", "/")
             if _EXCLUDE_RE.search(rel):
                 continue
             found.append(rel)
@@ -85,7 +85,7 @@ def _discover_context_files(base_dir):
     if os.path.isdir(docs_dir):
         for sub in sorted(os.listdir(docs_dir)):
             if sub.endswith(".md"):
-                ctx.append(os.path.join("docs", sub))
+                ctx.append(f"docs/{sub}")
     return ctx
 
 
@@ -95,8 +95,8 @@ class TestTargetFileDiscovery:
             _make_project(tmp)
             targets = _discover_target_files(tmp)
             assert "src/main.py" in targets
-            assert os.path.join("src", "mypkg", "core.py") in targets
-            assert os.path.join("src", "mypkg", "utils.py") in targets
+            assert "src/mypkg/core.py" in targets
+            assert "src/mypkg/utils.py" in targets
 
     def test_excludes_test_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -140,8 +140,8 @@ class TestTargetFileDiscovery:
             os.makedirs(os.path.join(tmp, "tests", "testthat"), exist_ok=True)
             open(os.path.join(tmp, "tests", "testthat", "test-aac.R"), "w").close()
             targets = _discover_target_files(tmp)
-            assert os.path.join("R", "aac_fut_b.R") in targets
-            assert os.path.join("R", "period_subset.R") in targets
+            assert "R/aac_fut_b.R" in targets
+            assert "R/period_subset.R" in targets
             assert not any("test" in t for t in targets)
 
 

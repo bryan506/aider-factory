@@ -41,34 +41,42 @@ class TestE2EMultiSessionPersistence(unittest.TestCase):
 
         self.bin_dir = os.path.join(self.test_dir, "bin")
         os.makedirs(self.bin_dir, exist_ok=True)
-        fake_aider = os.path.join(self.bin_dir, "aider")
-        fake_script = """#!/bin/bash
-prev=""
-for i in "$@"; do
-    if [[ "$prev" == "--llm-history-file" ]]; then
-        echo '{"mock": "llm_turn"}' >> "$i"
-    fi
-    if [[ "$prev" == "--chat-history-file" ]]; then
-        echo "User: mock turn" >> "$i"
-    fi
-    prev="$i"
-done
-if [ -n "$FAKE_AIDER_LOG" ]; then
-    echo "CMD: $@" >> "$FAKE_AIDER_LOG"
-    echo "AIDER_YES_ALWAYS=$AIDER_YES_ALWAYS" >> "$FAKE_AIDER_LOG"
-    echo "AIDER_AUTO_ACCEPT_ARCHITECT=$AIDER_AUTO_ACCEPT_ARCHITECT" >> "$FAKE_AIDER_LOG"
-    echo "AIDER_AUTO_COMMITS=$AIDER_AUTO_COMMITS" >> "$FAKE_AIDER_LOG"
-    echo "AIDER_DISABLE_PLAYWRIGHT=$AIDER_DISABLE_PLAYWRIGHT" >> "$FAKE_AIDER_LOG"
-    echo "AIDER_DETECT_URLS=$AIDER_DETECT_URLS" >> "$FAKE_AIDER_LOG"
-fi
-exit 0
+        fake_py = os.path.join(self.bin_dir, "fake_aider.py")
+        fake_script = """import sys, os
+prev = ""
+for arg in sys.argv:
+    if prev == "--llm-history-file":
+        with open(arg, "a", encoding="utf-8") as f:
+            f.write('{"mock": "llm_turn"}\\n')
+    if prev == "--chat-history-file":
+        with open(arg, "a", encoding="utf-8") as f:
+            f.write("User: mock turn\\n")
+    prev = arg
+log_path = os.environ.get("FAKE_AIDER_LOG")
+if log_path:
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"CMD: {' '.join(sys.argv)}\\n")
+        f.write(f"AIDER_YES_ALWAYS={os.environ.get('AIDER_YES_ALWAYS', '')}\\n")
+        f.write(f"AIDER_AUTO_ACCEPT_ARCHITECT={os.environ.get('AIDER_AUTO_ACCEPT_ARCHITECT', '')}\\n")
+        f.write(f"AIDER_AUTO_COMMITS={os.environ.get('AIDER_AUTO_COMMITS', '')}\\n")
+        f.write(f"AIDER_DISABLE_PLAYWRIGHT={os.environ.get('AIDER_DISABLE_PLAYWRIGHT', '')}\\n")
+        f.write(f"AIDER_DETECT_URLS={os.environ.get('AIDER_DETECT_URLS', '')}\\n")
+sys.exit(0)
 """
-        with open(fake_aider, "w", encoding="utf-8") as f:
+        with open(fake_py, "w", encoding="utf-8") as f:
             f.write(fake_script)
-        os.chmod(fake_aider, 0o755)
+
+        if sys.platform == "win32":
+            with open(os.path.join(self.bin_dir, "aider.cmd"), "w", encoding="utf-8") as f:
+                f.write(f'@"{sys.executable}" "%~dp0fake_aider.py" %*\n@exit /b %errorlevel%\n')
+        else:
+            fake_aider = os.path.join(self.bin_dir, "aider")
+            with open(fake_aider, "w", encoding="utf-8") as f:
+                f.write(f'#!/bin/sh\n"{sys.executable}" "{fake_py}" "$@"\n')
+            os.chmod(fake_aider, 0o755)
 
         self.old_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{self.bin_dir}:{self.old_path}"
+        os.environ["PATH"] = f"{self.bin_dir}{os.pathsep}{self.old_path}"
 
     def tearDown(self):
         os.chdir(self.old_cwd)
@@ -80,7 +88,9 @@ exit 0
 
     def _get_subprocess_env(self, session_name=None, config_path=None):
         env = os.environ.copy()
-        python_path = f"{repo_root}:{src_dir}:{pkg_dir}:{os.path.join(pkg_dir, 'python')}"
+        python_path = os.pathsep.join([
+            repo_root, src_dir, pkg_dir, os.path.join(pkg_dir, "python")
+        ])
         env["PYTHONPATH"] = python_path
         if session_name:
             env["AI_FACTORY_SESSION"] = session_name
@@ -244,13 +254,27 @@ exit 0
 
         bin_dir = os.path.join(self.test_dir, "bin")
         os.makedirs(bin_dir, exist_ok=True)
-        fake_aider = os.path.join(bin_dir, "aider")
-        with open(fake_aider, "w", encoding="utf-8") as f:
-            f.write('#!/bin/bash\nTARGET="${@: -1}"\necho "# patched" >> "$TARGET"\ngit add "$TARGET"\ngit commit -m "aider: edit"\nexit 0\n')
-        os.chmod(fake_aider, 0o755)
-
+        fake_py2 = os.path.join(bin_dir, "fake_aider.py")
+        with open(fake_py2, "w", encoding="utf-8") as f:
+            f.write("""import sys, subprocess
+target = sys.argv[-1]
+if target.endswith(".py"):
+    with open(target, "a", encoding="utf-8") as f:
+        f.write("# patched\\n")
+    subprocess.run(["git", "add", target], check=True)
+    subprocess.run(["git", "commit", "-m", "aider: edit"], check=True)
+sys.exit(0)
+""")
+        if sys.platform == "win32":
+            with open(os.path.join(bin_dir, "aider.cmd"), "w", encoding="utf-8") as f:
+                f.write(f'@"{sys.executable}" "%~dp0fake_aider.py" %*\n@exit /b %errorlevel%\n')
+        else:
+            fake_aider2 = os.path.join(bin_dir, "aider")
+            with open(fake_aider2, "w", encoding="utf-8") as f:
+                f.write(f'#!/bin/sh\n"{sys.executable}" "{fake_py2}" "$@"\n')
+            os.chmod(fake_aider2, 0o755)
         old_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{bin_dir}:{old_path}"
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
 
         try:
             af_dir = os.path.join(self.test_dir, ".aider_factory")

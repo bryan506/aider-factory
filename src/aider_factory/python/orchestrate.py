@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -500,6 +501,10 @@ class AiderFactory:
             env["LM_STUDIO_API_BASE"] = task.editor_api_base
             env["LM_STUDIO_API_KEY"] = _router_key
         print(f"\n{_ARCH_COLOR}┌── architect {label} ──", flush=True)
+        aider_bin = shutil.which("aider") or "aider"
+        cmd[0] = aider_bin
+        if sys.platform == "win32" and aider_bin.lower().endswith((".cmd", ".bat")):
+            cmd = ["cmd.exe", "/c"] + cmd
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -1615,6 +1620,11 @@ class AiderFactory:
                     return process.returncode == 0
 
                 # Start Aider, streaming to terminal
+                aider_bin = shutil.which("aider") or "aider"
+                cmd[0] = aider_bin
+                if sys.platform == "win32" and aider_bin.lower().endswith((".cmd", ".bat")):
+                    cmd = ["cmd.exe", "/c"] + cmd
+
                 process = subprocess.Popen(
                     cmd,
                     cwd=self.project_dir,

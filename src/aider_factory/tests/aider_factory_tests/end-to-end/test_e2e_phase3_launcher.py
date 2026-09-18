@@ -51,12 +51,14 @@ class TestE2EFactoryLauncher(unittest.TestCase):
         self.launcher_script = os.path.join(self.tmpdir, "test_launcher.py")
         launcher_src = Path(os.path.join(_python_dir, "factory_launcher.py")).read_text()
         # Patch the workflow and aggregate script paths
+        fake_wf = str(self.fake_workflow).replace("\\", "/")
+        fake_ag = str(self.fake_agg).replace("\\", "/")
         patched = launcher_src.replace(
             'os.path.join(\n        os.path.dirname(os.path.abspath(__file__)), "run_workflow.py"\n    )',
-            f'"{self.fake_workflow}"',
+            f'"{fake_wf}"',
         ).replace(
             'os.path.join(\n        os.path.dirname(os.path.abspath(__file__)), "aggregate_costs.py"\n    )',
-            f'"{self.fake_agg}"',
+            f'"{fake_ag}"',
         )
         Path(self.launcher_script).write_text(patched)
 

@@ -292,7 +292,7 @@ def test_oracle_clear_custom_session_file():
 
 
 def test_cloud_model_bypasses_dummy_api_key():
-    for k in ["ORACLE_AGENT_API_BASE", "ORACLE_SESSION_FILE", "ORACLE_RETRIEVE_MODE"]:
+    for k in ["ORACLE_AGENT_API_BASE", "LITELLM_BASE_URL", "ORACLE_SESSION_FILE", "ORACLE_RETRIEVE_MODE"]:
         os.environ.pop(k, None)
     os.environ["ORACLE_AGENT_MODEL"] = "gemini/gemini-2.5-flash"
     os.environ["ORACLE_AGENT_API_KEY"] = "sk-dummy"
@@ -315,12 +315,12 @@ def test_cloud_model_bypasses_dummy_api_key():
     finally:
         if os.path.exists(os.environ["ORACLE_SESSION_FILE"]):
             os.remove(os.environ["ORACLE_SESSION_FILE"])
-        for k in ["ORACLE_AGENT_MODEL", "ORACLE_AGENT_API_KEY", "ORACLE_AGENT_API_BASE", "ORACLE_SESSION_FILE", "ORACLE_RETRIEVE_MODE"]:
+        for k in ["ORACLE_AGENT_MODEL", "ORACLE_AGENT_API_KEY", "ORACLE_AGENT_API_BASE", "LITELLM_BASE_URL", "ORACLE_SESSION_FILE", "ORACLE_RETRIEVE_MODE"]:
             os.environ.pop(k, None)
 
 
 def test_auto_job_cloud_model_bypasses_dummy_api_key():
-    for k in ["ORACLE_AGENT_API_BASE", "ORACLE_JOB_TEMPLATE", "ORACLE_JOB_OUT", "ORACLE_JOB_FULLDOC"]:
+    for k in ["ORACLE_AGENT_API_BASE", "LITELLM_BASE_URL", "ORACLE_JOB_TEMPLATE", "ORACLE_JOB_OUT", "ORACLE_JOB_FULLDOC"]:
         os.environ.pop(k, None)
     os.environ["ORACLE_AGENT_MODEL"] = "gemini/gemini-2.5-flash"
     os.environ["ORACLE_AGENT_API_KEY"] = "sk-dummy"
@@ -353,7 +353,7 @@ def test_auto_job_cloud_model_bypasses_dummy_api_key():
         os.remove(tmp_tmpl.name)
         if os.path.exists(tmp_out):
             os.remove(tmp_out)
-        for k in ["ORACLE_AGENT_MODEL", "ORACLE_AGENT_API_KEY", "ORACLE_AGENT_API_BASE", "ORACLE_JOB_TEMPLATE", "ORACLE_JOB_OUT", "ORACLE_JOB_FULLDOC", "ORACLE_RETRIEVE_MODE"]:
+        for k in ["ORACLE_AGENT_MODEL", "ORACLE_AGENT_API_KEY", "ORACLE_AGENT_API_BASE", "LITELLM_BASE_URL", "ORACLE_JOB_TEMPLATE", "ORACLE_JOB_OUT", "ORACLE_JOB_FULLDOC", "ORACLE_RETRIEVE_MODE"]:
             os.environ.pop(k, None)
 
 

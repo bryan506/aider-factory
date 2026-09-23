@@ -161,6 +161,11 @@ def test_lancedb_operations():
     assert t2_name not in _current_tables(db)
     print("  [Integration] Table drop verified.")
 
+    # Release open table and connection handles before directory removal on Windows
+    del tbl1, tbl2, tbl3, tbl3_opened, db
+    import gc
+    gc.collect()
+
     # 5. Test removing the entire database
     rc = _remove_db()
     assert rc == 0
@@ -238,8 +243,13 @@ def test_add_operations():
         }]
     }
 
+    dummy_cfg_file = os.path.join(project_dir, "temp", "test_maint_cfg.yml")
+    with open(dummy_cfg_file, "w", encoding="utf-8") as f:
+        f.write("# Dummy config for test\n")
+
     try:
         # Set environment override for collection
+        os.environ["ORACLE_CONFIG_FILE"] = dummy_cfg_file
         os.environ["ORACLE_COLLECTION"] = test_collection
         os.environ["ORACLE_EXPLICIT_COLLECTION"] = "1"
 
@@ -301,7 +311,10 @@ def test_add_operations():
         )
 
     finally:
+        os.environ.pop("ORACLE_CONFIG_FILE", None)
         os.environ.pop("ORACLE_EXPLICIT_COLLECTION", None)
+        if os.path.exists(dummy_cfg_file):
+            os.remove(dummy_cfg_file)
         # Restore original ingest function and rag_context_root
         rag_manager.ingest = orig_ingest
         if orig_rag_root is not None:

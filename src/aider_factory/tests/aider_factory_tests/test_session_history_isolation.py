@@ -550,8 +550,14 @@ class TestPairProgrammingConfig(unittest.TestCase):
     def test_wrapped_in_script_for_pty(self):
         _, call_args = self._run_pair()
         cmd_list = call_args.args[0]
-        self.assertEqual(cmd_list[0], "script",
-                         "Pair mode must wrap aider in 'script' for PTY")
+        if sys.platform == "win32":
+            self.assertTrue(
+                any(os.path.basename(c).lower().startswith("aider") for c in cmd_list[:3]),
+                f"On Windows pair mode must invoke aider directly, got: {cmd_list[:3]}",
+            )
+        else:
+            self.assertEqual(cmd_list[0], "script",
+                             "Pair mode must wrap aider in 'script' for PTY")
 
 
 # ---------------------------------------------------------------------------

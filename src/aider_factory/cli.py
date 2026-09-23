@@ -381,7 +381,7 @@ def ensure_searxng_service():
     url = os.environ.get("SEARXNG_BASE_URL", "http://localhost:8088")
     health_url = f"{url.rstrip('/')}/healthz"
 
-    # 1. Fast 1-second health check
+    # 1. Fast 1-second health check (all platforms)
     try:
         req = urllib.request.Request(
             health_url, headers={"User-Agent": "AI-Factory/1.0"}
@@ -392,7 +392,16 @@ def ensure_searxng_service():
     except Exception:
         pass  # Service not running; proceed with auto-provisioning
 
-    # 2. Detect container engine (Podman preferred for rootless/zero-sudo, Docker as fallback)
+    # 2. Auto-provisioning requires systemd (Linux only)
+    if sys.platform != "linux":
+        print(
+            "ℹ️  [aider-factory] SearXNG auto-provisioning is Linux-only. "
+            "Start SearXNG manually via Docker Desktop or set SEARXNG_BASE_URL.",
+            file=sys.stderr,
+        )
+        return
+
+    # 3. Detect container engine (Podman preferred for rootless/zero-sudo, Docker as fallback)
     engine_bin = None
     engine_name = None
 
@@ -431,7 +440,7 @@ def ensure_searxng_service():
     if not engine_bin:
         return
 
-    # 3. Ensure SearXNG configuration (~/.config/searxng/settings.yml) enables JSON format
+    # 4. Ensure SearXNG configuration (~/.config/searxng/settings.yml) enables JSON format
     searxng_config_dir = os.path.expanduser("~/.config/searxng")
     os.makedirs(searxng_config_dir, exist_ok=True)
     searxng_settings_file = os.path.join(searxng_config_dir, "settings.yml")
@@ -454,7 +463,7 @@ enabled_plugins:
         with open(searxng_settings_file, "w", encoding="utf-8") as f:
             f.write(settings_content)
 
-    # 4. Write systemd user service file (~/.config/systemd/user/searxng.service)
+    # 5. Write systemd user service file (~/.config/systemd/user/searxng.service)
     user_systemd_dir = os.path.expanduser("~/.config/systemd/user")
     os.makedirs(user_systemd_dir, exist_ok=True)
     service_file = os.path.join(user_systemd_dir, "searxng.service")
@@ -478,7 +487,7 @@ WantedBy=default.target
         with open(service_file, "w", encoding="utf-8") as f:
             f.write(service_content)
 
-    # 4. Enable and start service in user space (no sudo)
+    # 6. Enable and start service in user space (no sudo)
     try:
         subprocess.run(
             ["systemctl", "--user", "daemon-reload"], check=False, capture_output=True
@@ -493,7 +502,7 @@ WantedBy=default.target
             file=sys.stderr,
         )
 
-        # 5. Wait for container HTTP readiness
+        # 7. Wait for container HTTP readiness
         for _ in range(30):
             time.sleep(0.5)
             try:
@@ -518,6 +527,8 @@ WantedBy=default.target
 
 def ensure_bash_wrappers(project_aider_factory_dir):
     """Ensures .aider_factory/bash/ launcher scripts exist and are executable."""
+    if sys.platform == "win32":
+        return  # Windows uses Python entry points from pyproject.toml; bash wrappers are not executable
     bash_dir = os.path.join(project_aider_factory_dir, "bash")
     os.makedirs(bash_dir, exist_ok=True)
 
@@ -689,8 +700,9 @@ def init_user_project(cwd=None):
 
         # Standardized dynamic instantiation
         content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{sensible_name}"', content)
+        cwd_forward = cwd.replace("\\", "/")
         content = re.sub(
-            r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd}"', content
+            r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd_forward}"', content
         )
 
         # Quickstart: Auto-discover a target file and context file
@@ -837,8 +849,12 @@ def init_user_project(cwd=None):
 
 
 def ensure_aider_installed():
-    """Ensure ~/.local/bin is in PATH and aider is installed globally."""
-    local_bin = os.path.expanduser("~/.local/bin")
+    """Ensure user scripts directory is in PATH and aider is installed globally."""
+    import sysconfig as _sysconfig
+    local_bin = (
+        _sysconfig.get_path("scripts", f"{os.name}_user")
+        or os.path.expanduser("~/.local/bin")
+    )
     current_path = os.environ.get("PATH", "")
     if os.path.exists(local_bin) and local_bin not in current_path.split(os.pathsep):
         os.environ["PATH"] = f"{local_bin}{os.pathsep}{current_path}"

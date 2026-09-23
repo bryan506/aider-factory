@@ -1,8 +1,33 @@
 #!/usr/bin/env python3
 import os
 import shutil
+import stat
 import sys
 import yaml
+
+
+def _safe_rmtree(target_dir):
+    if not os.path.exists(target_dir):
+        return
+
+    def _on_rm_error(func, path, exc_info):
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except Exception:
+            pass
+
+    if sys.version_info >= (3, 12):
+        def _onexc(func, path, exc):
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            except Exception:
+                pass
+
+        shutil.rmtree(target_dir, onexc=_onexc)
+    else:
+        shutil.rmtree(target_dir, onerror=_on_rm_error)
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(script_dir, "../../.."))
@@ -56,8 +81,8 @@ def run_test(test_name, yaml_content, expected_mapping):
         for t_id, task in tasks.items():
             if "job3" in t_id:
                 if len(task.files) >= 2:
-                    test_file = task.files[0]
-                    target_file = task.files[1]
+                    test_file = task.files[0].replace("\\", "/")
+                    target_file = task.files[1].replace("\\", "/")
                     actual_mapping[target_file] = test_file
 
         print(f"Test {test_name}:")
@@ -408,8 +433,7 @@ def test_yaml_dag_routing():
 
     finally:
         os.chdir(orig_cwd)
-        if os.path.exists(base_dir):
-            shutil.rmtree(base_dir)
+        _safe_rmtree(base_dir)
 
 
 if __name__ == "__main__":

@@ -210,8 +210,9 @@ class TestE2EResearchWebRAG(unittest.TestCase):
         # Set up a sandbox .aider_factory/.env.yml
         os.makedirs(os.path.join(self.temp_dir, ".aider_factory"), exist_ok=True)
         sandbox_env_yml = os.path.join(self.temp_dir, ".aider_factory", ".env.yml")
+        clean_temp = str(self.temp_dir).replace("\\", "/")
         with open(sandbox_env_yml, "w", encoding="utf-8") as f:
-            f.write(f"working_directory: \"{self.temp_dir}\"\n")
+            f.write(f'working_directory: "{clean_temp}"\n')
 
         env = os.environ.copy()
         env["ORACLE_CONFIG_FILE"] = sandbox_env_yml
@@ -253,8 +254,9 @@ class TestE2EResearchWebRAG(unittest.TestCase):
 
         os.makedirs(os.path.join(self.temp_dir, ".aider_factory"), exist_ok=True)
         sandbox_env_yml = os.path.join(self.temp_dir, ".aider_factory", ".env.yml")
+        clean_temp = str(self.temp_dir).replace("\\", "/")
         with open(sandbox_env_yml, "w", encoding="utf-8") as f:
-            f.write(f"working_directory: \"{self.temp_dir}\"\n")
+            f.write(f'working_directory: "{clean_temp}"\n')
 
         env = os.environ.copy()
         env["ORACLE_CONFIG_FILE"] = sandbox_env_yml

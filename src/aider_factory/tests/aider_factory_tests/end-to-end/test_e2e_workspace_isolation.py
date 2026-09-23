@@ -31,6 +31,21 @@ def _get_clean_env(extra_env=None):
     return env
 
 
+def _write_fake_binary(path, content):
+    """Write a fake binary that works on both POSIX and Windows."""
+    if sys.platform == "win32":
+        py_path = str(path) + ".py"
+        with open(py_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        cmd_path = str(path) + ".cmd"
+        with open(cmd_path, "w", encoding="utf-8") as f:
+            f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n@exit /b %errorlevel%\n')
+    else:
+        with open(str(path), "w", encoding="utf-8") as f:
+            f.write(content)
+        os.chmod(str(path), os.stat(str(path)).st_mode | stat.S_IEXEC)
+
+
 class TestE2EWorkspaceIsolation(unittest.TestCase):
     def setUp(self):
         self.temp_root = tempfile.TemporaryDirectory()
@@ -158,7 +173,8 @@ class TestE2EWorkspaceIsolation(unittest.TestCase):
         rejections_dump = self.root_path / "aider_rejections.txt"
 
         fake_aider = bin_dir / "aider"
-        fake_aider.write_text(
+        _write_fake_binary(
+            fake_aider,
             textwrap.dedent(f"""\
                 #!/usr/bin/env python3
                 import os, sys
@@ -202,9 +218,7 @@ class TestE2EWorkspaceIsolation(unittest.TestCase):
                         Path(a).write_text("# edited by mock aider\\n")
                 sys.exit(0)
             """),
-            encoding="utf-8",
         )
-        fake_aider.chmod(fake_aider.stat().st_mode | stat.S_IEXEC)
 
         af = self.ws_a / ".aider_factory"
         af.mkdir(parents=True, exist_ok=True)
@@ -234,7 +248,7 @@ class TestE2EWorkspaceIsolation(unittest.TestCase):
         )
 
         env = _get_clean_env({
-            "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             "HOME": str(self.root_path),
         })
         apply_script = os.path.join(python_dir, "apply_agent.py")
@@ -293,7 +307,8 @@ class TestE2EWorkspaceIsolation(unittest.TestCase):
         args_dump = self.root_path / "aider_args_multi.txt"
 
         fake_aider = bin_dir / "aider"
-        fake_aider.write_text(
+        _write_fake_binary(
+            fake_aider,
             textwrap.dedent(f"""\
                 #!/usr/bin/env python3
                 import sys
@@ -306,9 +321,7 @@ class TestE2EWorkspaceIsolation(unittest.TestCase):
                         Path(a).write_text("# edited by mock aider\\n")
                 sys.exit(0)
             """),
-            encoding="utf-8",
         )
-        fake_aider.chmod(fake_aider.stat().st_mode | stat.S_IEXEC)
 
         target_1 = self.ws_b / "target_1.py"
         target_2 = self.ws_b / "target_2.py"
@@ -321,7 +334,7 @@ class TestE2EWorkspaceIsolation(unittest.TestCase):
         spec.write_text("Update both files.\n", encoding="utf-8")
 
         env = _get_clean_env({
-            "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             "HOME": str(self.root_path),
         })
         apply_script = os.path.join(python_dir, "apply_agent.py")
@@ -351,7 +364,8 @@ class TestE2EWorkspaceIsolation(unittest.TestCase):
         args_dump = self.root_path / "aider_args_sess.txt"
 
         fake_aider = bin_dir / "aider"
-        fake_aider.write_text(
+        _write_fake_binary(
+            fake_aider,
             textwrap.dedent(f"""\
                 #!/usr/bin/env python3
                 import sys
@@ -364,9 +378,7 @@ class TestE2EWorkspaceIsolation(unittest.TestCase):
                         Path(a).write_text("# edited by mock aider\\n")
                 sys.exit(0)
             """),
-            encoding="utf-8",
         )
-        fake_aider.chmod(fake_aider.stat().st_mode | stat.S_IEXEC)
 
         af = self.ws_a / ".aider_factory"
         sess_dir = af / "sessions" / "custom_branch"
@@ -387,7 +399,7 @@ class TestE2EWorkspaceIsolation(unittest.TestCase):
         target.write_text("# original\n", encoding="utf-8")
 
         env = _get_clean_env({
-            "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             "HOME": str(self.root_path),
         })
         apply_script = os.path.join(python_dir, "apply_agent.py")

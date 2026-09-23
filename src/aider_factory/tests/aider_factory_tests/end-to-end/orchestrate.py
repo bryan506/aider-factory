@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # orchestrate.py
 
+import datetime
 import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -15,6 +17,8 @@ from typing import Optional
 _python_dir = os.path.dirname(os.path.abspath(__file__))
 if _python_dir not in sys.path:
     sys.path.insert(0, _python_dir)
+
+from env_utils import is_dummy_key
 
 import yaml
 
@@ -88,6 +92,8 @@ class Task:
     yes_always: Optional[bool] = None
     auto_accept_architect: Optional[bool] = None
     auto_commits: Optional[bool] = None
+    auto_lint: Optional[bool] = None
+    lint_cmd: Optional[str] = None
     suggest_shell_commands: Optional[bool] = None
     detect_urls: Optional[bool] = None
     disable_playwright: Optional[bool] = None
@@ -143,7 +149,6 @@ class AiderFactory:
         return os.path.join(vault_dir, mapping.get(base, f"{base}_{stem}"))
 
     def _swap_in_state(self, stem: str):
-        import shutil
         active_files = self._get_state_files()
         for f in active_files:
             if os.path.exists(f):
@@ -160,7 +165,6 @@ class AiderFactory:
                     pass
 
     def _swap_out_state(self, stem: str):
-        import shutil
         vault_dir = os.path.join(str(self.session_dir), "chat_history")
         os.makedirs(vault_dir, exist_ok=True)
         active_files = self._get_state_files()
@@ -434,6 +438,10 @@ class AiderFactory:
             "aider",
             "--no-check-model-accepts-settings",
             "--no-show-model-warnings",
+            "--no-check-update",
+            "--no-show-release-notes",
+            "--no-notifications",
+            "--no-analytics",
             "--model",
             task.model,
             "--edit-format",
@@ -480,14 +488,26 @@ class AiderFactory:
         env["PYTHONHASHSEED"] = (
             "0"  # Ensure deterministic set iteration for perfect prefix caching
         )
+        # Resolve real key for LiteLLM routers (Lemonade, OpenRouter, etc.);
+        # fall back to "sk-dummy" for local llama.cpp / LM Studio.
+        _router_key = os.environ.get("LITELLM_API_KEY", "")
+        _router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
         if task.architect_api_base:
             env["OPENAI_API_BASE"] = task.architect_api_base
-            env["OPENAI_API_KEY"] = "sk-dummy"
+            env["OPENAI_API_KEY"] = _router_key
         if task.editor_api_base:
             env["OLLAMA_API_BASE"] = task.editor_api_base
             env["LM_STUDIO_API_BASE"] = task.editor_api_base
-            env["LM_STUDIO_API_KEY"] = "sk-dummy"
+            env["LM_STUDIO_API_KEY"] = _router_key
         print(f"\n{_ARCH_COLOR}┌── architect {label} ──", flush=True)
+        if sys.platform == "win32":
+            try:
+                aider_bin = shutil.which("aider") or "aider"
+            except Exception:
+                aider_bin = "aider"
+            cmd[0] = aider_bin
+            if aider_bin.lower().endswith((".cmd", ".bat")):
+                cmd = ["cmd.exe", "/c"] + cmd
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -524,13 +544,20 @@ class AiderFactory:
         # (saves oracle tokens + keeps the transcript clean) while preserving the PROPOSAL.
         return self._extract_assistant_text(self._strip_thinking("".join(chars)))
 
-    def _gate_run(self, task: "Task", gate_cmd: str):
-        """Run the deterministic gate; return (passed, combined_output)."""
+    def _gate_run(self, task: "Task", gate_cmd):
+        """Run the deterministic gate; return (passed, combined_output).
+
+        gate_cmd may be a list (shell=False, used for internally-constructed
+        commands like the grounding gate) or a string (shell=True, used for
+        user-configured test_cmd which may contain shell syntax like '&&').
+        """
         env = {**os.environ, **(task.rag_env or {})}
+        use_shell = isinstance(gate_cmd, str)
+        cache_key = gate_cmd if use_shell else tuple(gate_cmd)
         try:
             p = subprocess.run(
                 gate_cmd,
-                shell=True,
+                shell=use_shell,
                 cwd=self.project_dir,
                 env=env,
                 stdout=subprocess.PIPE,
@@ -538,10 +565,10 @@ class AiderFactory:
                 text=True,
             )
             passed = p.returncode == 0
-            self.last_test_result[gate_cmd] = passed
+            self.last_test_result[cache_key] = passed
             return passed, p.stdout or ""
         except Exception as e:
-            self.last_test_result[gate_cmd] = False
+            self.last_test_result[cache_key] = False
             return False, f"(gate error: {e})"
 
     def _oracle_turn(
@@ -762,8 +789,6 @@ class AiderFactory:
                 # task (which references this round's verdict) finds the content.
                 verdict_path = d.get("verdict")
                 if verdict_path:
-                    import shutil
-
                     os.makedirs(
                         os.path.dirname(os.path.abspath(verdict_path)), exist_ok=True
                     )
@@ -852,7 +877,8 @@ class AiderFactory:
 
         # Seed with the real failure; short-circuit if the gate is already green.
         if gate_present:
-            if self.last_test_result.get(gate_cmd) is True:
+            cache_key = gate_cmd if isinstance(gate_cmd, str) else tuple(gate_cmd)
+            if self.last_test_result.get(cache_key) is True:
                 ok = True
                 gate_out = "Gate already passed in preceding task."
             else:
@@ -899,7 +925,8 @@ class AiderFactory:
                     )
 
         ledger = deliberate.new_ledger(issue_id)
-        last_proposal, state = "", "continue"
+        last_proposal = seed if d.get("draft_mode") else ""
+        state = "continue"
         transcript = [f"# Deliberation transcript — {issue_id}\n"]
         # Accumulated debate memory fed to EVERY architect turn (each architect turn is a
         # fresh process with no chat memory). Architect side = its PROPOSAL line only (the
@@ -920,9 +947,9 @@ class AiderFactory:
         )
 
         # Clear debate context: always on round 1 (fresh sequence), or every round
-        # when pass_round_history is off (each cluster of loops gets a clean slate).
+        # when pass_history is off (each cluster of loops gets a clean slate).
         _first_round = d.get("round_idx", 1) == 1
-        _clear = not d.get("pass_round_history", False) or _first_round
+        _clear = not d.get("pass_history", True) or _first_round
         if _clear:
             for _f in [
                 oracle_debate_session,
@@ -1057,9 +1084,6 @@ class AiderFactory:
             self.project_dir, ".aider_factory", ".oracle_chat.history.md"
         )
         if os.path.exists(_ot):
-            import datetime
-            import shutil
-
             _stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             _rhd = os.path.join(
                 self.project_dir, ".aider_factory", "logs", "oracle_history"
@@ -1071,9 +1095,9 @@ class AiderFactory:
                 pass
 
         # Clean up debate working files — but preserve them when
-        # pass_round_history is True so the next round's oracle and architect
+        # pass_history is True so the next round's oracle and architect
         # can resume from the prior round's accumulated context.
-        if not d.get("pass_round_history", False):
+        if not d.get("pass_history", True):
             for _df in [
                 oracle_debate_session,
                 oracle_debate_cost_sidecar,
@@ -1209,6 +1233,20 @@ class AiderFactory:
                 except Exception as e:
                     log.warning(f"⚠️ Could not load base config {base_aider_conf}: {e}")
 
+            # Strip history-path keys so the CLI --chat-history-file /
+            # --input-history-file / --llm-history-file / --restore-chat-history
+            # flags are the sole authority.  Leaving these in causes aider to
+            # read the GLOBAL .aider_factory/.aider.chat.history.md (shared
+            # across ALL sessions), injecting cross-session context and making
+            # /clear appear ineffective.
+            for _hist_key in (
+                "chat-history-file",
+                "input-history-file",
+                "llm-history-file",
+                "restore-chat-history",
+            ):
+                conf_data.pop(_hist_key, None)
+
             if task.map_tokens is not None:
                 conf_data["map-tokens"] = task.map_tokens
             if task.map_refresh is not None:
@@ -1224,6 +1262,10 @@ class AiderFactory:
                 conf_data["auto-accept-architect"] = bool(task.auto_accept_architect)
             if task.auto_commits is not None:
                 conf_data["auto-commits"] = bool(task.auto_commits)
+            if task.auto_lint is not None:
+                conf_data["auto-lint"] = bool(task.auto_lint)
+            if task.lint_cmd is not None:
+                conf_data["lint-cmd"] = task.lint_cmd
             if task.suggest_shell_commands is not None:
                 conf_data["suggest-shell-commands"] = bool(task.suggest_shell_commands)
             if task.detect_urls is not None:
@@ -1257,6 +1299,10 @@ class AiderFactory:
                 "aider",
                 "--no-check-model-accepts-settings",
                 "--no-show-model-warnings",
+                "--no-check-update",
+                "--no-show-release-notes",
+                "--no-notifications",
+                "--no-analytics",
                 "--model",
                 task.model,
                 "--editor-model",
@@ -1295,6 +1341,12 @@ class AiderFactory:
                 cmd.append(
                     "--auto-commits" if task.auto_commits else "--no-auto-commits"
                 )
+            if task.auto_lint is not None:
+                cmd.append(
+                    "--auto-lint" if task.auto_lint else "--no-auto-lint"
+                )
+            if task.lint_cmd is not None:
+                cmd.extend(["--lint-cmd", task.lint_cmd])
             if task.auto_accept_architect is not None:
                 cmd.append(
                     "--auto-accept-architect"
@@ -1310,6 +1362,8 @@ class AiderFactory:
             if task.detect_urls is not None:
                 cmd.append("--detect-urls" if task.detect_urls else "--no-detect-urls")
 
+            if not task.pair_programming:
+                cmd.append("--exit")
             if task.yes_always:
                 cmd.append("--yes-always")
             if task.disable_playwright:
@@ -1408,10 +1462,19 @@ class AiderFactory:
                     # read-only context and the user drives the conversation.
                     cmd.extend(["--read", task.message_file])
                 else:
+                    target_list = ", ".join(f"`{f}`" for f in task.files) if task.files else "none"
+                    msg = (
+                        f"ACTIVE TARGET FILE(S): {target_list}\n"
+                        f"STRICT INVARIANT: You MUST ONLY plan and modify the assigned target file(s) ({target_list}).\n"
+                        f"Do NOT propose SEARCH/REPLACE blocks for any other files.\n"
+                        f"Do NOT create new files.\n"
+                        f"All files passed via --read are IMMUTABLE context.\n\n"
+                        f"Please execute the instructions found in {task.message_file}."
+                    )
                     cmd.extend(
                         [
                             "--message",
-                            f"Please execute the instructions found in {task.message_file}.",
+                            msg,
                             "--read",
                             task.message_file,
                         ]
@@ -1461,6 +1524,10 @@ class AiderFactory:
                 )
             if task.auto_commits is not None:
                 env["AIDER_AUTO_COMMITS"] = "true" if task.auto_commits else "false"
+            if task.auto_lint is not None:
+                env["AIDER_AUTO_LINT"] = "true" if task.auto_lint else "false"
+            if task.lint_cmd is not None:
+                env["AIDER_LINT_CMD"] = task.lint_cmd
             if task.suggest_shell_commands is not None:
                 env["AIDER_SUGGEST_SHELL_COMMANDS"] = (
                     "true" if task.suggest_shell_commands else "false"
@@ -1468,35 +1535,80 @@ class AiderFactory:
             if task.detect_urls is not None:
                 env["AIDER_DETECT_URLS"] = "true" if task.detect_urls else "false"
 
+            # Resolve real key for LiteLLM routers (Lemonade, OpenRouter, etc.);
+            # fall back to "sk-dummy" for local llama.cpp / LM Studio.
+            _router_key = os.environ.get("LITELLM_API_KEY", "")
+            _router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
             if task.architect_api_base:
                 env["OPENAI_API_BASE"] = task.architect_api_base
-                env["OPENAI_API_KEY"] = "sk-dummy"
+                env["OPENAI_API_KEY"] = _router_key
             if task.editor_api_base:
                 env["OLLAMA_API_BASE"] = task.editor_api_base
                 env["LM_STUDIO_API_BASE"] = task.editor_api_base
-                env["LM_STUDIO_API_KEY"] = "sk-dummy"
+                env["LM_STUDIO_API_KEY"] = _router_key
             # Side-agent (ORACLE_*) config, visible to /run child processes
             if task.rag_env:
                 env.update(task.rag_env)
             # env["AIDER_EDITOR_TEMPERATURE"] = "0.2"  # Force deterministic execution
 
             try:
+                if sys.platform == "win32":
+                    try:
+                        aider_bin = shutil.which("aider") or "aider"
+                    except Exception:
+                        aider_bin = "aider"
+                    cmd[0] = aider_bin
+                    if aider_bin.lower().endswith((".cmd", ".bat")):
+                        cmd = ["cmd.exe", "/c"] + cmd
+
                 if task.pair_programming:
                     log.info(
                         f"🤝 STARTING INTERACTIVE PAIR-PROGRAMMING [{task.id}] -> Arch: {task.architect_api_base} | Ed: {current_editor}"
                     )
-                    # Wrap Aider in `script` so prompt_toolkit sees a real PTY
-                    # while all output (stdout + stderr) is captured to a file.
-                    # The finally block parses the capture for cost lines and
-                    # emits them to stdout (-> tee -> log -> aggregate_costs.py).
-                    # This captures every cost source: main session, /run
-                    # debates, and oracle turns — no sidecars or chat history.
+                    # Wrap Aider in a PTY capture so prompt_toolkit sees a real
+                    # terminal while all output is captured to a file. The
+                    # finally block parses the capture for cost lines and emits
+                    # them to stdout (-> tee -> log -> aggregate_costs.py).
                     cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
-                    process = subprocess.Popen(
-                        ["script", "-qfe", "-c", cmd_str, _pair_capture],
-                        env=env,
-                        cwd=self.project_dir,
-                    )
+                    if sys.platform == "win32":
+                        # Windows: no script/PTY available; run directly and
+                        # tee stdout to the capture file for cost extraction.
+                        _cap_fh = open(
+                            _pair_capture, "w", encoding="utf-8", errors="replace"
+                        )
+                        process = subprocess.Popen(
+                            cmd,
+                            env=env,
+                            cwd=self.project_dir,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                        )
+                        try:
+                            if process.stdout:
+                                for _line in process.stdout:
+                                    sys.stdout.write(_line)
+                                    sys.stdout.flush()
+                                    _cap_fh.write(_line)
+                                process.stdout.close()
+                        finally:
+                            _cap_fh.close()
+                    elif sys.platform == "darwin":
+                        # macOS BSD script: positional args, no -e/-f flags.
+                        _shell = os.environ.get("SHELL", "/bin/bash")
+                        process = subprocess.Popen(
+                            ["script", "-q", _pair_capture, _shell, "-c", cmd_str],
+                            env=env,
+                            cwd=self.project_dir,
+                        )
+                    else:
+                        # Linux GNU script: flag-based invocation.
+                        process = subprocess.Popen(
+                            ["script", "-qfe", "-c", cmd_str, _pair_capture],
+                            env=env,
+                            cwd=self.project_dir,
+                        )
                     while True:
                         try:
                             process.wait()
@@ -1509,22 +1621,19 @@ class AiderFactory:
                     return process.returncode == 0
 
                 # Start Aider, streaming to terminal
-                cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
                 process = subprocess.Popen(
-                    cmd_str,
-                    shell=True,
+                    cmd,
                     cwd=self.project_dir,
                     env=env,
                     stdin=subprocess.PIPE,
                 )
 
                 try:
-                    # Send 'd\n' (Don't ask again) to gracefully reject mid-run interactive prompts
-                    # like "Add file to the chat?" or "Run shell command?", preventing the LLM from
-                    # getting distracted and dropping commits. For prompts without a (D) option
-                    # (e.g. "Create new file?"), 'd' is invalid, triggering an EOFError on the
-                    # next read which safely accepts the default [Yes].
-                    process.stdin.write(b"d\n")
+                    # Send repeated 'n\n' (No) to gracefully reject all out-of-scope mid-run
+                    # prompts ("Add file to the chat?", "Create new file?"). With --exit enabled,
+                    # Aider terminates immediately upon completing --message, discarding any
+                    # unused buffer entries without polling them as trailing chat turns.
+                    process.stdin.write(b"n\n" * 50)
                     process.stdin.flush()
                     process.stdin.close()
                 except Exception:
@@ -1554,14 +1663,11 @@ class AiderFactory:
                 log.warning(f"⏸️  TASK CANCELLED BY USER [{task.id}]")
                 return False
             except Exception as e:
-                log.error(f"❌ TASK EXCEPTION [{task.id}]: {str(e)}")
+                log.error(f"❌ TASK EXCEPTION [{task.id}]: {str(e)}", exc_info=True)
                 return False
             finally:
                 # Archive chat history before cleanup
                 if os.path.exists(chat_hist):
-                    import datetime
-                    import shutil
-
                     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     history_dir = os.path.join(
                         self.project_dir, ".aider_factory", "logs", "chat_history"
@@ -1573,9 +1679,6 @@ class AiderFactory:
 
                 # Archive raw LLM history before cleanup
                 if os.path.exists(llm_hist):
-                    import datetime
-                    import shutil
-
                     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     llm_hist_dir = os.path.join(
                         self.project_dir, ".aider_factory", "logs", "llm_history"
@@ -1587,9 +1690,6 @@ class AiderFactory:
 
                 # Archive the Oracle side-agent transcript before cleanup
                 if os.path.exists(oracle_transcript):
-                    import datetime
-                    import shutil
-
                     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     rag_hist_dir = os.path.join(
                         self.project_dir,

@@ -37,7 +37,7 @@ description: Headless code modification tool that extracts diffs or task specifi
 | `--spec <path>` | `-s` | `None` | Path to an explicit Markdown specification file (bypasses chat history). |
 | `--model <str>` | `-m` | `None` | Override the editor model (e.g. `openai/qwen2.5-coder:32b`). |
 | `--session <str>` | | `None` | Target session name for chat history discovery (auto-discovered if omitted). |
-| `--no-diff` | | `False` | Suppress printing the resulting `git --no-pager diff HEAD~1` output to stdout. |
+| `--no-diff` | | `False` | Suppress printing the resulting diff output to stdout. |
 
 ---
 
@@ -60,7 +60,7 @@ description: Headless code modification tool that extracts diffs or task specifi
 # Override the editor model for a specific edit
 /run aider-apply src/service.py --model openai/qwen2.5-coder:32b
 
-# Target a specific named session and suppress git diff
+# Target a specific named session and suppress diff output
 /run .aider_factory/bash/apply src/service.py --session refactor_v2 --no-diff
 ```
 
@@ -106,4 +106,4 @@ def health_status():
 - [ ] Specify all affected file paths if the planned diff touches multiple files.
 - [ ] Increase `--turns` if the specification spans multiple recent conversation messages.
 - [ ] Verify the active session or `--spec` file path before execution.
-- [ ] Inspect the returned Git diff output (`git --no-pager diff HEAD~1`) to verify clean application.
+- [ ] Inspect the returned diff output to verify clean application.

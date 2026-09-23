@@ -1,0 +1,11 @@
+ #!/usr/bin/env bash
+
+ for f in "$@"; do
+     # Only process if it's an actual file
+     if [ -f "$f" ]; then
+         echo -e "\n<file name=\"$f\">"
+         cat "$f"
+         # Ensure a newline exists before the closing tag
+         echo -e "\n</file>"
+     fi
+ done

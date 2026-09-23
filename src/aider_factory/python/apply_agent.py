@@ -4,6 +4,7 @@
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import yaml
@@ -313,6 +314,15 @@ def run_apply(
         file=sys.stderr,
     )
 
+    if sys.platform == "win32":
+        try:
+            aider_bin = shutil.which("aider") or "aider"
+        except Exception:
+            aider_bin = "aider"
+        cmd[0] = aider_bin
+        if aider_bin.lower().endswith((".cmd", ".bat")):
+            cmd = ["cmd.exe", "/c"] + cmd
+
     proc = subprocess.Popen(
         cmd,
         cwd=cwd,
@@ -338,7 +348,8 @@ def run_apply(
         # Falls back gracefully if unavailable (CI, headless, redirected stdin).
         tty_fh = None
         try:
-            tty_fh = open("/dev/tty", "w", encoding="utf-8", errors="replace")
+            tty_path = "CONOUT$" if sys.platform == "win32" else "/dev/tty"
+            tty_fh = open(tty_path, "w", encoding="utf-8", errors="replace")
         except OSError:
             pass
 
@@ -368,13 +379,21 @@ def run_apply(
         )
         return False
 
-    # Only the git diff reaches stdout (~3–4k tokens, ANSI colors preserved
-    # for readability; outer aider captures this as the sole "command output").
+    # Only the git diff reaches stdout (~3–4k tokens, plain text without ANSI
+    # escape codes or external pagers to prevent token bloat and optimize for
+    # LLM reasoning; outer aider captures this as the sole "command output").
     if not no_diff:
         print("\n" + "=" * 70)
         print("Git Diff Result (HEAD~1):")
         print("=" * 70)
-        subprocess.run(["git", "--no-pager", "diff", "HEAD~1"], cwd=cwd)
+        try:
+            git_bin = shutil.which("git") or "git"
+        except Exception:
+            git_bin = "git"
+        git_cmd = [git_bin, "--no-pager", "diff", "--no-color", "--no-ext-diff", "HEAD~1"]
+        if sys.platform == "win32" and git_bin.lower().endswith((".cmd", ".bat")):
+            git_cmd = ["cmd.exe", "/c"] + git_cmd
+        subprocess.run(git_cmd, cwd=cwd)
 
     return True
 

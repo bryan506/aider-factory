@@ -94,8 +94,9 @@ class TestE2EOCRVisionRouting(unittest.TestCase):
 
     def _write_yaml(self, ocr_agent, ocr_prompt):
         yaml_path = os.path.join(self.temp_dir, ".env.yml")
+        clean_dir = str(self.temp_dir).replace("\\", "/")
         content = f"""
-working_directory: "{self.temp_dir}"
+working_directory: "{clean_dir}"
 endpoints:
   ocr_api_base: "http://localhost:{self.port}/v1"
   embed_api_base: "http://localhost:{self.port}/v1"

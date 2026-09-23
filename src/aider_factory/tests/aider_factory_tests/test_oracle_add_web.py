@@ -47,6 +47,10 @@ class TestOracleAddWebCLI(unittest.TestCase):
         from unittest.mock import patch
 
         temp_dir = tempfile.mkdtemp()
+        dummy_cfg = os.path.join(temp_dir, ".env.yml")
+        with open(dummy_cfg, "w", encoding="utf-8") as f:
+            f.write("phases:\n  - enabled: true\n    rag:\n      collection_name: default_col\n")
+        os.environ["ORACLE_CONFIG_FILE"] = dummy_cfg
         try:
             urls_file = os.path.join(temp_dir, "test_urls.txt")
             with open(urls_file, "w", encoding="utf-8") as f:
@@ -55,8 +59,12 @@ class TestOracleAddWebCLI(unittest.TestCase):
                 f.write("\n")
                 f.write("  https://example.com/page2.html  \n")
 
+            fake_md = os.path.join(temp_dir, "fake_doc.md")
+            with open(fake_md, "w", encoding="utf-8") as f:
+                f.write("# Fake Doc Content\n")
+
             with patch("rag_web.fetch_and_convert_url") as mock_fetch, patch("rag_manager.ingest") as mock_ingest:
-                mock_fetch.return_value = ("/fake/path.md", "text_doc")
+                mock_fetch.return_value = (fake_md, "text_doc")
                 mock_ingest.return_value = True
 
                 rc = oracle_agent._add_web_maintenance([f"--file:{urls_file}"])
@@ -68,6 +76,7 @@ class TestOracleAddWebCLI(unittest.TestCase):
                     ["https://example.com/page1.html", "https://example.com/page2.html"],
                 )
         finally:
+            os.environ.pop("ORACLE_CONFIG_FILE", None)
             shutil.rmtree(temp_dir)
 
     def test_add_web_ignores_inherited_doc_collection(self):
@@ -76,6 +85,10 @@ class TestOracleAddWebCLI(unittest.TestCase):
         from unittest.mock import patch
 
         temp_dir = tempfile.mkdtemp()
+        dummy_cfg = os.path.join(temp_dir, ".env.yml")
+        with open(dummy_cfg, "w", encoding="utf-8") as f:
+            f.write("phases:\n  - enabled: true\n    rag:\n      collection_name: default_col\n")
+        os.environ["ORACLE_CONFIG_FILE"] = dummy_cfg
         try:
             urls_file = os.path.join(temp_dir, "test_urls.txt")
             with open(urls_file, "w", encoding="utf-8") as f:
@@ -86,8 +99,12 @@ class TestOracleAddWebCLI(unittest.TestCase):
             os.environ["ORACLE_COLLECTION"] = "response_template"
             os.environ.pop("ORACLE_EXPLICIT_COLLECTION", None)
 
+            fake_md = os.path.join(temp_dir, "fake_doc.md")
+            with open(fake_md, "w", encoding="utf-8") as f:
+                f.write("# Fake Doc Content\n")
+
             with patch("rag_web.fetch_and_convert_url") as mock_fetch, patch("rag_manager.ingest") as mock_ingest:
-                mock_fetch.return_value = ("/fake/path.md", "text_doc")
+                mock_fetch.return_value = (fake_md, "text_doc")
                 mock_ingest.return_value = True
 
                 rc = oracle_agent._add_web_maintenance([f"--file:{urls_file}"])
@@ -97,6 +114,7 @@ class TestOracleAddWebCLI(unittest.TestCase):
                 self.assertNotEqual(resolved_coll, "response_template")
                 self.assertEqual(mock_ingest.call_args[1]["collection_name"], resolved_coll)
         finally:
+            os.environ.pop("ORACLE_CONFIG_FILE", None)
             os.environ.pop("ORACLE_COLLECTION", None)
             os.environ.pop("ORACLE_EXPLICIT_COLLECTION", None)
             shutil.rmtree(temp_dir)

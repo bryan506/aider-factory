@@ -22,27 +22,33 @@ class MockTable:
             raise RuntimeError("mock failure")
         self.called_with = metric
 
-print("Starting IVF Index Tests...")
+import unittest
 
-# Test 1: Below threshold -> no-op
-t1 = MockTable(IVF_PQ_MIN_ROWS - 1)
-_maybe_create_index(t1, "test_table")
-assert t1.called_with is None, "Failed: create_index called below threshold"
-print("  ✅ Below threshold check PASS")
+class TestIVFIndex(unittest.TestCase):
+    def test_ivf_index(self):
+        print("Starting IVF Index Tests...")
 
-# Test 2: Above threshold -> triggers with metric="cosine"
-t2 = MockTable(IVF_PQ_MIN_ROWS + 1)
-_maybe_create_index(t2, "test_table")
-assert t2.called_with == "cosine", f"Failed: create_index called with {t2.called_with}"
-print("  ✅ Above threshold check PASS")
+        # Test 1: Below threshold -> no-op
+        t1 = MockTable(IVF_PQ_MIN_ROWS - 1)
+        _maybe_create_index(t1, "test_table")
+        self.assertIsNone(t1.called_with, "Failed: create_index called below threshold")
+        print("  ✅ Below threshold check PASS")
 
-# Test 3: Failure during creation is caught
-t3 = MockTable(IVF_PQ_MIN_ROWS + 1, should_fail=True)
-try:
-    _maybe_create_index(t3, "test_table")
-    print("  ✅ Exception correctly caught PASS")
-except Exception as e:
-    print(f"  ❌ Failed: Exception propagated: {e}")
-    sys.exit(1)
+        # Test 2: Above threshold -> triggers with metric="cosine"
+        t2 = MockTable(IVF_PQ_MIN_ROWS + 1)
+        _maybe_create_index(t2, "test_table")
+        self.assertEqual(t2.called_with, "cosine", f"Failed: create_index called with {t2.called_with}")
+        print("  ✅ Above threshold check PASS")
 
-print("\n🎉 All IVF Index tests passed!")
+        # Test 3: Failure during creation is caught
+        t3 = MockTable(IVF_PQ_MIN_ROWS + 1, should_fail=True)
+        try:
+            _maybe_create_index(t3, "test_table")
+            print("  ✅ Exception correctly caught PASS")
+        except Exception as e:
+            self.fail(f"Exception propagated: {e}")
+
+        print("\n🎉 All IVF Index tests passed!")
+
+if __name__ == "__main__":
+    unittest.main()

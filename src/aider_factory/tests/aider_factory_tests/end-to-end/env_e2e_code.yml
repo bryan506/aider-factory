@@ -16,7 +16,7 @@ endpoints:
     rag_agent_api: "http://192.168.100.1:8080/v1"
     grounding_agent_api: "http://192.168.100.1:8090/v1"
     ocr_api_base: "" # Empty to route OCR to cloud Gemini model
-    embed_api_base: "http://192.168.100.1:8080/v1"
+    embed_api_base: "http://192.168.100.2:8081/v1"
 
 models:
     embed_model: "qwen3-embedding-8b-8k:LATEST"

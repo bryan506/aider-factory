@@ -5,6 +5,18 @@ import sys
 import tempfile
 from unittest.mock import MagicMock, patch
 
+ALL_KEYS_TO_POP = [
+    "GEMINI_API_KEY", "GOOGLE_API_KEY", "AIDER_GEMINI_API_KEY", "GOOGLE_GEMINI_API_KEY",
+    "ANTHROPIC_API_KEY", "AIDER_ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY", "AIDER_OPENAI_API_KEY",
+    "OPENROUTER_API_KEY", "AIDER_OPENROUTER_API_KEY",
+    "GROQ_API_KEY", "AIDER_GROQ_API_KEY",
+    "DEEPSEEK_API_KEY", "AIDER_DEEPSEEK_API_KEY",
+    "MISTRAL_API_KEY", "AIDER_MISTRAL_API_KEY",
+    "OPENCODE_API_KEY", "LITELLM_API_KEY", "LITELLM_BASE_URL",
+    "AIDER_HELPER_API_BASE", "AIDER_HELPER_MODEL"
+]
+
 script_dir = os.path.dirname(os.path.abspath(__file__))
 python_module_dir = os.path.abspath(os.path.join(script_dir, "../../python"))
 if python_module_dir not in sys.path:
@@ -21,7 +33,7 @@ mock_response = [mock_chunk]
 
 
 def test_01_api_key_detection():
-    old_env = {k: os.environ.get(k) for k in ["GEMINI_API_KEY", "OPENAI_API_KEY", "AIDER_HELPER_API_BASE", "LITELLM_API_KEY"]}
+    old_env = {k: os.environ.get(k) for k in ALL_KEYS_TO_POP}
     for k in old_env:
         os.environ.pop(k, None)
 
@@ -47,39 +59,40 @@ def test_02_helper_session_persistence_and_clear():
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp_session, \
          tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as tmp_yaml:
         tmp_yaml.write("name: test")
-        tmp_yaml.flush()
+        session_path = tmp_session.name
+        yaml_path = tmp_yaml.name
 
-        try:
-            with patch("bootstrap.get_helper_session_file", return_value=tmp_session.name), \
-                 patch("litellm.completion", return_value=mock_response), \
-                 patch("os.environ", {"GEMINI_API_KEY": "test-key"}):
+    try:
+        with patch("bootstrap.get_helper_session_file", return_value=session_path), \
+             patch("litellm.completion", return_value=mock_response), \
+             patch("os.environ", {"GEMINI_API_KEY": "test-key"}):
 
-                # Turn 1
-                bootstrap.run_query("instruction", tmp_yaml.name, "context_a.py", ask_mode=True)
-                with open(tmp_session.name, "r") as f:
-                    sess_data_1 = json.load(f)
-                assert len(sess_data_1) == 3, "Should initialize system + turn 1 prompt/response"
-                assert "<reference_schema>" in sess_data_1[1]["content"], "Reference schema must be persistently appended on Turn 1"
-                assert "endpoints:" in sess_data_1[1]["content"], "Must load complete_env.yml into reference schema"
-                assert "<yaml_documentation>" not in sess_data_1[1]["content"], "YAML docs must NOT be loaded in default mode"
+            # Turn 1
+            bootstrap.run_query("instruction", yaml_path, "context_a.py", ask_mode=True)
+            with open(session_path, "r") as f:
+                sess_data_1 = json.load(f)
+            assert len(sess_data_1) == 3, "Should initialize system + turn 1 prompt/response"
+            assert "<reference_schema>" in sess_data_1[1]["content"], "Reference schema must be persistently appended on Turn 1"
+            assert "endpoints:" in sess_data_1[1]["content"], "Must load complete_env.yml into reference schema"
+            assert "<yaml_documentation>" not in sess_data_1[1]["content"], "YAML docs must NOT be loaded in default mode"
 
-                # Turn 2
-                bootstrap.run_query("instruction 2", tmp_yaml.name, "context_a.py", ask_mode=True)
-                with open(tmp_session.name, "r") as f:
-                    sess_data_2 = json.load(f)
-                assert len(sess_data_2) == 5, "Session must accumulate messages directly without hashing reset"
-                assert "<reference_schema>" not in sess_data_2[3]["content"], "Reference schema must NOT be appended again on Turn 2"
+            # Turn 2
+            bootstrap.run_query("instruction 2", yaml_path, "context_a.py", ask_mode=True)
+            with open(session_path, "r") as f:
+                sess_data_2 = json.load(f)
+            assert len(sess_data_2) == 5, "Session must accumulate messages directly without hashing reset"
+            assert "<reference_schema>" not in sess_data_2[3]["content"], "Reference schema must NOT be appended again on Turn 2"
 
-                # Test session clearing
-                bootstrap.clear_helper_session()
-                assert not os.path.exists(tmp_session.name), "Clear must remove the session file from disk"
-        finally:
-            for f in [tmp_session.name, tmp_yaml.name]:
-                if os.path.exists(f):
-                    try:
-                        os.remove(f)
-                    except OSError:
-                        pass
+            # Test session clearing
+            bootstrap.clear_helper_session()
+            assert not os.path.exists(session_path), "Clear must remove the session file from disk"
+    finally:
+        for f in [session_path, yaml_path]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
 
 
 def test_03_query_prefix_auto_detection():
@@ -325,13 +338,19 @@ def test_11_ask_and_terminal_zero_directory_creation():
 
 def test_12_helper_cloud_model_omits_api_key():
     with patch("litellm.completion", return_value=mock_response) as mock_comp:
-        for k in ["AIDER_HELPER_API_BASE", "AIDER_HELPER_MODEL"]:
-            os.environ.pop(k, None)
-        os.environ["GEMINI_API_KEY"] = "test-key"
-        bootstrap.run_query("Explain concepts", None, "", ask_mode=True)
-        mock_comp.assert_called()
-        kwargs = mock_comp.call_args[1]
-        assert "api_key" not in kwargs, "Cloud helper queries must not pass explicit api_key in kwargs!"
+        old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
+        try:
+            os.environ["GEMINI_API_KEY"] = "test-key"
+            bootstrap.run_query("Explain concepts", None, "", ask_mode=True)
+            mock_comp.assert_called()
+            kwargs = mock_comp.call_args[1]
+            assert "api_key" not in kwargs, "Cloud helper queries must not pass explicit api_key in kwargs!"
+        finally:
+            for k, v in old_env.items():
+                if v is not None:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
 
 
 def test_13_workspace_doc_override_precedence():
@@ -456,10 +475,7 @@ def test_17_bootstrap_router_model_selection():
 
 def test_18_bootstrap_zero_key_still_writes_file():
     """With no keys and no router, bootstrap still produces valid YAML."""
-    old_env = {}
-    for k in ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-              "LITELLM_BASE_URL", "AIDER_HELPER_API_BASE", "LITELLM_API_KEY"]:
-        old_env[k] = os.environ.pop(k, None)
+    old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
     try:
         with tempfile.TemporaryDirectory() as tmp:
             open(os.path.join(tmp, "pytest.ini"), "w").close()
@@ -471,7 +487,7 @@ def test_18_bootstrap_zero_key_still_writes_file():
             import yaml
             with open(yaml_path, "r") as f:
                 cfg = yaml.safe_load(f)
-            assert cfg["working_directory"] == tmp
+            assert os.path.normpath(cfg["working_directory"]) == os.path.normpath(tmp)
             assert "name:" in open(yaml_path).read()
     finally:
         for k, v in old_env.items():
@@ -481,9 +497,7 @@ def test_18_bootstrap_zero_key_still_writes_file():
 
 def test_19_bootstrap_no_router_preserves_placeholders():
     """Without LITELLM_BASE_URL, template placeholder endpoints are preserved."""
-    old_env = {}
-    for k in ["LITELLM_BASE_URL", "AIDER_HELPER_API_BASE"]:
-        old_env[k] = os.environ.pop(k, None)
+    old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
     try:
         with tempfile.TemporaryDirectory() as tmp:
             open(os.path.join(tmp, "pytest.ini"), "w").close()
@@ -594,8 +608,7 @@ def test_23_select_models_edge_cases():
 def test_24_generated_yaml_is_valid_yaml():
     """Regex substitution must never corrupt YAML syntax on any path."""
     import yaml
-    old_env = {k: os.environ.pop(k, None) for k in
-               ["LITELLM_BASE_URL", "AIDER_HELPER_API_BASE", "LITELLM_API_KEY"]}
+    old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
     try:
         with tempfile.TemporaryDirectory() as tmp:
             open(os.path.join(tmp, "pytest.ini"), "w").close()
@@ -621,19 +634,19 @@ def test_24_generated_yaml_is_valid_yaml():
 
 def test_25_bootstrap_provisions_bash_wrappers():
     """After run_bootstrap(), .aider_factory/bash/ must contain executable wrappers."""
-    old_env = {k: os.environ.pop(k, None) for k in
-               ["LITELLM_BASE_URL", "AIDER_HELPER_API_BASE", "LITELLM_API_KEY"]}
+    old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
     try:
         with tempfile.TemporaryDirectory() as tmp:
             open(os.path.join(tmp, "pytest.ini"), "w").close()
             bootstrap.run_bootstrap(tmp)
-            bash_dir = os.path.join(tmp, ".aider_factory", "bash")
-            assert os.path.isdir(bash_dir), "bash/ directory must exist"
-            assert os.path.isfile(os.path.join(bash_dir, "factory"))
-            assert os.access(os.path.join(bash_dir, "factory"), os.X_OK)
-            assert os.path.isfile(os.path.join(bash_dir, "oracle"))
-            assert os.path.isfile(os.path.join(bash_dir, "validate"))
-            assert os.path.isfile(os.path.join(bash_dir, "apply"))
+            if sys.platform != "win32":
+                bash_dir = os.path.join(tmp, ".aider_factory", "bash")
+                assert os.path.isdir(bash_dir), "bash/ directory must exist"
+                assert os.path.isfile(os.path.join(bash_dir, "factory"))
+                assert os.access(os.path.join(bash_dir, "factory"), os.X_OK)
+                assert os.path.isfile(os.path.join(bash_dir, "oracle"))
+                assert os.path.isfile(os.path.join(bash_dir, "validate"))
+                assert os.path.isfile(os.path.join(bash_dir, "apply"))
     finally:
         for k, v in old_env.items():
             if v is not None:

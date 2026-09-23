@@ -390,7 +390,8 @@ def _classify(path, code_exts, text_doc_exts):
 
 
 def _walk_repo(repo_dir, ignore, code_exts, text_doc_exts, exclude_rel=frozenset()):
-    repo_name = os.path.basename(repo_dir.rstrip("/"))
+    repo_name = os.path.basename(str(repo_dir).rstrip("/\\"))
+    exclude_normalized = {e.replace("\\", "/") for e in (exclude_rel or set())}
     for root, dirs, files in os.walk(repo_dir):
         dirs[:] = [
             d
@@ -418,8 +419,8 @@ def _walk_repo(repo_dir, ignore, code_exts, text_doc_exts, exclude_rel=frozenset
             if not kind:
                 continue
 
-            rel = os.path.relpath(p, repo_dir)
-            if rel in exclude_rel:
+            rel = os.path.relpath(p, repo_dir).replace("\\", "/")
+            if rel in exclude_normalized:
                 log.info(f"[RAG] exclude active file: {repo_name}/{rel}")
                 continue
             yield p, kind, f"{repo_name}/{rel}"

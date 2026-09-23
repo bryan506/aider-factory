@@ -16,9 +16,9 @@ if _python_dir not in sys.path:
     sys.path.insert(0, _python_dir)
 
 try:
-    from aider_factory.python.env_utils import load_env_files
+    from aider_factory.python.env_utils import load_env_files, is_dummy_key
 except ImportError:
-    from env_utils import load_env_files
+    from env_utils import load_env_files, is_dummy_key
 
 load_env_files()
 
@@ -54,12 +54,15 @@ def _expand_file_list(file_patterns, base_dir):
     for pat in file_patterns:
         if glob.has_magic(pat):
             abs_pat = pat if os.path.isabs(pat) else os.path.join(str(base_dir), pat)
+            abs_pat = os.path.normpath(abs_pat)
             for match in sorted(glob.glob(abs_pat)):
-                rel_path = os.path.relpath(match, str(base_dir))
+                rel_path = os.path.relpath(match, str(base_dir)).replace("\\", "/")
                 if rel_path not in expanded:
                     expanded.append(rel_path)
-        elif pat not in expanded:
-            expanded.append(pat)
+        else:
+            clean_pat = pat.replace("\\", "/")
+            if clean_pat not in expanded:
+                expanded.append(clean_pat)
 
     return expanded
 
@@ -148,10 +151,10 @@ def _resolve_job_debate_collection(
             chosen = raw.strip()
 
     if chosen and chosen != "*" and not os.path.isabs(chosen):
-        db_dir = os.path.join(rag_context_root, chosen, "lancedb")
+        db_dir = os.path.join(rag_context_root, chosen, "lancedb").replace("\\", "/")
     else:
         db_dir = (
-            os.path.join(rag_context_root, default_collection, "lancedb")
+            os.path.join(rag_context_root, default_collection, "lancedb").replace("\\", "/")
             if default_collection and default_collection != "*"
             else ""
         )
@@ -227,7 +230,7 @@ def resolve_template_path(path_val, project_directory=None):
 
     for cand in workspace_candidates:
         if os.path.isfile(cand):
-            return cand
+            return cand.replace("\\", "/")
 
     # Package Fallback Candidates (Checked only if workspace has no matching file)
     pkg_candidates = [
@@ -239,9 +242,32 @@ def resolve_template_path(path_val, project_directory=None):
 
     for cand in pkg_candidates:
         if os.path.isfile(cand):
-            return cand
+            return cand.replace("\\", "/")
 
-    return os.path.join(base_proj, path_val)
+    return os.path.join(base_proj, path_val).replace("\\", "/")
+
+
+class _TeeWriter:
+    """Write-through wrapper: every write goes to both the original stream and a log file.
+    Used on Windows where os.dup2 on fd 1/2 is unreliable with buffered I/O."""
+
+    def __init__(self, original, log_file):
+        self._original = original
+        self._log = log_file
+
+    def write(self, data):
+        self._original.write(data)
+        self._log.write(data)
+        self._log.flush()
+
+    def flush(self):
+        self._original.flush()
+
+    def fileno(self):
+        return self._original.fileno()
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
 
 
 class OSTee:
@@ -252,19 +278,30 @@ class OSTee:
 
     def __init__(self, log_path: str):
         self.log_path = log_path
-        self.orig_stdout_fd = os.dup(1)
-        self.orig_stderr_fd = os.dup(2)
-
-        self.pipe_r, self.pipe_w = os.pipe()
-
-        os.dup2(self.pipe_w, 1)
-        os.dup2(self.pipe_w, 2)
-
         self.log_file = open(self.log_path, "a", encoding="utf-8", errors="replace")
 
-        self.running = True
-        self.thread = threading.Thread(target=self._pump, daemon=True)
-        self.thread.start()
+        if sys.platform == "win32":
+            # Windows: os.dup2 on fd 1/2 is unreliable with Python buffered I/O
+            # and child subprocesses. Redirect sys.stdout/stderr to _TeeWriter
+            # objects that write to both the original stream and the log file.
+            self._orig_stdout = sys.stdout
+            self._orig_stderr = sys.stderr
+            sys.stdout = _TeeWriter(self._orig_stdout, self.log_file)
+            sys.stderr = _TeeWriter(self._orig_stderr, self.log_file)
+            self.orig_stdout_fd = None
+            self.thread = None
+        else:
+            # POSIX (Linux + macOS): fd-level redirection captures ALL output
+            # including raw child subprocess writes.
+            self._orig_stdout = None
+            self.orig_stdout_fd = os.dup(1)
+            self.orig_stderr_fd = os.dup(2)
+            self.pipe_r, self.pipe_w = os.pipe()
+            os.dup2(self.pipe_w, 1)
+            os.dup2(self.pipe_w, 2)
+            self.running = True
+            self.thread = threading.Thread(target=self._pump, daemon=True)
+            self.thread.start()
 
     def _pump(self):
         while self.running:
@@ -280,23 +317,29 @@ class OSTee:
                 break
 
     def stop(self):
-        self.running = False
-        sys.stdout.flush()
-        sys.stderr.flush()
-        os.dup2(self.orig_stdout_fd, 1)
-        os.dup2(self.orig_stderr_fd, 2)
-        try:
-            os.close(self.pipe_w)
-        except OSError:
-            pass
-        self.thread.join(timeout=1.0)
-        try:
-            os.close(self.pipe_r)
-        except OSError:
-            pass
-        os.close(self.orig_stdout_fd)
-        os.close(self.orig_stderr_fd)
-        self.log_file.close()
+        if sys.platform == "win32":
+            # Restore original sys.stdout / sys.stderr
+            sys.stdout = self._orig_stdout
+            sys.stderr = self._orig_stderr
+            self.log_file.close()
+        else:
+            self.running = False
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.dup2(self.orig_stdout_fd, 1)
+            os.dup2(self.orig_stderr_fd, 2)
+            try:
+                os.close(self.pipe_w)
+            except OSError:
+                pass
+            self.thread.join(timeout=1.0)
+            try:
+                os.close(self.pipe_r)
+            except OSError:
+                pass
+            os.close(self.orig_stdout_fd)
+            os.close(self.orig_stderr_fd)
+            self.log_file.close()
 
 
 if __name__ in ("__main__", "__test__"):
@@ -718,12 +761,16 @@ Options:
             rag_env["ORACLE_RANKING_API_BASE"] = ranking_api_base
         if rag_embed_api_base:
             rag_env["ORACLE_EMBED_API_BASE"] = rag_embed_api_base
+        # Resolve real key for LiteLLM routers (Lemonade, OpenRouter, etc.);
+        # fall back to "sk-dummy" for local llama.cpp / LM Studio.
+        _router_key = os.environ.get("LITELLM_API_KEY", "")
+        _router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
         if RAG_AGENT_API_BASE:
             rag_env["ORACLE_AGENT_API_BASE"] = RAG_AGENT_API_BASE
-            rag_env["ORACLE_AGENT_API_KEY"] = "sk-dummy"
+            rag_env["ORACLE_AGENT_API_KEY"] = _router_key
         if ARCHITECT_API_BASE:
             rag_env["ORACLE_ARCHITECT_API_BASE"] = ARCHITECT_API_BASE
-            rag_env["ORACLE_ARCHITECT_API_KEY"] = "sk-dummy"
+            rag_env["ORACLE_ARCHITECT_API_KEY"] = _router_key
         # Grounding verifier -> validator.py reads these as env-default args (every path inherits
         # rag_env). Absent when grounding_agent is unset -> validator falls back to cosine.
         if GROUNDING_AGENT:
@@ -732,7 +779,7 @@ Options:
             rag_env["GROUNDING_ENTAIL_THRESHOLD"] = str(entail_threshold)
             if GROUNDING_API_BASE:
                 rag_env["GROUNDING_AGENT_API_BASE"] = GROUNDING_API_BASE
-                rag_env["GROUNDING_AGENT_API_KEY"] = "sk-dummy"
+                rag_env["GROUNDING_AGENT_API_KEY"] = _router_key
 
         # If this phase ingests, build the params for rag_manager.ingest(...) which
         # orchestrate.py runs as the first step of this phase's task (movable, repeatable).
@@ -1175,15 +1222,23 @@ Options:
 
                 # escalation params (grounding): strict grounding gate + verbatim apply + finalize.
                 if escalate:
-                    _grounding_gate = (
-                        ".aider_factory/bash/validate "
-                        f"--file {shlex.quote(_out_abs)} --source {shlex.quote(_source_abs)} "
-                        f"--report {shlex.quote(_gate_report)} --db {shlex.quote(phase_db_dir)} "
-                        f"--collection {shlex.quote(_table)} --tag {validation_tag} "
-                        f"--baseline-ledger {shlex.quote(_dledger_abs)} "
-                        f"--region-threshold {region_threshold} --region-margin {region_margin} "
-                        f"--region-paragraphs {region_paragraphs} --top-k {region_top_k}"
+                    _validator_script = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)), "validator.py"
                     )
+                    _grounding_gate = [
+                        sys.executable, _validator_script,
+                        "--file", _out_abs,
+                        "--source", _source_abs,
+                        "--report", _gate_report,
+                        "--db", phase_db_dir,
+                        "--collection", _table,
+                        "--tag", validation_tag,
+                        "--baseline-ledger", _dledger_abs,
+                        "--region-threshold", str(region_threshold),
+                        "--region-margin", str(region_margin),
+                        "--region-paragraphs", str(region_paragraphs),
+                        "--top-k", str(region_top_k),
+                    ]
                     _debate = {
                         "template": deliberate_plan,
                         "issue": _context_md,

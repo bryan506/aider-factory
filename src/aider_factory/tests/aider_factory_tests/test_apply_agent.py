@@ -276,7 +276,10 @@ Details on the fix.
             cmd = mock_popen.call_args_list[0][0][0]
         else:
             cmd = mock_sub_run.call_args_list[0][0][0]
-        self.assertEqual(cmd[0], "aider")
+        self.assertTrue(
+            any(os.path.basename(c).lower().startswith("aider") for c in cmd[:3]),
+            f"Expected aider executable within initial command tokens, got: {cmd[:3]}",
+        )
         self.assertIn("--message-file", cmd)
         self.assertIn(active_spec, cmd)
         self.assertIn(target_file, cmd)

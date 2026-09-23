@@ -57,12 +57,12 @@ class TestE2E4JobPipeline(unittest.TestCase):
             factory = AiderFactory(project_dir=str(proj), session_name="test_session", session_dir=str(sess_dir))
 
             # Simulate Phase 0 completion
-            completed_files = [str(strat_file.relative_to(proj))]
+            completed_files = [strat_file.relative_to(proj).as_posix()]
 
             # Build Phase 1 DAG Tasks manually following run_workflow logic
             env_prefix = "phase1"
-            target_files = [str(mod_a.relative_to(proj)), str(mod_b.relative_to(proj))]
-            extra_editable = [str(helpers.relative_to(proj))]
+            target_files = [mod_a.relative_to(proj).as_posix(), mod_b.relative_to(proj).as_posix()]
+            extra_editable = [helpers.relative_to(proj).as_posix()]
             sticky_context = True
             run_job_one = True
             run_job_two = True
@@ -174,7 +174,7 @@ class TestE2E4JobPipeline(unittest.TestCase):
             self.assertEqual(factory.tasks["phase1_apply_mod_a"].depends_on, ["phase1_verify_mod_a"])
 
             # 3. Context stickiness parity across Job 1, Job 2, and Job 3
-            expected_strat = str(strat_file.relative_to(proj))
+            expected_strat = strat_file.relative_to(proj).as_posix()
             self.assertIn(expected_strat, factory.tasks["phase1_job1_mod_a"].read_files)
             self.assertIn(expected_strat, factory.tasks["phase1_job2_mod_a"].read_files)
             self.assertIn(expected_strat, factory.tasks["phase1_job3_mod_a"].read_files)
@@ -591,21 +591,21 @@ class TestE2E4JobPipeline(unittest.TestCase):
                 self.assertTrue(t_j1.deliberate["template"].endswith("implement.md"))
                 self.assertEqual(t_j1.deliberate["loops"], 0)
                 self.assertEqual(t_j1.rag_env["ORACLE_COLLECTION"], "coll_exchange")
-                self.assertIn("coll_exchange/lancedb", t_j1.rag_env["ORACLE_RAG_DB_DIR"])
+                self.assertIn("coll_exchange/lancedb", t_j1.rag_env["ORACLE_RAG_DB_DIR"].replace("\\", "/"))
 
                 # Verify Job 2 Heterogeneous Debate
                 t_j2 = tasks["p0_job2_debate_mod_a"]
                 self.assertTrue(t_j2.deliberate["template"].endswith("validate.md"))
                 self.assertEqual(t_j2.deliberate["loops"], 0)
                 self.assertEqual(t_j2.rag_env["ORACLE_COLLECTION"], "coll_risk_math")
-                self.assertIn("coll_risk_math/lancedb", t_j2.rag_env["ORACLE_RAG_DB_DIR"])
+                self.assertIn("coll_risk_math/lancedb", t_j2.rag_env["ORACLE_RAG_DB_DIR"].replace("\\", "/"))
 
                 # Verify Job 3 Heterogeneous Debate
                 t_j3 = tasks["p0_job3_debate_mod_a"]
                 self.assertTrue(t_j3.deliberate["template"].endswith("testing.md"))
                 self.assertEqual(t_j3.deliberate["loops"], 0)
                 self.assertEqual(t_j3.rag_env["ORACLE_COLLECTION"], "coll_mocks")
-                self.assertIn("coll_mocks/lancedb", t_j3.rag_env["ORACLE_RAG_DB_DIR"])
+                self.assertIn("coll_mocks/lancedb", t_j3.rag_env["ORACLE_RAG_DB_DIR"].replace("\\", "/"))
             finally:
                 sys.argv = orig_argv
                 os.chdir(orig_cwd)

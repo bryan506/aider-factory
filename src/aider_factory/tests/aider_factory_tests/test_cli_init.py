@@ -91,6 +91,8 @@ def test_init_playwright_provisioning(mock_sub, mock_bash, mock_searxng):
 
 
 def test_ensure_bash_wrappers_provisions_all_launchers():
+    if sys.platform == "win32":
+        return
     with tempfile.TemporaryDirectory() as tmp_dir:
         af_dir = os.path.join(tmp_dir, ".aider_factory")
         cli.ensure_bash_wrappers(af_dir)

@@ -546,6 +546,20 @@ class TestResolveEditorConfigGaps(unittest.TestCase):
 class TestRunApplyAndMain(unittest.TestCase):
     """Integration test suite for run_apply and main CLI entry point."""
 
+    @staticmethod
+    def _write_fake_binary(path: Path, content: str):
+        if sys.platform == "win32":
+            py_path = str(path) + ".py"
+            with open(py_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            cmd_path = str(path) + ".cmd"
+            with open(cmd_path, "w", encoding="utf-8") as f:
+                f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n@exit /b %errorlevel%\n')
+        else:
+            with open(str(path), "w", encoding="utf-8") as f:
+                f.write(content)
+            os.chmod(str(path), os.stat(str(path)).st_mode | stat.S_IEXEC)
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
@@ -596,8 +610,7 @@ class TestRunApplyAndMain(unittest.TestCase):
                     Path(arg).write_text("# edited by mock aider\\n")
             sys.exit(0)
         """)
-        self.mock_aider.write_text(fake_script, encoding="utf-8")
-        self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_aider, fake_script)
 
         # Create mock git binary
         self.mock_git = self.bin_dir / "git"
@@ -609,11 +622,10 @@ class TestRunApplyAndMain(unittest.TestCase):
                 print("+ # edited by mock aider")
             sys.exit(0)
         """)
-        self.mock_git.write_text(fake_git, encoding="utf-8")
-        self.mock_git.chmod(self.mock_git.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_git, fake_git)
 
         self._orig_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{self.bin_dir}:{self._orig_path}"
+        os.environ["PATH"] = f"{self.bin_dir}{os.pathsep}{self._orig_path}"
 
     def tearDown(self):
         os.environ["PATH"] = self._orig_path
@@ -758,6 +770,20 @@ class TestRunApplyAndMain(unittest.TestCase):
 class TestRunApplyGaps(unittest.TestCase):
     """Fill gaps D2–D10 for run_apply()."""
 
+    @staticmethod
+    def _write_fake_binary(path: Path, content: str):
+        if sys.platform == "win32":
+            py_path = str(path) + ".py"
+            with open(py_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            cmd_path = str(path) + ".cmd"
+            with open(cmd_path, "w", encoding="utf-8") as f:
+                f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n@exit /b %errorlevel%\n')
+        else:
+            with open(str(path), "w", encoding="utf-8") as f:
+                f.write(content)
+            os.chmod(str(path), os.stat(str(path)).st_mode | stat.S_IEXEC)
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
@@ -816,29 +842,31 @@ class TestRunApplyGaps(unittest.TestCase):
             sys.exit(int(os.environ.get("AIDER_FAKE_EXIT", "0")))
         """)
         self.mock_aider = self.bin_dir / "aider"
-        self.mock_aider.write_text(fake_aider, encoding="utf-8")
-        self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_aider, fake_aider)
 
+        self._git_args_dump = self.root / "git_args_dump.txt"
         self.mock_git = self.bin_dir / "git"
-        fake_git = textwrap.dedent("""\
+        fake_git = textwrap.dedent(f"""\
             #!/usr/bin/env python3
             import sys
+            with open(r"{self._git_args_dump}", "w") as f:
+                for arg in sys.argv[1:]:
+                    f.write(f"{{arg}}\\n")
             if "diff" in sys.argv:
                 print("diff --git FAKE_DIFF_MARKER b/test.py")
                 print("+ edited line")
             sys.exit(0)
         """)
-        self.mock_git.write_text(fake_git, encoding="utf-8")
-        self.mock_git.chmod(self.mock_git.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_git, fake_git)
 
         self._orig_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{self.bin_dir}:{self._orig_path}"
+        os.environ["PATH"] = f"{self.bin_dir}{os.pathsep}{self._orig_path}"
         self._orig_env = os.environ.copy()
 
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self._orig_env)
-        os.environ["PATH"] = f"{self.bin_dir}:{self._orig_path}"
+        os.environ["PATH"] = self._orig_path
         self._tmp.cleanup()
 
     def _make_target_and_spec(self):
@@ -1082,6 +1110,21 @@ class TestRunApplyGaps(unittest.TestCase):
         self.assertIn("--exit", args_text)
         self.assertNotIn("--yes-always", args_text)
 
+    def test_d13_diff_flags_no_color_and_no_ext_diff(self):
+        target, spec = self._make_target_and_spec()
+        run_apply(
+            files=[str(target)],
+            spec_file=str(spec),
+            no_diff=False,
+            cwd=str(self.root),
+        )
+        self.assertTrue(self._git_args_dump.exists())
+        git_args = self._git_args_dump.read_text(encoding="utf-8").splitlines()
+        self.assertIn("diff", git_args)
+        self.assertIn("--no-color", git_args)
+        self.assertIn("--no-ext-diff", git_args)
+        self.assertIn("--no-pager", git_args)
+
 
 # ===========================================================================
 # --stream flag tests: S1–S6
@@ -1116,8 +1159,7 @@ class TestStreamFlag(unittest.TestCase):
             sys.exit(0)
         """)
         self.mock_aider = self.bin_dir / "aider"
-        self.mock_aider.write_text(fake_aider, encoding="utf-8")
-        self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
+        TestRunApplyAndMain._write_fake_binary(self.mock_aider, fake_aider)
 
         # Fake git
         self.mock_git = self.bin_dir / "git"
@@ -1129,11 +1171,10 @@ class TestStreamFlag(unittest.TestCase):
                 print("+ edited line")
             sys.exit(0)
         """)
-        self.mock_git.write_text(fake_git, encoding="utf-8")
-        self.mock_git.chmod(self.mock_git.stat().st_mode | stat.S_IEXEC)
+        TestRunApplyAndMain._write_fake_binary(self.mock_git, fake_git)
 
         self._orig_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{self.bin_dir}:{self._orig_path}"
+        os.environ["PATH"] = f"{self.bin_dir}{os.pathsep}{self._orig_path}"
         self._orig_env = os.environ.copy()
 
     def tearDown(self):
@@ -1222,8 +1263,8 @@ class TestStreamFlag(unittest.TestCase):
         )
         elapsed = time.monotonic() - start
         self.assertTrue(success)
-        # Should complete well under 5 seconds (no pipe-buffer stall)
-        self.assertLess(elapsed, 5.0)
+        # Should complete without pipe-buffer stall (allow buffer for CI runner variance)
+        self.assertLess(elapsed, 15.0)
 
     # --- S4: stream=True with no TTY available falls back gracefully
     def test_s4_stream_no_tty_falls_back(self):

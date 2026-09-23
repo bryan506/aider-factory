@@ -49,7 +49,7 @@ Aider is inherently **disk-aware**. Every turn, Aider scans all files currently 
 │                                           │                                                     │
 │                                           ▼                                                     │
 │  [Diff Telemetry Stream]                                                                        │
-│  • Runs: git --no-pager diff HEAD~1                                                             │
+│  • Runs: git --no-pager diff --no-color --no-ext-diff HEAD~1                                    │
 │  • Prints git diff to terminal or streams back into Architect's context                         │
 │  • Node 1 Architect resumes with 100% KV-cache reuse (<1.2s prompt eval)!                       │
 └─────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -97,7 +97,7 @@ aider-apply <files...> [options]
 | `--turns` | `-t` | `1` | Number of recent Architect turns to extract from chat history (e.g., `-t 3` for multi-turn context). |
 | `--model` | `-m` | `None` | Override the editor model (e.g., `openai/qwen3.6-27b-90k:LATEST`). |
 | `--session` | | `None` | Explicit session name to resolve chat history and `session.yml` from. If omitted, auto-discovers active session by `mtime`. |
-| `--no-diff` | | `False` | Suppress printing the `git --no-pager diff HEAD~1` output to stdout after execution. |
+| `--no-diff` | | `False` | Suppress printing the `git --no-pager diff --no-color --no-ext-diff HEAD~1` output to stdout after execution. |
 
 ---
 
@@ -135,11 +135,11 @@ To prevent headless editor output from corrupting the active interactive session
 - `.aider_factory/temp/.apply.input.history` — Isolated input log.
 
 ### Diff Telemetry Stream
-Upon completing the headless edit pass, `aider-apply` streams the resulting Git diff to stdout using:
+Upon completing the headless edit pass, `aider-apply` streams the resulting plain-text Git diff to stdout using:
 ```bash
-git --no-pager diff HEAD~1
+git --no-pager diff --no-color --no-ext-diff HEAD~1
 ```
-This can be suppressed using `--no-diff`.
+This suppresses ANSI escape sequences and custom external diff tools, preventing token bloat (~30–40% token savings) and ensuring optimal plain-text diff comprehension by downstream LLMs. This can be suppressed using `--no-diff`.
 
 ### Failure Modes & Exit Codes
 * **Exit Code 1 (Missing History)**: Triggered if `.aider.chat.history.md` cannot be found in the session path or workspace root.

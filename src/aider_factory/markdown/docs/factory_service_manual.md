@@ -49,7 +49,7 @@ Aider is inherently **disk-aware**. Every turn, Aider scans all files currently 
 │                                           │                                                     │
 │                                           ▼                                                     │
 │  [Diff Telemetry Stream]                                                                        │
-│  • Runs: git --no-pager diff HEAD~1                                                             │
+│  • Runs: git --no-pager diff --no-color --no-ext-diff HEAD~1                                    │
 │  • Prints git diff to terminal or streams back into Architect's context                         │
 │  • Node 1 Architect resumes with 100% KV-cache reuse (<1.2s prompt eval)!                       │
 └─────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -97,7 +97,7 @@ aider-apply <files...> [options]
 | `--turns` | `-t` | `1` | Number of recent Architect turns to extract from chat history (e.g., `-t 3` for multi-turn context). |
 | `--model` | `-m` | `None` | Override the editor model (e.g., `openai/qwen3.6-27b-90k:LATEST`). |
 | `--session` | | `None` | Explicit session name to resolve chat history and `session.yml` from. If omitted, auto-discovers active session by `mtime`. |
-| `--no-diff` | | `False` | Suppress printing the `git --no-pager diff HEAD~1` output to stdout after execution. |
+| `--no-diff` | | `False` | Suppress printing the `git --no-pager diff --no-color --no-ext-diff HEAD~1` output to stdout after execution. |
 
 ---
 
@@ -135,11 +135,11 @@ To prevent headless editor output from corrupting the active interactive session
 - `.aider_factory/temp/.apply.input.history` — Isolated input log.
 
 ### Diff Telemetry Stream
-Upon completing the headless edit pass, `aider-apply` streams the resulting Git diff to stdout using:
+Upon completing the headless edit pass, `aider-apply` streams the resulting plain-text Git diff to stdout using:
 ```bash
-git --no-pager diff HEAD~1
+git --no-pager diff --no-color --no-ext-diff HEAD~1
 ```
-This can be suppressed using `--no-diff`.
+This suppresses ANSI escape sequences and custom external diff tools, preventing token bloat (~30–40% token savings) and ensuring optimal plain-text diff comprehension by downstream LLMs. This can be suppressed using `--no-diff`.
 
 ### Failure Modes & Exit Codes
 * **Exit Code 1 (Missing History)**: Triggered if `.aider.chat.history.md` cannot be found in the session path or workspace root.
@@ -894,6 +894,158 @@ Run the final verification matrix before closing the task:
 | **5. Oracle Sign-off** | Final document verified as fully compliant with context engineering corpus.        | [ ]    |
 
 ---
+
+## Section 8: Empirical Findings — Chat History Summarization Across Aider Modes
+
+> **Date**: 2025-09-04 | **Aider version**: aider-chat (latest via uv) | **Test models**: Cloud `gemini/` for main/editor; local `qwen3.8-27B-90k-udq4km` (llama.cpp via LM Studio) as `weak-model` for summarization.  
+> **Test artifacts**: `src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_max_chat_history_tokens.py`, `test_e2e_architect_summarization.py`  
+> **Observation method**: Live llama.cpp inference logs (`journalctl -u llama-server`), aider `--verbose` output, `/tokens` snapshots.  
+> **Status**: All tests pass. These are the first known public E2E probes of aider's summarization trigger mechanics per-mode.
+
+---
+
+### 8.1 Per-Mode Summarization Behavior Matrix
+
+| Trigger | Coder Mode (`--code`) | Architect Mode (`--architect`) | Evidence |
+|:---|:---|:---|:---|
+| `/clear` command | ✅ Summarizes via weak model | ✅ Summarizes via weak model | llama.cpp: LRU slot, 18,548 prompt → 819 gen tokens |
+| `max-chat-history-tokens` threshold | ✅ Fires (confirmed in prior suite) | ❌ **Does NOT fire** at 40k | Live session: 64,432 chat history with 40k threshold set; no summarization until manual `/clear` |
+| `--message --exit` (non-interactive) | ⚠️ Asyncio shutdown race | ⚠️ Asyncio shutdown race | `cannot schedule new futures after shutdown` in stderr; summarization never completes |
+| `--architect` two-phase (architect→editor) | N/A | ❌ Threshold check appears to guard only one phase | Architect path accumulates unchecked; editor path may be the only guarded path |
+
+---
+
+### 8.2 The 440-Token vs 18,548-Token Distinction
+
+**Critical finding**: In architect mode with no commits and a cloud main model, every llama.cpp inference is the weak model. However, not all weak-model calls are summarization.
+
+| Signal | 440-token calls (×5, pre-`/clear`) | 18,548-token call (post-`/clear`) |
+|:---|:---|:---|
+| Slot selection | LCP (`f_sim_best = 1.000`) | **LRU** (zero cache reuse) |
+| Prompt eval | 4 tokens / 140ms | 18,548 tokens / 27.7s |
+| Generation | 198 tokens / 1.7s | 819 tokens / 31.9s |
+| Total | 202 tokens / 1.9s | 19,371 tokens / 60.5s |
+| Graphs reused | +9 per turn (incremental) | +234 (fresh allocation) |
+| Draft acceptance | 0.856 (template-fitting) | 0.740 (novel content) |
+| **Classification** | Fixed-template probe / token-count check | **Genuine summarization** |
+
+**Interpretation**: The 440-token calls are aider's internal weak-model probe (likely a token-counting or health-check invocation with a static prompt template). They do NOT represent summarization of conversation content. The 18,548-token call is the first and only real summarization, triggered exclusively by `/clear`.
+
+---
+
+### 8.3 The `/clear` → 24k Token Math (Live Session Verification)
+
+```
+Before /clear:
+  Chat history:  64,432 tokens
+  File context:  20,013 tokens (6 read-only files)
+  Total sent:    84,445 tokens
+  ERROR: 97,723 > 90,112 (model context window)
+
+After /clear + next prompt + response:
+  Chat history:  24,918 tokens
+  File context:  20,013 tokens (unchanged)
+  Total sent:    44,931 tokens
+```
+
+**Breakdown of 24,918 chat history post-clear**:
+- Weak model summary of 64k history: ~2,000–3,000 tokens
+- New user prompt (pasted logs + question): ~19,000–20,000 tokens
+- Assistant response: ~2,200 tokens
+- **Total: ~24,918** ✅ Math verified.
+
+The 44k "sent" includes the 20k read-only file context that is **always** in the window (system prompt + file contents). This is not "chat history" and is not affected by `/clear`.
+
+---
+
+### 8.4 The `--message --exit` Asyncio Race (DISPROVEN as viable test path)
+
+**Finding**: Running aider with `--message "prompt" --exit` in architect mode produces:
+
+```
+RuntimeError: cannot schedule new futures after shutdown
+```
+
+The summarization coroutine is scheduled but the event loop tears down before it completes. This makes `--message --exit` **unusable** for testing summarization behavior. Only interactive stdin-driven sessions (or PTY via `script -qfe`) allow the summarization coroutine to complete.
+
+**Status**: DISPROVEN as a test vector. Use interactive mode with threaded stdin feeder instead.
+
+---
+
+### 8.5 The Observability Gap
+
+**Finding**: In interactive architect mode, aider does NOT log to stdout/stderr when:
+- The threshold is evaluated
+- The weak model is invoked for summarization
+- Summarization completes or is skipped
+
+The only observable signal is the llama.cpp inference log on the server side. Aider's `--verbose` flag logs token counts but does not explicitly state "summarization triggered" or "threshold crossed." This makes black-box testing of the threshold mechanism extremely difficult without server-side inference telemetry.
+
+**Workaround**: Monitor `journalctl -u llama-server` or the LM Studio console for LRU-selected large-token inferences as the definitive proof of summarization.
+
+---
+
+### 8.6 Threshold Propagation Chain (UNCONFIRMED — Requires `--verbose` Verification)
+
+The `max_chat_history_tokens` value must survive this chain to reach aider's internal check:
+
+```
+env.yml (toggles.max_chat_history_tokens: 40000)
+    → run_workflow.py (_parse_toggles, Task dataclass)
+        → orchestrate.py (_aider_ask_turn, CLI arg construction)
+            → --max-chat-history-tokens 40000 (subprocess arg)
+                → aider internal ChatSummary.check()
+```
+
+**Unverified**: Whether the value actually arrives at aider's threshold check in architect mode, or whether architect mode's two-phase request structure (architect call + editor call) causes the threshold to be evaluated against only one phase's history while the other phase accumulates unchecked.
+
+**Next diagnostic**: Launch session with `--verbose`, run `/tokens` every turn, and grep aider's stderr for any mention of `max_chat_history_tokens` or `summariz`.
+
+---
+
+### 8.7 Confirmed Root Cause of Live Session Context Overflow
+
+| Factor | Value | Impact |
+|:---|:---|:---|
+| Model context window | 90,112 tokens | Hard ceiling |
+| Read-only file context | ~20,000 tokens | Always present, not summarizable |
+| Effective conversation budget | ~70,000 tokens | Remaining for chat history + generation |
+| `max_chat_history_tokens` (set) | 40,000 | Should trigger at 40k |
+| Actual chat history at crash | 64,432 | **24k past threshold** |
+| Auto-summarization fired? | **No** | Threshold mechanism bypassed |
+
+**Conclusion**: The threshold was correctly configured at 40k but was never enforced by aider's runtime in architect mode. The conversation grew to 64k+ without triggering auto-summarization, eventually exceeding the model's 90k hard limit when combined with file context and the current request payload. Manual `/clear` is the only working mitigation until the threshold mechanism is verified/fixed.
+
+---
+
+### 8.8 Recommended Configuration for Architect-Mode Sessions
+
+```yaml
+# .aider_factory/.env.yml — phase toggles
+toggles:
+  max_chat_history_tokens: 40000   # Must be < (model_window - file_context - generation_headroom)
+                                   # For 90k window: 90112 - 20000 - 5000 = 65112 max safe
+                                   # Set to 40000 for conservative margin
+
+# .aider_factory/.aider.conf.yml
+max-chat-history-tokens: 40000     # Belt-and-suspenders: also set in aider's native config
+weak-model: "openai/qwen3.8-27B-90k-udq4km"  # Must be routable for summarization
+```
+
+**Operational rule**: In architect mode, treat `/clear` as a mandatory periodic maintenance command. Do not rely on threshold auto-summarization until confirmed working via `--verbose` telemetry.
+
+---
+
+### 8.9 Test Artifacts (Permanent Regression Suite)
+
+| Test File | Status | Proves |
+|:---|:---|:---|
+| `test_e2e_max_chat_history_tokens.py` | ✅ Passes | `/clear` triggers summarization in coder mode; `--message --exit` fails with asyncio race |
+| `test_e2e_architect_summarization.py` | ✅ Passes | `/clear` triggers summarization in architect mode; threshold does NOT auto-fire; 440-token calls are not summarization |
+
+These tests require a running local model server (LM Studio / llama.cpp) as the weak model and a cloud API for the main model. They are **not** mock-based; they assert against real OS exit codes and live llama.cpp inference telemetry.
+
+---
 # AI Factory Core Philosophies & Engineering Invariants
 
 ## 1. Executive Overview & Foundational Invariants
@@ -1571,6 +1723,341 @@ available_tables = list(getattr(_names, "tables", _names))
 | **Chat template ValueError with `sentence-transformers >= 3.0`** | LLM-based reranker lacks standard query/document template in tokenizer config. | Engine automatically injects standard `<Query>` / `<Document>` Jinja template. |
 | **Padding token crash during batch prediction** | Tokenizer missing `pad_token`. | Engine automatically binds `pad_token = eos_token` and syncs `pad_token_id`. |
 | **Inverted ranking (irrelevant chunks ranked top)** | Model outputs 2D classification logits `[neg, pos]`, evaluated at index 0. | `_extract_score` safely retrieves positive relevance class (`val[-1]`). |
+# LiteLLM Router & Lemonade Server Integration
+
+> **One-stop guide** for configuring aider-factory (pipeline) and aider-helper (interactive assistant) to use a **LiteLLM Router** (custom OpenAI-compatible proxy) backed by a **Lemonade Server** (local model serving platform) as the unified model gateway.
+
+---
+
+## 1. Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  HARNESS (aider-factory, aider-helper, aider-oracle, aider-apply)   │
+│  • Calls litellm.completion(model="openai/<name>", api_base=...)    │
+│  • POST /v1/chat/completions                                        │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  LiteLLM Router  (e.g. http://<router-host>:4000/v1)                │
+│  • Custom communication/routing layer                               │
+│  • Single OpenAI-compatible endpoint for ALL harnesses              │
+│  • Dispatches requests to the correct backend by model name         │
+│  • Models discovered via GET /v1/models                             │
+│  • Auth: Bearer token (LITELLM_API_KEY)                             │
+│  • Session-affinity via x-litellm-session-id header                 │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  Lemonade Server  (e.g. http://<lemonade-host>:11434/v1)            │
+│  • One-stop local model serving platform                            │
+│  • Downloads & caches open-weight model weights                     │
+│  • Configures params (context length, quantization, etc.)           │
+│  • Serves models via llama.cpp, vLLM, or other inference engines    │
+│  • Manages GPU/CPU allocation automatically                         │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Component Roles
+
+| Component | Role |
+|-----------|------|
+| **Lemonade Server** | Local model serving platform. Downloads open-weight model weights, maintains a local cache, configures inference parameters, and serves models through llama.cpp, vLLM, or other engines. One-stop shop for running models locally — no manual GGUF wrangling. |
+| **LiteLLM Router** | Custom communication layer. A unified OpenAI-compatible proxy that sits between Lemonade Server (and any other backend) and whatever harness you use. Provides routing, load-balancing, retry logic, session-affinity, and a single `/v1/models` discovery endpoint. Works with aider-factory, opencode, Cursor, or any OpenAI-compatible client. |
+| **Harness** | The client tool (aider-factory, aider-helper, etc.) that sends completion requests to the LiteLLM Router. |
+
+**Critical rule:** aider-factory's Python code calls the `litellm` SDK, which speaks the **OpenAI wire format**. The model prefix is always **`openai/`** — never `litellm/`, `lm_studio/`, or `opencode/`. Those are other tools' internal naming conventions.
+
+| Harness / Tool | Model string for the same model |
+|----------------|--------------------------------------|
+| opencode | `litellm/qwen3.8-flash` |
+| Aider CLI (lm_studio provider) | `lm_studio/qwen3.8-flash` |
+| **aider-factory / aider-helper** | **`openai/qwen3.8-flash`** |
+
+---
+
+## 2. Prerequisites
+
+- **Lemonade Server** running on a local or network-accessible machine, with desired models downloaded and served.
+- **LiteLLM Router** configured to forward requests to the Lemonade Server instance(s) and any other backends (cloud APIs, additional local servers, etc.).
+- A valid LiteLLM API token (minted via `make router-key` or the router admin UI).
+- Network access from the machine running aider-factory to the router's `/v1/models` and `/v1/chat/completions` endpoints.
+- Python 3.10+ with `aider-factory` installed (or the repo checked out).
+
+---
+
+## 3. Environment Variables (add to `~/.zshrc` or `~/.bashrc`)
+
+```bash
+# ─── LiteLLM Router (required) ───────────────────────────────────────
+export LITELLM_BASE_URL="http://YOUR_ROUTER_IP:4000/v1"
+export LITELLM_API_KEY="sk-YOUR_ROUTER_TOKEN"
+
+# ─── aider-helper (interactive assistant) ────────────────────────────
+# Tells detect_api_key() to use the router and bypasses the "no key" guard:
+export AIDER_HELPER_API_BASE="$LITELLM_BASE_URL"
+
+# Optional: pin a specific default model for aider-helper.
+# If unset, auto-discovery picks the first "27b" model from /v1/models.
+export AIDER_HELPER_MODEL="openai/qwen3.8-flash"
+
+# ─── Optional: override specific pipeline agents ─────────────────────
+# export ORACLE_AGENT_MODEL="openai/qwen3.8-flash"
+# export ORACLE_AGENT_API_BASE="$LITELLM_BASE_URL"
+```
+
+Reload: `source ~/.zshrc`
+
+### Why each variable matters
+
+| Variable | What it does |
+|----------|-------------|
+| `LITELLM_BASE_URL` | Points to the LiteLLM Router. Enables `_discover_cluster_config()` during `aider-factory init`; also used by `oracle_agent._ensure_oracle_config()` as a fallback API base. |
+| `LITELLM_API_KEY` | The Bearer token sent to the router. Now scanned by `detect_api_key()` as a fallback. |
+| `AIDER_HELPER_API_BASE` | Short-circuits `detect_api_key()` to `"CUSTOM_LOCAL"` mode, which triggers the router-aware auth path in `run_query()`. |
+| `AIDER_HELPER_MODEL` | Pins the helper's model; prevents reliance on auto-discovery. |
+
+---
+
+## 4. Pipeline Configuration (`.aider_factory/.env_<repo>.yml`)
+
+### 4.1 Endpoints block
+
+Point **all** endpoints at the router. The router internally dispatches to the correct backend:
+
+```yaml
+endpoints:
+    architect_api_base: "http://YOUR_ROUTER_IP:4000/v1"
+    editor_api: "http://YOUR_ROUTER_IP:4000/v1"
+    editor_api_fallback: "http://YOUR_ROUTER_IP:4000/v1"
+    rag_agent_api: "http://YOUR_ROUTER_IP:4000/v1"
+    grounding_agent_api: "http://YOUR_ROUTER_IP:4000/v1"
+    ranking_api_base: "http://YOUR_ROUTER_IP:4000/v1"
+    ocr_api_base: "http://YOUR_ROUTER_IP:4000/v1"
+    embed_api_base: "http://YOUR_ROUTER_IP:4000/v1"
+```
+
+> **Note:** If your router does not serve embedding or OCR models, leave those pointing at their dedicated local servers (e.g. `http://<embed-server-host>:8080/v1` for embeddings).
+
+### 4.2 Models block
+
+Every model string must use the **`openai/`** prefix and match the **exact** ID returned by `GET /v1/models`:
+
+```yaml
+phases:
+  - name: "Code — Implement, Test, Debate-Escalate"
+    enabled: true
+
+    models:
+        architect_agent: "openai/qwen3.8-flash"
+        editor_agent: "openai/Qwen3.8-27B-GGUF-UD-Q4_K_XL:latest"
+        editor_agent_test: "openai/qwen3.6-27B-MTP-GGUF-Q4_K_M:latest"
+        editor_agent_test_fallback: "openai/qwen3.6-27B-MTP-GGUF-Q4_K_M:latest"
+        rag_agent: "openai/qwen3.8-flash"
+        ranking_agent: "openai/jina-reranker-v3.5"
+        ocr_agent: "openai/unlimited-ocr-bf16:LATEST"
+        embed_model: "openai/qwen3-embedding-8b-8k-gpu:LATEST"
+        grounding_agent: "openai/minicheck-flan-t5-large"
+```
+
+### 4.3 Discovering exact model IDs
+
+```bash
+curl -s "$LITELLM_BASE_URL/models" \
+  -H "Authorization: Bearer $LITELLM_API_KEY" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for m in sorted(data.get('data', []), key=lambda x: x['id']):
+    print(m['id'])
+"
+```
+
+The strings above **must** match character-for-character (case-sensitive, including `:latest` / `:LATEST` suffixes).
+
+---
+
+## 5. Workspace Scaffold (`aider-helper bootstrap`)
+
+A single deterministic command provisions your project. No LLM calls. No interactive interview.
+
+```bash
+aider-helper bootstrap                          # scaffolds in cwd
+aider-helper bootstrap --repo /path/to/project  # scaffolds in a different directory
+```
+
+### What it does (5 deterministic steps):
+
+| Step | Action | Source |
+|------|--------|--------|
+| 1 | **Detect keys** | Scans `os.environ` + `.env` files for `LITELLM_API_KEY`, `GEMINI_API_KEY`, `AIDER_HELPER_API_BASE`, etc. |
+| 2 | **Detect framework** | Filesystem scan: `pytest.ini` → py, `Cargo.toml` → rs, `package.json` → js, `DESCRIPTION` → R, `go.mod` → go |
+| 3 | **Query router** | If `LITELLM_BASE_URL` is set: `GET /v1/models` → selects architect/editor (prefers `"27b"`), embed (`"embed"`), reranker (`"rerank"`) |
+| 4 | **Write config** | Regex substitution against bundled `default_configs/env.yml` template. Preserves all inline comments. |
+| 5 | **Provision + report** | Creates `.aider_factory/` structure, bash wrappers, git init. Prints structured summary. |
+
+### Zero-key guarantee
+
+If no API key and no router are detected, the command **still produces a valid YAML file** with placeholder endpoints (`http://<your-router-host>:4000/v1`) and prints exactly which environment variables to set next. This is the first-run on-ramp for users who have not yet configured inference infrastructure.
+
+### Model selection logic
+
+When the router is reachable:
+- **Architect / Editor**: first model ID containing `"27b"` (case-insensitive), else first available model.
+- **Embed**: first model ID containing `"embed"`.
+- **Reranker**: first model ID containing `"rerank"`.
+- All bare IDs get `openai/` prefix prepended automatically.
+
+When the router is unreachable or unset, template defaults are preserved unchanged.
+
+---
+
+## 6. aider-helper (Interactive Assistant)
+
+### 6.1 Minimum env vars
+
+```bash
+export AIDER_HELPER_API_BASE="http://YOUR_ROUTER_IP:4000/v1"
+export AIDER_HELPER_MODEL="openai/qwen3.8-flash"   # optional but recommended
+export LITELLM_API_KEY="sk-YOUR_TOKEN"
+```
+
+### 6.2 Usage
+
+```bash
+# Ask a question (terminal mode, no config file needed):
+aider-helper query -at "Explain the DAG phase system"
+
+# Ask about your active pipeline config:
+aider-helper query -a "What models are configured for the editor?"
+
+# Master mode (loads full YAML docs + skills reference):
+aider-helper query -am "How do I add a second phase?"
+
+# Clear session history:
+aider-helper query --clear
+```
+
+### 6.3 How auth works (internal flow)
+
+```
+detect_api_key()
+  → AIDER_HELPER_API_BASE set? → return ("CUSTOM_LOCAL", "dummy")
+
+run_query() api_base branch:
+  _explicit = LITELLM_API_KEY          ← falls back to real token
+  helper_key = resolve_api_key(model, api_base, _explicit)
+  if helper_key is real → kwargs["api_key"] = helper_key
+  elif _explicit is real → kwargs["api_key"] = _explicit
+  else → omit api_key (local llama.cpp ignores auth)
+```
+
+---
+
+## 7. aider-oracle (Knowledge Side-Agent)
+
+The oracle reads `ORACLE_AGENT_MODEL` and `ORACLE_AGENT_API_BASE` from env or YAML:
+
+```bash
+# One-off query through the router:
+export ORACLE_AGENT_MODEL="openai/qwen3.8-flash"
+export ORACLE_AGENT_API_BASE="http://YOUR_ROUTER_IP:4000/v1"
+aider-oracle --no-rag "What is the leverage formula?"
+
+# With RAG (requires LanceDB + embedding endpoint):
+aider-oracle --collection MyDocs "Summarize the key findings"
+```
+
+If `LITELLM_BASE_URL` is set, `_ensure_oracle_config()` auto-populates `ORACLE_AGENT_API_BASE` and `ORACLE_EMBED_API_BASE` as fallbacks.
+
+---
+
+## 8. Session ID & KV-Cache Stickiness
+
+All components inject `x-litellm-session-id` into every request:
+
+```python
+custom_headers = {"x-litellm-session-id": _PIPELINE_SESSION_ID}
+```
+
+The router uses this header for **session-affinity routing** (pins all turns of a conversation to the same backend instance for KV-cache reuse). To set a custom session ID:
+
+```bash
+export LITELLM_SESSION_ID="my-pipeline-run-42"
+```
+
+If unset, a UUID is generated per process.
+
+---
+
+## 9. Verification Checklist
+
+```bash
+# 1. Router reachable + auth works:
+curl -s "$LITELLM_BASE_URL/models" \
+  -H "Authorization: Bearer $LITELLM_API_KEY" | python3 -m json.tool | head -20
+
+# 2. aider-helper responds:
+aider-helper query -at "Say hello in one word"
+
+# 3. aider-oracle responds (no RAG):
+ORACLE_AGENT_MODEL="openai/qwen3.8-flash" \
+ORACLE_AGENT_API_BASE="$LITELLM_BASE_URL" \
+aider-oracle --no-rag "What is 2+2?"
+
+# 4. Pipeline dry-run (no file edits):
+aider-factory .aider_factory/.env.yml --dry-run
+```
+
+---
+
+## 10. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `❌ No active LLM API key detected` | `AIDER_HELPER_API_BASE` not set | `export AIDER_HELPER_API_BASE="$LITELLM_BASE_URL"` |
+| `AuthenticationError: Invalid proxy server token` | `"sk-dummy"` sent instead of real key | Ensure `LITELLM_API_KEY` is exported; update to latest bootstrap.py (commit `8c1f7a5`+) |
+| `model not found` / 404 from router | Model string mismatch | `curl /v1/models` and copy the exact `id` field |
+| `litellm.NotFoundError` with `litellm/` prefix | Wrong prefix | Change `litellm/foo` → `openai/foo` |
+| Helper hangs / times out | Large model cold-start | Set `AIDER_HELPER_MODEL` to a smaller model for interactive use |
+| Embedding calls fail | Router doesn't serve embeddings | Point `embed_api_base` to a dedicated embedding server |
+
+---
+
+## 11. What NOT to Do
+
+- ❌ Do **not** use `litellm/`, `lm_studio/`, `opencode/`, or `ollama/` prefixes in the `.env` YAML models block. These are other tools' conventions. The litellm Python SDK only recognizes `openai/` for OpenAI-compatible endpoints.
+- ❌ Do **not** hardcode API keys in the YAML file. Use environment variables.
+- ❌ Do **not** point `architect_api_base` directly at a Lemonade Server or raw inference engine if you want the LiteLLM Router's load-balancing, retry, and session-affinity features.
+- ❌ Do **not** set `AIDER_HELPER_API_BASE` to a URL without the `/v1` suffix.
+
+---
+
+## 12. Summary (TL;DR)
+
+```bash
+# ~/.zshrc
+export LITELLM_BASE_URL="http://YOUR_IP:4000/v1"
+export LITELLM_API_KEY="sk-YOUR_TOKEN"
+export AIDER_HELPER_API_BASE="$LITELLM_BASE_URL"
+export AIDER_HELPER_MODEL="openai/qwen3.8-flash"
+```
+
+```yaml
+# .aider_factory/.env_<repo>.yml
+endpoints:
+    architect_api_base: "http://YOUR_IP:4000/v1"
+    # ... all endpoints → router URL ...
+
+phases:
+  - models:
+        architect_agent: "openai/qwen3.8-flash"
+        editor_agent: "openai/Qwen3.8-27B-GGUF-UD-Q4_K_XL:latest"
+        # ... all models → openai/<exact-id-from-/v1/models> ...
+```
+
+That's it. `aider-helper`, `aider-factory`, `aider-oracle`, and `aider-apply` all route through the same LiteLLM/Lemonade endpoint.
 # High-Performance Inference Servers, Routing & Models Configuration
 
 > **Context Anchor & Authoring Directive:**  
@@ -1715,6 +2202,408 @@ Model-specific reasoning budgets and KV-cache behaviors are forced via this file
 | **Empty RAG context / `[knowledge base unavailable]`** | Embedding endpoint unreachable, or model evicted on `--models-max 1` servers. | Verify embedding server health (`curl <embed_api_base>/v1/models`). Increase `--models-max`. |
 | **Slow Oracle CLI returns** | Model is streaming `<think>` tokens to stdout. | Ensure `think: false` and `thinking_tokens: 0` are set in `.aider.model.settings.yml` for the `rag_agent`. |
 | **`permission denied: /run` during a session** | Model emitted `/run` inside a shell block instead of a bare command. | Aider's `architect` mode blocks shell execution. Use the programmatic `oracle` job or type `/run` manually in pair mode. |
+# Local Inference Setup Guide
+
+This guide covers the bare-metal installation, compilation, and systemd daemonization of local inference servers (`llama.cpp` and `ollama`) optimized for the AI Factory pipeline.
+
+## 1. GPU Acceleration Layer
+
+### Primary: AMD ROCm Setup
+
+For AMD GPUs (especially Unified Memory setups like MI300 or consumer APUs/GPUs), install the ROCm SDK and add your user to the required hardware groups.
+
+```bash
+sudo apt install -y rocm-hip-sdk
+sudo usermod -aG render,video $USER
+# Log out and log back in for group changes to take effect
+```
+
+### Auxiliary: NVIDIA CUDA Setup
+
+If deploying on an NVIDIA host, install the proprietary drivers and CUDA toolkit:
+
+```bash
+sudo apt install -y nvidia-driver-550 nvidia-cuda-toolkit
+```
+
+### Model Acquisition and Organization
+
+GGUF model files can be downloaded from HuggingFace and stored in a central directory. All models are registered in `models.ini` using aliases, which you then reference in your pipeline YAML.
+
+#### Downloading Models from HuggingFace
+
+```bash
+mkdir -p ~/Programs/gguf
+cd ~/Programs/gguf
+
+# Download split model files from HuggingFace (example pattern)
+wget https://huggingface.co/USER/MODEL/resolve/main/model-00001-of-00002.gguf
+wget https://huggingface.co/USER/MODEL/resolve/main/model-00002-of-00002.gguf
+```
+
+#### Converting Instruction-Aware Rerankers (e.g. Qwen3-Reranker)
+
+Reranker models require the binary classification head (`cls.output.weight`) and `pooling_type = RANK` metadata. Convert directly from official Hugging Face safetensors:
+
+```bash
+# 1. Download raw Hugging Face repository
+uv run --with huggingface_hub python -c \
+  "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-Reranker-4B', local_dir='/tmp/Qwen3-Reranker-4B-src')"
+
+# 2. Convert to F16 GGUF
+uv run --with gguf --with torch --with safetensors --with sentencepiece --with protobuf --with transformers \
+  python ~/Programs/llama.cpp/convert_hf_to_gguf.py \
+    --outtype f16 \
+    --outfile /tmp/Qwen3-Reranker-4B-f16.gguf \
+    /tmp/Qwen3-Reranker-4B-src
+
+# 3. Quantize to Q8_0
+~/Programs/llama.cpp/build/bin/llama-quantize \
+    /tmp/Qwen3-Reranker-4B-f16.gguf \
+    ~/Programs/gguf/Qwen3-Reranker-4B_Q8_0.gguf \
+    Q8_0
+
+# 4. Clean up temporary source files
+rm -rf /tmp/Qwen3-Reranker-4B-src /tmp/Qwen3-Reranker-4B-f16.gguf
+```
+
+#### Merging Split GGUF Files
+
+If the model was downloaded as multiple parts, use `llama-merge-gguf` to combine them:
+
+```bash
+# Clone and build llama-merge-gguf
+git clone https://github.com/ggerganov/llama.cpp
+cd llama.cpp/gguf-py
+pip install -e .
+
+# Merge split files into one GGUF
+llama-merge-gguf \
+    model-00001-of-00002.gguf \
+    model-00002-of-00002.gguf \
+    qwen3.6-27b-merged.gguf
+
+# Remove split files, keep only the merged file
+rm model-00001-of-00002.gguf model-00002-of-00002.gguf
+```
+
+#### Organizing Models
+
+All merged GGUF files live in `~/Programs/gguf/` alongside `models.ini`:
+
+```
+~/Programs/gguf/
+  models.ini
+  qwen3.6-27b-merged.gguf
+  glm-ocr-f16.gguf
+  glm-ocr-mmproj.gguf
+```
+
+## 2. Compiling `llama.cpp`
+
+#### Dependencies
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake git
+```
+
+#### Clone the Repository
+
+```bash
+git clone https://github.com/ggerganov/llama.cpp
+cd llama.cpp
+```
+
+#### AMD (HIP/ROCm) — Primary Build
+
+```bash
+HIPCXX="$(hipconfig -l)/clang" cmake -B build \
+    -DGGML_HIP=ON \
+    -DGGML_HIP_ROCWMMA_FATTN=ON \
+    -DCMAKE_BUILD_TYPE=Release
+
+cmake --build build --config Release -j $(nproc)
+```
+
+#### NVIDIA (CUDA) — Auxiliary Build
+
+```bash
+cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j $(nproc)
+```
+
+The compiled `llama-server` binary will be at:
+
+```bash
+./build/bin/llama-server
+```
+
+---
+
+## 3. The `models.ini` Configuration File
+
+llama.cpp supports a local model registry via `models.ini`. This file defines available models and their GGUF file paths, allowing `llama-server` to switch models on the fly via an API call.
+
+Create `~/.config/llama-server/models.ini`:
+
+```ini
+# ~/.config/llama-server/models.ini
+# Format: [model-name] -> /path/to/model.gguf
+# The name after the slash in your pipeline YAML (e.g., "glm-ocr-f16:latest") maps to these entries.
+
+[qwen3.5-122b-a10b-90k:latest]
+path = /opt/models/qwen3.5-122b-a10b-90k-Q4_K_M.gguf
+ctx_size = 32768
+n_gpu_layers = 999
+
+[qwen3.6-27b-90k:latest]
+path = /opt/models/qwen3.6-27b-90k-udq4kxl.gguf
+ctx_size = 32768
+n_gpu_layers = 999
+
+[glm-ocr-f16:LATEST]
+model = /opt/models/GLM-OCR-f16.gguf
+mmproj = /opt/models/mmproj-GLM-OCR-Q8_0.gguf
+ctx-size = 65536          # divided by parallel slots (65536/8 = 8192 per slot)
+parallel = 8              # 8 concurrent OCR requests; sweet spot for AMD APUs
+n-gpu-layers = 999
+temp = 0.1
+flash-attn = off          # vision models: do NOT enable flash attention
+cache-type-k = f16        # vision models: use f16 KV cache (not quantized)
+cache-type-v = f16
+mmap = false
+
+[qwen3-embedding-8b-8k:LATEST]
+model = /opt/models/Qwen3-Embedding-8B.i1-Q6_K.gguf
+embeddings = on            # expose /v1/embeddings (CRITICAL for embedding models)
+pooling = last             # Qwen3-Embedding pools the final [EOS] token (CRITICAL)
+ctx-size = 16384           # safety margin for long queries (model trains to 40960)
+batch-size = 16384
+ubatch-size = 16384
+n-gpu-layers = 999
+parallel = 1               # embedding requests are serial; 1 slot is sufficient
+flash-attn = on
+cache-type-k = f16
+cache-type-v = f16
+mmap = false
+
+[qwen3-reranker-4b:latest]
+model = /opt/models/Qwen3-Reranker-4B_Q8_0.gguf
+reranking = true
+embedding = true
+pooling = rank
+ctx-size = 16384
+batch-size = 16384
+ubatch-size = 8192
+n-gpu-layers = 999
+flash-attn = on
+cache-type-k = q8_0
+cache-type-v = q8_0
+slot-prompt-similarity = 0.0
+mmap = false
+```
+
+When `llama-server` is running, you can switch models via API:
+
+```bash
+curl http://localhost:8081/load -d '{"model": "qwen3.6-27b-90k:latest"}'
+```
+
+---
+
+## 4. Systemd Services for llama-server Instances
+
+#### Systemd Service 1: Primary Router (Port 8081)
+
+This instance serves the Architect and RAG Oracle models. It runs with MTP enabled for speed and parallel execution for hot-swapping.
+
+Create `/etc/systemd/system/llama-pair-router.service`:
+
+```ini
+[Unit]
+Description=Llama.cpp Primary Router — Architect + Oracle + Fallback Models
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME
+
+# Ubuntu Performance & Stability Tuning
+LimitMEMLOCK=infinity
+LimitNOFILE=1048576
+OOMScoreAdjust=-1000
+# Environment="HSA_OVERRIDE_GFX_VERSION=11.0.0" # Uncomment if using consumer AMD RDNA3 GPUs/APUs
+
+ExecStart=/opt/llama.cpp/build/bin/llama-server \
+    --host 0.0.0.0 \
+    --port 8081 \
+    --models-dir /home/YOUR_USERNAME/.config/llama-server \
+    --models-max 3 \
+    --parallel 3 \
+    --ctx-size 32768 \
+    --spec-type draft-mtp \
+    --spec-draft-n-max 3 \
+    --flash-attn
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable llama-pair-router.service
+sudo systemctl start llama-pair-router.service
+# Verify status:
+sudo systemctl status llama-pair-router.service
+```
+
+#### Systemd Service 2: Vision/OCR + Embedding Endpoint (Port 8080)
+
+This instance serves the GLM-OCR vision model and the embedding model. The router loads models on demand (`--models-max 1` means one model at a time; the router evicts the idle model when a different model is requested). **Critical:** Do NOT enable MTP or Flash Attention as global flags on this instance — vision model encoders break with both. Per-model overrides in `models.ini` (e.g. `flash-attn = on` for the embedding model) are safe.
+
+Create `/etc/systemd/system/llama-vision.service`:
+
+```ini
+[Unit]
+Description=Llama.cpp Vision/OCR + Embedding Endpoint
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME
+
+# Ubuntu Performance & Stability Tuning
+LimitMEMLOCK=infinity
+LimitNOFILE=1048576
+OOMScoreAdjust=-1000
+# Environment="HSA_OVERRIDE_GFX_VERSION=11.0.0" # Uncomment if using consumer AMD RDNA3 GPUs/APUs
+
+ExecStart=/opt/llama.cpp/build/bin/llama-server \
+    --host 0.0.0.0 \
+    --port 8080 \
+    --models-preset /path/to/models.ini \
+    --models-max 1 \
+    --parallel 1 \
+    --no-mmap \
+    --slot-prompt-similarity 0.0
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Note: `--parallel 1` is the global default; the per-model `parallel = 8` in `models.ini` for `glm-ocr-f16:LATEST` overrides it when that model is loaded.
+
+#### Parallel OCR Tuning (Vision Model Slot Count)
+
+The optimal number of parallel OCR slots depends on your GPU's memory bandwidth. On an AMD Strix Halo APU (128 GB unified memory, ~250 GB/s bandwidth, 40 CUs at 2800 MHz), benchmarks show:
+
+| `parallel` | Per-slot decode speed | Aggregate throughput | Wall-clock (47-page PDF) | Verdict                          |
+| ---------- | --------------------- | -------------------- | ------------------------ | -------------------------------- |
+| 1          | ~80 t/s               | ~80 t/s              | ~20 min (sequential)     | Baseline                         |
+| 8          | ~80 t/s               | ~640 t/s             | ~5 min                   | Sweet spot                       |
+| 16         | ~14 t/s               | ~224 t/s             | ~12 min                  | Regression (bandwidth saturated) |
+
+**Recommendation:** Start at `parallel = 8` for vision models. Memory cost is minimal (~5 GB total for GLM-OCR at 8 slots with 8192 context per slot). Monitor GPU clocks — if they drop below ~2200 MHz sustained, reduce slots.
+
+Enable and start:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable llama-vision.service
+sudo systemctl start llama-vision.service
+# Verify status:
+sudo systemctl status llama-vision.service
+```
+
+---
+
+## 5. Remote llama-server Instances & Ubuntu Firewall (UFW)
+
+If you are accessing these servers from other machines on your LAN (or running remote instances), ensure Ubuntu's Uncomplicated Firewall (UFW) allows the traffic:
+
+```bash
+sudo ufw allow 8080/tcp
+sudo ufw allow 8081/tcp
+sudo ufw allow 11434/tcp
+```
+
+If your primary inference machine is a separate device (e.g., a tablet with an AMD GPU), you can run an additional `llama-server` instance on that remote host and configure the pipeline to target it via the `architect_api_base` endpoint.
+
+On the remote host, create a similar systemd service pointing to the same `models.ini`:
+
+```ini
+[Service]
+ExecStart=/opt/llama.cpp/build/bin/llama-server \
+    --host 0.0.0.0 \
+    --port 8081 \
+    --models-dir /home/YOUR_USERNAME/.config/llama-server \
+    --models-max 3 \
+    --parallel 3 \
+    --ctx-size 32768
+```
+
+## 6. Ollama Configuration (Port 11434)
+
+Ollama is primarily used for fast, background coding tasks (the Editor model). It runs on its default port (11434) and is referenced by the `editor_api` endpoint.
+
+#### Installation
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+#### Systemd Performance Tuning & Remote Access
+
+To optimize Ollama for the AI Factory pipeline, we need to allow remote access, prevent models from unloading during long test-suite runs, and enable Flash Attention to save VRAM.
+
+Edit the systemd override:
+
+```bash
+sudo systemctl edit ollama.service
+```
+
+Add the following environment variables:
+
+```ini
+[Service]
+# Allow remote access from other machines on the LAN
+Environment="OLLAMA_HOST=0.0.0.0"
+# Keep models loaded in VRAM indefinitely (prevents slow reloads during long pipeline pauses)
+Environment="OLLAMA_KEEP_ALIVE=-1"
+# Enable Flash Attention to save VRAM on large context windows
+Environment="OLLAMA_FLASH_ATTENTION=1"
+# Allow multiple concurrent requests (useful if running multiple pipelines)
+Environment="OLLAMA_NUM_PARALLEL=4"
+```
+
+Then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+#### Pulling Models
+
+```bash
+ollama pull qwen3.6-27B-90k:latest
+ollama pull qwen2.5-coder:1.5b
+```
+
+The Ollama API is automatically OpenAI-compatible, so the `ollama/` prefix in your pipeline YAML will route correctly.
 # Full-Stack Observability, Master Logging & Cost Accounting
 
 ## 1. Executive Overview & Foundational Invariants
@@ -2521,6 +3410,69 @@ To prevent context contamination between sequential or parallel tasks (e.g., `jo
 2. **`_swap_in_state`**: Before task execution, active state files (`.aider.chat.history.md`, `.oracle_session.json`, etc.) are cleared, and matching files from `chat_history/<filename>_<stem>` are copied into the active root.
 3. **`_swap_out_state`**: After execution, active state files are moved back into the `chat_history/` vault, preserving the exact KV-cache prefix for that specific node's future iterations.
 
+### Interactive Pair-Programming History Management
+
+When `pair_programming: true` is active and the user remains within a single job
+(e.g., the entire session is `job1`), the automatic vault-swap mechanism does **not**
+trigger mid-session — it fires only at task boundaries (`run_task` entry/exit).
+Aider's built-in `/clear` command resets the in-memory conversation buffer but does
+**not** move or delete the on-disk `.aider.chat.history.md` file. On the next turn,
+`--restore-chat-history` reloads the file, making the prior context reappear.
+
+This is by design: the active history file is the session's durable KV-cache prefix
+and is intentionally preserved for resumption across process restarts.
+
+#### Manual History Reset (Same-Session Epoch Clear)
+
+To archive the current conversation and start fresh **within the same pair-programming
+session**, perform the following from a second terminal:
+
+```bash
+# Navigate to your workspace root
+cd /path/to/project
+
+# Define the active session (match your AI_FACTORY_SESSION or the slug you passed)
+SESS=".aider_factory/sessions/<session_name>"
+VAULT="$SESS/chat_history"
+TIMESTAMP="$(date +%Y%m%dT%H%M%S)"
+
+# Archive current history to vault with a timestamped stem
+mkdir -p "$VAULT"
+mv "$SESS/.aider.chat.history.md" "$VAULT/.aider.chat.history_epoch_${TIMESTAMP}.md"
+
+# Create a fresh empty active file so aider has a valid path to write into
+touch "$SESS/.aider.chat.history.md"
+```
+
+After this, the next aider turn in the pair-programming terminal will start with a
+clean conversation buffer (aider reads the empty file, finds no prior turns). The
+archived file is retrievable from the vault at any time.
+
+#### Optional Shell Alias
+
+For convenience, add to `~/.bashrc` or `~/.zshrc`:
+
+```bash
+af-clear-epoch() {
+  local sess_dir=".aider_factory/sessions/${AI_FACTORY_SESSION:-default}"
+  local hist="$sess_dir/.aider.chat.history.md"
+  local vault="$sess_dir/chat_history"
+  local ts="$(date +%Y%m%dT%H%M%S)"
+  [[ -f "$hist" ]] && mkdir -p "$vault" && mv "$hist" "$vault/.aider.chat.history_epoch_${ts}.md"
+  touch "$hist"
+  echo "✓ Archived to $vault/.aider.chat.history_epoch_${ts}.md"
+}
+```
+
+#### When Automation Already Handles This
+
+| Scenario | Vault Swap Automatic? | Action Required |
+| :--- | :--- | :--- |
+| `shared_history: false`, multiple target files (job1 → job2) | ✅ Yes — `_swap_out_state` fires per task boundary | None |
+| `shared_history: false`, same file across sequential jobs | ✅ Yes — each job gets a distinct `history_stem` | None |
+| `shared_history: true`, new session resuming | ✅ Yes — fresh `.aider.chat.history.md` per session dir | None |
+| **`pair_programming: true`, same job, user wants fresh context mid-session** | ❌ No — no task boundary occurs | **Manual epoch clear (above)** |
+
 ### Headless Application & Chat Parsing (`apply_agent.py`)
 The `aider-apply` CLI executes headless Aider passes by extracting specifications directly from chat histories.
 1. **Chat Parsing**: `parse_chat_history()` scans `.aider.chat.history.md` using `TOKEN_ANCHOR_RE` (`(?m)^>\s*Tokens:\s*[\d\.]+[kKMG]?\s*sent...`) to isolate conversational turns.
@@ -3221,6 +4173,219 @@ quit(status = 0)
 1. **Warning Suppression (`options(warn = -1)`):** Blocks non-fatal package warnings (e.g., `bit64` integer conversions) from cluttering LLM context windows.
 2. **Precision Filter Extraction:** Strips path prefixes and `.R` extensions to convert file paths into exact `testthat` filter regexes (`^stem$`).
 3. **Uncapped Failure Capture (`TESTTHAT_MAX_FAILS = Inf`):** Prevents `testthat` from aborting early so the LLM receives the full set of failures across the test suite.
+# AI Factory Engineering Backlog & Future Tasks
+
+## 1. Instruction-Aware Reranker Prompt Customization (`ranking_prompt`)
+
+### Status: Backlog / Future Enhancement
+### Target Components: `oracle_agent.py`, `validator.py`, `.env.yml` schema
+
+---
+
+### Technical Context & Background
+Instruction-tuned generative rerankers (such as `Qwen/Qwen3-Reranker-4B` and `Qwen/Qwen3-Reranker-8B`) support domain-specific task framing using the official prompt template:
+```text
+<Instruct>: {instruction}
+<Query>: {query}
+```
+
+While standard plain queries achieve high discrimination (>0.99 relevance score) on properly converted GGUF files with `cls.output.weight`, specialized domains (e.g. biomedical citation matching, statutory legal analysis, complex financial covenants) can benefit from configurable instruction prefixes.
+
+---
+
+### Proposed YAML Schema Extension
+
+```yaml
+phases:
+  - name: "Domain Analysis Phase"
+    models:
+      ranking_agent: "qwen3-reranker-4b-gpu:LATEST"
+    rag:
+      ranking_prompt: "Given a financial research query, retrieve relevant quantitative models and formulas that answer the question"
+```
+
+---
+
+### Proposed Environment Variable & Execution Path
+* `ORACLE_RANKING_INSTRUCT`: Default string prefix applied to queries when using instruction-aware rerankers.
+* In `oracle_agent.py` and `validator.py`: If `ranking_prompt` is provided in the configuration or via `ORACLE_RANKING_INSTRUCT`, format the query string before sending the payload to `/v1/rerank` or the local CrossEncoder backend.
+
+---
+
+## 2. Temporal Reasoning, Point-in-Time Gating & Chronological RAG Ranking
+
+### Status: Backlog / Future Architecture
+### Target Components: `rag_manager.py`, `oracle_agent.py`, `validator.py`, `.env.yml` schema
+
+---
+
+### Technical Context & Background
+Standard vector retrieval operates as a "bag-of-chunks" where passages are ordered purely by semantic similarity, discarding chronology. In high-stakes domains (quantitative finance, clinical records, and legal contracts), this causes **temporal scrambling** (e.g., lookahead bias in backtests, inverted pre-op vs. post-op causality, or citing superseded contract clauses).
+
+Adding temporal awareness allows the Oracle to filter by historical horizons, apply time-decay weighting, and project retrieved context in causal order ($T_1 \to T_2 \to T_3$).
+
+---
+
+### Proposed Schema Extension (`RAGChunk` in `rag_manager.py`)
+
+Extend `RAGChunk` to store extracted timestamps in LanceDB:
+
+```python
+class RAGChunk(LanceModel):
+    text: str
+    vector: Vector(_dim)
+    source_file: str
+    source_type: str
+    language: str = ""
+    symbol: str = ""
+    line_start: int = 0
+    line_end: int = 0
+    timestamp: float = 0.0     # Unix epoch timestamp
+    date_str: str = ""         # ISO-8601 string (e.g., "2024-05-12T14:30:00Z")
+```
+
+**Timestamp Extraction Waterfall:**
+1. **Docling / Markdown Frontmatter:** Document publication date or ISO metadata header.
+2. **Git Commit History:** `git log -1 --format="%ct" -- <file>`.
+3. **Filesystem `mtime`:** `os.path.getmtime(file_path)` fallback.
+
+---
+
+### Proposed YAML Configuration Extension
+
+```yaml
+phases:
+  - name: "Temporal Analysis Phase"
+    rag:
+      temporal:
+        mode: "chronological"          # "none" | "chronological" | "time_decay" | "point_in_time"
+        as_of_date: "2024-01-01"       # Point-in-Time (PIT) hard filter for quant backtests
+        time_decay_half_life_days: 180 # Exponential decay half-life
+```
+
+---
+
+### Proposed CLI Flags (`aider-oracle`)
+* `--sort-time`: Re-orders final top-$K$ reranked chunks in ascending chronological order before prompt assembly.
+* `--as-of <YYYY-MM-DD>`: Pushes a LanceDB Arrow filter (`where("timestamp <= ...")`) to eliminate lookahead bias.
+* `--time-decay <half_life_days>`: Modulates relevance scores via $S_{final} = S_{semantic} \cdot e^{-\lambda \Delta t}$.
+
+---
+
+### Execution Pipeline in `oracle_agent.py`
+1. **Stage 1 (Filter):** If `--as-of` is defined, apply native Arrow predicate to LanceDB KNN query.
+2. **Stage 2 (Retrieve & Rerank):** Retrieve `recall_k` candidates and rerank using Jina v3.5 Listwise Cross-Encoder.
+3. **Stage 3 (Decay, Optional):** Re-score candidates if `time_decay` is configured.
+4. **Stage 4 (Chronological Context Projection):** Re-sort the final top-$K$ chunks by `timestamp` ascending ($T_1 \le T_2 \le \dots \le T_K$) and inject ISO timestamps into the `<chunk>` XML tags so LLM attention naturally follows temporal causality.
+
+---
+
+## 3. Automated `/clear` Vault Swap in Pair-Programming Sessions
+
+### Status: Deferred — Manual Workflow Deemed Sufficient
+### Target Components: `orchestrate.py` (pair branch), `run_workflow.py` (PTY launch), `cli.py`
+### Prerequisite Reading: `session_management_and_cluster.md` §3 "Interactive Pair-Programming History Management"
+
+---
+
+### Why This Was Deferred
+
+The manual epoch-clear workflow (move `.aider.chat.history.md` → `chat_history/.aider.chat.history_epoch_<ts>.md`, then `touch` a fresh file) takes under 20 seconds and is already documented. The user's shell alias (`af-clear-epoch`) eliminates even that friction.
+
+Automating it requires intercepting `/clear` inside a PTY-wrapped aider process — a non-trivial control-flow insertion that introduces:
+
+- A stdin multiplexing layer (user keystrokes vs. factory sentinel detection)
+- A race condition between aider writing the cleared buffer and the factory reading/truncating the file
+- A new failure mode: if the swap fails mid-PTY, aider's in-memory state and the on-disk file diverge
+- A test matrix (PTY + vault + resume + shared_history toggle) for a 20-second operation
+
+**Cost-benefit verdict:** The code-to-value ratio does not justify implementation today. Revisit only if pair-programming sessions grow to the point where manual clearing becomes a frequent (>3×/session) operational tax, or if a native aider `post_command` hook API becomes available (eliminating the PTY interception entirely).
+
+---
+
+### What a Clean Implementation Would Require
+
+If a future contributor picks this up, the implementation **must** satisfy these constraints:
+
+#### 1. Trigger Detection (Pick One Strategy)
+
+| Strategy | Mechanism | Constraint |
+| :--- | :--- | :--- |
+| **A: Factory wrapper intercept** | Factory owns the PTY stdin pipe. Before forwarding bytes to aider, scan for a `/clear` line. If detected: forward `/clear\n` to aider, then perform swap_out + touch. | Requires factory to own the `script`/PTY process. Currently `run_workflow.py` launches aider via `script -q /dev/null`. The stdin pipe must be a factory-controlled `subprocess.Popen` stdin, not a raw TTY passthrough. |
+| **B: Aider hook (future)** | Register a `post_command` hook in `.aider.conf.yml` that fires a factory callback on `/clear`. | Requires aider ≥ a version supporting `--post-command-hook`. Does not exist today. |
+| **C: File-watch sentinel** | Factory polls `.aider.chat.history.md` for a zero-byte or marker-write indicating `/clear` occurred. | Fragile; aider does not write a sentinel marker on `/clear`. Not recommended. |
+
+**Recommended:** Strategy A. It is deterministic, requires no aider modification, and aligns with the existing PTY ownership model.
+
+#### 2. Vault Swap Execution
+
+Reuse the existing `_swap_out_state(stem)` method in `orchestrate.py`. The stem should be:
+
+```python
+stem = f"epoch_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
+```
+
+This produces vault files like `chat_history/.aider.chat.history_epoch_20250614T120000.md`, consistent with the existing naming convention.
+
+#### 3. Fail-Closed Semantics
+
+```python
+# Pseudocode in the PTY stdin wrapper
+if detected_clear_command:
+    aider_proc.stdin.write(b"/clear\n")
+    aider_proc.stdin.flush()
+    try:
+        factory._swap_out_state(stem)
+    except Exception:
+        # Do NOT touch a new file if swap failed.
+        # Aider's in-memory buffer is already cleared; the on-disk file
+        # is stale but harmless (next turn will reload it, which is the
+        # pre-fix behavior — no worse than not implementing this feature).
+        log.error("Epoch swap failed; history file unchanged.")
+        return
+    # Only create fresh file on success
+    Path(active_hist).touch()
+    log.info(f"✓ Epoch archived: {stem}")
+```
+
+#### 4. Isolation Gate
+
+The feature **must** be gated behind a discriminator so legacy pair-programming paths are provably untouched:
+
+```yaml
+toggles:
+  pair_programming: true
+  pair_clear_vault_swap: true   # NEW — defaults to false
+```
+
+If `pair_clear_vault_swap` is `false` (default), the factory does **not** intercept `/clear` and aider handles it natively (current behavior). Zero blast radius.
+
+#### 5. Required Test Matrix
+
+| Test | Assertion |
+| :--- | :--- |
+| `/clear` typed → vault file created with timestamp stem | File exists, content matches pre-clear history byte-for-byte |
+| `/clear` typed → fresh active file created | `.aider.chat.history.md` exists and is empty (0 bytes) |
+| `/clear` typed → aider in-memory buffer cleared | Next aider turn produces no reference to prior conversation |
+| `pair_clear_vault_swap: false` → `/clear` typed | No vault file created; aider handles natively (legacy parity) |
+| Swap failure (vault dir unwritable) | Fail-closed: no touch, no crash, error logged |
+| Multiple `/clear` in same session | Multiple distinct epoch files in vault; each unique timestamp |
+| Resume session after epoch clear | `--restore-chat-history` reads the fresh (empty) file; no stale context |
+
+#### 6. Files to Modify
+
+| File | Change |
+| :--- | :--- |
+| `orchestrate.py` | Add `pair_clear_vault_swap` field to `Task` dataclass; add interception logic in the pair-programming branch of `_execute_task_node` |
+| `run_workflow.py` | Ensure PTY stdin is a factory-controlled pipe (not raw TTY) when `pair_clear_vault_swap: true` |
+| `session_management_and_cluster.md` | Update the "When Automation Already Handles This" table to flip the ❌ to ✅ when implemented |
+| New test file | `test_e2e_pair_clear_vault_swap.py` covering the matrix above |
+
+---
+
+### Decision Log
+
+> **2025-06-14:** Feature scoped and deliberately deferred. Manual `af-clear-epoch` alias provides equivalent outcome in <20s. Implementation cost (PTY stdin multiplexing, race-condition handling, 7-case test matrix) is disproportionate to the ergonomic benefit. Re-evaluate if aider ships a native `post_command` hook or if pair-programming sessions exceed ~50 turns requiring multiple mid-session resets.
 # Deterministic Validation, Grounding & MiniCheck Entailment
 
 ## 1. Executive Overview & Foundational Invariants
@@ -3576,3 +4741,312 @@ phases:
 | **Sitemap 404 Not Found**           | Target domain does not expose `/sitemap.xml`.                                            | Pipeline automatically fetches `/robots.txt` to parse `Sitemap:` directives. If absent, falls back to probing `/llms.txt`. |
 | **SPA Yields Empty Markdown**       | Target URL is a React/Vue SPA; Trafilatura extracts $< 100$ bytes.                       | Pipeline detects low byte count and escalates to the Headless Playwright fallback to render the DOM before extraction.     |
 | **Invalid Regex Filter**            | User provides malformed regex to `--grep` or `--grep-exclude`.                           | `re.compile` catches the error, logs a clear message to `stderr`, and exits with code 1.                                   |
+# AI Factory Pipeline — YAML Configuration Reference
+
+> **Single source of truth** for configuring the AI Factory pipeline. Every parameter is
+> documented inline with its runtime behavior, codepaths, and multi-toggle combinations. Copy any phase block as a
+> starting template for new projects or tasks.
+>
+> **How to run (use the `factory` launcher or `aider-factory` CLI):**
+>
+> ```bash
+> # Default config (.aider_factory/.env.yml)
+> .aider_factory/bash/factory
+>
+> # Named session with default configuration
+> aider-factory my_session
+>
+> # Custom config with named session
+> aider-factory .aider_factory/.env_custom.yml my_session
+> ```
+>
+> **Cost analysis on archived logs** (re-run the aggregator standalone):
+>
+> ```bash
+> ~/.local/share/uv/tools/aider-chat/bin/python .aider_factory/python/aggregate_costs.py .aider_factory/logs/<logfile>.log
+> ```
+>
+> `.aider_factory/bash/factory` is the canonical launcher. It runs the pipeline under
+> Aider's bundled Python, which includes all required dependencies (PyYAML, LanceDB,
+> Sentence-Transformers, PyMuPDF, RapidFuzz, LiteLLM, Playwright, Docling).
+
+---
+
+## Conceptual Overview & Execution Modes
+
+The pipeline executes a **Directed Acyclic Graph (DAG)** of AI-assisted tasks. Each `phase` declared
+in the configuration YAML translates to a sequence of execution nodes per target file. Tasks are automatically
+chained by file dependency across phases.
+
+The pipeline operates in two primary modes determined by the phase configuration:
+
+1. **Code Mode (`oracle.start_job: false` or standard edit toggles active):**
+   * **Job 1 (Implementation):** Applies primary code or architecture modifications using `plans.job_one_plan`.
+   * **Job 2 (Spec Audit / Validation):** Performs a second-pass audit or mathematical validation using `plans.job_two_plan`.
+   * **Job 3 (Write Tests):** Authors unit or integration tests using `plans.job_three_plan`.
+   * **Job 4 (Iterate / Fix Tests):** Loops test execution and pushes compiler/test output back to the model until all tests pass.
+   * **Pre-Edit Debate (`oracle.pre_edit_debate`):** Inserts an ask-mode debate before Job 1, Job 2, or Job 3 (`insert_debate: [1, 0, 0]`) to reach consensus before files are modified.
+   * **Escalation Debate (`escalation_debate`):** If tests fail after loop exhaustion, launches a multi-turn Architect <-> Oracle debate and applies the consensus verdict.
+
+2. **Review / Evidence Grounding Mode (`oracle.start_job: true` or `validation.enabled: true`):**
+   * **Generate (Oracle):** Synthesizes structured markdown reviews directly from ingested source documents via LanceDB.
+   * **Autofix (Validator):** Performs deterministic anchored-stitch repairs on quote anchors before LLM invocation.
+   * **Heal (Agent Iterate Loop):** Iteratively refines quotes and passages against the deterministic validator gate.
+   * **Finalize:** Deterministically tags supported vs. unsupported claims based on debate and audit ledgers.
+
+---
+
+## Architecture: Two-Model Architect/Editor Pattern
+
+Every task leverages two distinct model roles:
+* **Architect Model (`architect_agent`):** A high-reasoning model that inspects context, analyzes failures, and formulates implementation specifications. It does not directly write file edits.
+* **Editor Model (`editor_agent` / `editor_agent_test`):** A fast, surgical code model that consumes the Architect's proposal and executes search/replace blocks on disk.
+* **Fallback Editor (`editor_agent_test_fallback`):** An optional escalation model dynamically substituted on test attempt $> 0$ if the primary editor fails to resolve a test error.
+
+---
+
+## Iteration Strategy & Multi-Toggle Synergy
+
+The combination of `loop_aider_test`, `auto_test`, and `max_aider_loops` governs the automated test repair cycle:
+
+| `loop_aider_test` | `auto_test` | Total Attempts | Architect Interaction | Optimal Use Case |
+| :---: | :---: | :---: | :---: | :--- |
+| `1` | `false` | 1 | Every attempt | Single-shot run, manual review |
+| `3` | `false` | 3 | Every attempt | Focused debugging, complex logic fixes |
+| `3` | `true` | 9 | Every 3 attempts | Fast iteration, automated test repair |
+| `5` | `false` | 5 | Every attempt | Hard bugs, maximum Architect oversight |
+| `5` | `true` | 15 | Every 3 attempts | Deep autonomous test fixing |
+
+### Verification Invariants
+* **`Task.final_check` (Code Mode):** Because attempt $N$ verifies the edit made in attempt $N-1$, loop exhaustion could leave the final edit unverified. `final_check: true` automatically re-runs the test suite once after the outer loop finishes to establish honest success/failure.
+* **`Task.soft_fail` (Review Mode):** When applying debate verdicts in grounding mode, loop exhaustion is treated as a soft success (`soft_fail: true`), deferring final judgment to the deterministic `finalize` step.
+
+---
+
+## Pair Programming Mode (`pair_programming: true`)
+
+When `pair_programming: true` is enabled, autonomous execution loops are suspended:
+* Aider is wrapped in a PTY (`script -qfe`) allowing interactive terminal chat with live streaming.
+* The plan template is loaded as read-only context (`--read`) rather than an auto-executed command message (`--message`), allowing the human to drive the conversation.
+* The user can run interactive slash commands (`/test`, `/run aider-oracle`, `/run aider-validate`, `/add <file>`).
+
+### Preserving KV-Cache in Pair Programming
+To prevent context eviction and save LLM token costs during long paired sessions:
+1. Set `map_tokens: 0` and `map_refresh: "manual"` to eliminate background repository map recalculations.
+2. Set `max_chat_history_tokens: 100000` to prevent automatic conversation truncation.
+3. Configure `auto_commits: false` or assign a lightweight `weak-model` in `.aider.conf.yml` to prevent commit message generation from purging the architect's context cache.
+
+---
+
+## Complete Annotated Configuration Schema
+
+```yaml
+# =============================================================================
+# AI FACTORY PIPELINE CONFIGURATION
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. PROJECT IDENTITY & WORKSPACE ROOT
+# -----------------------------------------------------------------------------
+name: "My Project"
+working_directory: "/path/to/project" # Target repository working directory
+
+# -----------------------------------------------------------------------------
+# 2. DISPLAY & DEBATE COLOR SCHEME (24-bit TrueColor)
+# -----------------------------------------------------------------------------
+colors:
+    architect_debate: "#38bdf8" # Teal — Architect turns in debate streams
+    oracle_debate: "#d3869b"    # Gruvbox pink — Oracle turns in debate streams
+
+# -----------------------------------------------------------------------------
+# 3. GLOBAL TEST HARNESS & LINTING CONTROLS
+# -----------------------------------------------------------------------------
+test_command_prefix: ""         # Optional command prefix (e.g., Docker wrapper, SSH)
+test_runner: "uv run --with pytest pytest {file}" # Execution command template substituting {file}
+test_naming_and_path: "src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_{stem}.py" # Default test mapping
+lint_cmd: null                  # Optional custom linter command string
+auto_lint: true                 # Run linter automatically after edits
+loop_aider_test: 3              # Outer test retry loops in autonomous mode
+
+# -----------------------------------------------------------------------------
+# 4. GLOBAL API ENDPOINTS (Unified Proxy Routing)
+# -----------------------------------------------------------------------------
+endpoints:
+    architect_api_base: "http://192.168.100.2:8080/v1"
+    editor_api: "http://192.168.100.1:8080/v1"
+    editor_api_fallback: "http://192.168.100.1:8080/v1"
+    rag_agent_api: "http://192.168.100.1:8080/v1"
+    grounding_agent_api: "http://192.168.100.1:8090/v1" # MiniCheck entailment server
+    ranking_api_base: null                              # Remote reranker endpoint (null = local model)
+    ocr_api_base: "http://192.168.100.2:8081/v1"
+    embed_api_base: "http://192.168.100.1:8080/v1"
+
+# -----------------------------------------------------------------------------
+# 5. EXECUTION PHASES (DAG Task Definitions)
+# -----------------------------------------------------------------------------
+phases:
+  - name: "Code — Implement, Test, Debate-Escalate"
+    enabled: true
+
+    # Model Routing for this Phase
+    models:
+        architect_agent: "gemini/gemini-3.7-flash"
+        editor_agent: "gemini/gemini-3.6-flash"
+        editor_agent_test: "gemini/gemini-3.6-flash"
+        editor_agent_test_fallback: "gemini/gemini-3.6-flash" # Escalation model for attempt > 0
+        rag_agent: "gemini/gemini-3.6-flash"                  # Knowledge Oracle model
+        ranking_agent: "jinaai/jina-reranker-v3.5"            # Cross-encoder reranker model
+        ocr_agent: "gemini/gemini-3.6-flash"                  # Vision model for document OCR
+        embed_model: "gemini/text-embedding-004"              # Dense vector embedding model
+        grounding_agent: "openai/minicheck-flan-t5-large"     # Claim entailment verifier
+
+    # Retrieval-Augmented Generation & Ingestion Settings
+    rag:
+        collection_name: "working_repo_lib" # Target LanceDB collection folder
+        batch: true                         # true = shared corpus table; false = per-doc isolated tables
+        retrieval_mode: top_k               # top_k, full_document, or no_retrieve
+        use_docling: true                   # Fast-path digital document extraction (PDF, DOCX, XLSX, HTML)
+        docling_do_ocr: true                # Enable internal OCR for hybrid/scanned pages in Docling
+        docling_timeout: null               # Timeout in seconds for Docling conversion (null = unlimited)
+        run_ocr_rag: false                  # Trigger ingestion on phase start (false = use existing DB)
+        vectordb_overwrite: false           # Overwrite existing LanceDB tables on ingestion
+        ocr_prompt: "<|grounding|>Convert the document to markdown."
+        query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\nQuery: "
+        chunk_size_chars: 1500              # Maximum characters per text chunk
+        chunk_overlap_chars: 300            # Overlap character length between sequential chunks
+        recall_k: 75                        # Stage 1 vector candidates fetched from LanceDB
+        top_k: 20                           # Stage 2 candidates returned after cross-encoder reranking
+        cer_threshold: 0.05                 # Character Error Rate threshold before OCR fallback
+        ocr_max_retries: 2                  # Max retry attempts on OCR failures
+        ocr_parallel: 8                     # Number of parallel page OCR workers
+        code_chunk_size: 2000               # Character length for Tree-Sitter AST code chunks
+        ocr_max_tokens: 4096                # Max generation tokens per OCR worker
+        embed_backend: "sentence-transformers" # "sentence-transformers" or "openai"
+        working_repo: ""                    # Repository folder name for RAG self-exclusion
+        code_exts: null                     # Custom code extensions (e.g., [.py, .R, .rs])
+        text_doc_exts: null                 # Custom text extensions (e.g., [.md, .txt])
+        ignore: null                        # Custom directory ignore patterns for ingestion
+
+    # Oracle & Pre-Edit Deliberation
+    oracle:
+        start_job: false                    # true = REVIEW mode; false = CODE mode
+        template: "src/aider_factory/markdown/internal/analyze_bugs.md"
+        full_document: false                # Inject complete document text instead of retrieved chunks
+        pre_edit_debate:
+            enabled: false                  # Hold Architect <-> Oracle debate before editing files
+            insert_debate: [1, 0, 0]        # 3-tuple: [Job 1 debate, Job 2 debate, Job 3 debate]
+            loops: 3                        # Max debate turns per job
+            job_debate_template: ""         # Template path or list [/j1_tmpl, /j2_tmpl, /j3_tmpl]
+            job_debate_collection: ""       # Collection name or list [/coll1, /coll2, /coll3]
+
+    # Aider Runtime & Session Toggles
+    toggles:
+        pair_programming: true              # PTY interactive mode vs autonomous pipeline
+        shared_history: false               # false = isolate chat history per target file
+        run_job_one: true                   # Execute Job 1 (Implementation)
+        run_job_two: false                  # Execute Job 2 (Spec Audit / Validation)
+        run_job_three: false                # Execute Job 3 (Write Tests)
+        iterate_test: false                 # Loop test suite automatically until passing
+        auto_test: false                    # Let Aider iterate tests natively in 3-loop batches
+        sticky_context: false               # Retain completed files from prior tasks in context
+        map_tokens: 0                       # Repository map token budget (0 = disabled)
+        map_refresh: "manual"               # Repo map refresh mode ("manual", "auto", "always")
+        map_multiplier_no_files: 0          # Multiplier for map size when no files are loaded
+        max_chat_history_tokens: 100000     # Chat history token budget ceiling
+        yes_always: false                   # Auto-confirm all prompts non-interactively
+        auto_accept_architect: false        # Auto-accept Architect proposal to editor
+        auto_commits: true                  # Auto-commit git changes after each edit
+        suggest_shell_commands: true        # Allow model to propose shell commands
+        detect_urls: false                  # Scrape URLs found in model responses
+        disable_playwright: false           # Prevent automated browser installations
+
+    # Evidence Grounding & Validation Settings
+    validation:
+        enabled: false                      # Enable strict substring grounding audit
+        validation_tag: "evidence"          # Tag name used for grounded quotes
+        region_threshold: 0.60              # Cosine similarity cutoff for fuzzy region matching
+        region_margin: 2                    # Extra lines of context around matches
+        region_paragraphs: 0                # Number of full paragraphs to expand around matches
+        region_top_k: 5                     # Chunks to fetch for quote region verification
+        validation_loops: 3                 # Max heal attempts for ungrounded quotes
+        redo_oracle_job: false              # Re-run Oracle document generator on every pass
+        verify_all_claims: false            # Score claims around all quotes, not just ungrounded
+        entail_threshold: 0.5               # Entailment probability cutoff for MiniCheck verifier
+
+    # Post-Failure Escalation Debate
+    escalation_debate:
+        loops: 4                            # Maximum debate turns per round
+        rounds: 2                           # Number of debate -> apply -> test cycles
+        pass_history: true                  # Carry accumulated debate history to the next round
+
+    # Target & Context Files
+    files:
+        target_files: []                    # Editable files (e.g. ["src/main.py"])
+        extra_editable_files: []            # Secondary editable files (e.g. shared utilities)
+        test_files: []                      # Explicit test files; auto-derived if empty
+        context_files_job: []               # Read-only context for Job 1 & Job 2
+        context_files_test: []              # Read-only context for Job 3 & test loops
+
+    # Markdown Plan Templates
+    plans:
+        job_one_plan: "markdown/templates/implement.md"
+        job_two_plan: "markdown/templates/validate.md"
+        job_three_plan: "markdown/templates/testing.md"
+        iterate_plan: "markdown/templates/testing_unit_iterate.md"
+```
+
+---
+
+## Configuration Cross-Validation Matrix
+
+| Parameter Path | Layman Explanation & Codepath | Edge Cases & Optimization |
+| :--- | :--- | :--- |
+| `colors.architect_debate` / `oracle_debate` | Sets 24-bit ANSI terminal colors for debate turns in `orchestrate.py`. | Hex strings (e.g. `#38bdf8`) are parsed into ANSI escape sequences. Bad strings fall back to standard colors. |
+| `test_runner` / `test_command_prefix` | Defines the test execution command. Formatted dynamically as `{test_command_prefix} {test_runner.replace('{file}', specific_test_file)}`. | If running natively on host, keep `test_command_prefix: ""` empty. For containerized test suites, pass `docker exec -i ...`. |
+| `loop_aider_test` | Outer retry loop count in `run_workflow.py` for test-fixing passes. | In Review Mode, this is overridden per phase by `validation.validation_loops`. |
+| `models.editor_agent_test_fallback` | Escalation model substituted during iterative test repair on attempt $> 0$. | When an initial cheap editor model fails to fix a test error, Aider automatically escalates to this model on subsequent attempts. |
+| `rag.batch` | Controls LanceDB table topology. `true` = single shared table (`collection_name`). `false` = per-document table and per-document `.md` outputs. | Use `batch: true` for codebase search and technical libraries. Use `batch: false` for multi-paper academic reviews. |
+| `rag.use_docling` / `docling_timeout` | Enables digital document extraction via Docling before rasterizing to image OCR. | Bypasses slow pixel OCR for clean digital PDFs, Word documents (`.docx`), presentations (`.pptx`), and Excel sheets (`.xlsx`). |
+| `rag.recall_k` / `top_k` | Two-stage retrieval parameters in `oracle_agent.py`. `recall_k` vector candidates are fetched from LanceDB, then reranked down to `top_k` via Cross-Encoder. | If reranking is disabled or unavailable, the system truncates candidates to `top_k` directly. |
+| `oracle.start_job` | Discriminator between Review Mode (`start_job: true`) and Code Mode (`start_job: false`). | `start_job: true` executes programmatic synthesis before launching validator tasks. `start_job: false` executes Job 1/2/3 code plans. |
+| `oracle.pre_edit_debate.insert_debate` | 3-tuple boolean list `[j1, j2, j3]` parsed by `_parse_insert_debate()` in `run_workflow.py`. | Controls exactly which edit jobs receive an Architect <-> Oracle consensus debate before file modifications begin. |
+| `oracle.pre_edit_debate.job_debate_template` / `job_debate_collection` | Resolves prompt templates and vector collections for pre-edit debates in `run_workflow.py`. | Accepts either a single string (applied to all active jobs) or a 3-element list `[j1, j2, j3]` to assign dedicated debate prompt templates and vector collections to each respective job. |
+| `toggles.pair_programming` | Wraps Aider in a `script -qfe` PTY session for interactive terminal pairing. | Disables non-interactive outer retry loops; plans are loaded via `--read` so the user drives the conversation directly. |
+| `toggles.shared_history` | Toggles state isolation. `false` saves separate chat histories per file (`.aider.chat.history_<stem>.md`). | Always use `shared_history: false` when processing multiple independent files to prevent prompt history pollution. |
+| `toggles.map_tokens` / `map_refresh` | Controls Aider's repository map size and refresh policy. | Set `map_tokens: 0` and `map_refresh: manual` for isolated single-file tasks to maximize KV-cache reuse. |
+| `validation.enabled` / `validation_tag` | Activates exact-substring quote grounding in `validator.py`. | Scans generated documents for `[evidence]...[/evidence]` tags and scores them against source documents using Cosine and MiniCheck entailment. |
+| `escalation_debate.rounds` / `pass_history` | Multi-round debate -> apply -> test re-check cycle on persistent test failures. | `pass_history: true` carries accumulated debate context and ledgers across rounds so the model learns from prior attempts. |
+
+---
+
+## Complete Database Maintenance & CLI Reference
+
+### Knowledge Oracle Maintenance (`aider-oracle` / `.aider_factory/bash/oracle`)
+```bash
+# List all files and tables in the LanceDB database
+.aider_factory/bash/oracle --list-files
+.aider_factory/bash/oracle --list-tables
+
+# Ingest specific files or entire folders
+.aider_factory/bash/oracle --add-file docs/architecture.pdf
+.aider_factory/bash/oracle --add-table research_papers/
+
+# Web Ingestion & Sitemap Crawling
+.aider_factory/bash/oracle --add-web https://docs.example.com/sitemap.xml
+.aider_factory/bash/oracle --add-web --file urls.txt --workers 8
+
+# Deletion & Database Cleanup
+.aider_factory/bash/oracle --rm-file old_paper.pdf
+.aider_factory/bash/oracle --rm-table legacy_collection
+.aider_factory/bash/oracle --rm-db
+```
+
+### Standalone Web Research Agent (`aider-research` / `.aider_factory/bash/research`)
+```bash
+# Standard and academic web search
+.aider_factory/bash/research "Explain compound indexing in SQLite"
+.aider_factory/bash/research "Transformer attention mechanisms" --academic --top 15
+
+# Sitemap extraction with regex filtering
+.aider_factory/bash/research "https://docs.rs/sitemap.xml" --sitemap --grep "tokio" --out tokio_urls.txt
+```

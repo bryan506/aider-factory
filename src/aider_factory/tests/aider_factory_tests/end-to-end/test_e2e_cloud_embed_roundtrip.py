@@ -26,6 +26,7 @@ import shutil
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -36,30 +37,92 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 python_module_dir = os.path.abspath(os.path.join(script_dir, "../../../python"))
 sys.path.insert(0, python_module_dir)
 
-import rag_manager
-import importlib
-importlib.reload(rag_manager)
-embed_texts = rag_manager.embed_texts
+try:
+    from env_utils import load_env_files, is_dummy_key
+    load_env_files()
+except ImportError:
+    is_dummy_key = lambda k: False
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration & Environment
 # ---------------------------------------------------------------------------
-CLOUD_MODEL = "gemini/gemini-embedding-2"
-CLOUD_BACKEND = "openai"  # litellm routes gemini/ prefix internally
-EMBED_DIM = 3072  # gemini-embedding-2 produces 3072-dim vectors (verify at runtime)
+# CRITICAL FIX: Resolve API keys in os.environ BEFORE importing rag_manager.
+CLOUD_BACKEND = "openai"
+CLOUD_API_BASE = ""  # CRITICAL: Force empty so rag_manager uses litellm.embedding()
+
+_ROUTER_KEY = os.environ.get("LITELLM_API_KEY")
+_ROUTER_BASE = os.environ.get("LITELLM_BASE_URL")
+_GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+_OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
+
+def _is_valid(k):
+    return bool(k and k != "sk-dummy" and not is_dummy_key(k))
+
+CLOUD_API_KEY = None
+CLOUD_MODEL = os.environ.get("CLOUD_EMBED_MODEL")
+
+# 1. Try direct Gemini
+if _is_valid(_GEMINI_KEY):
+    CLOUD_API_KEY = _GEMINI_KEY
+    CLOUD_MODEL = CLOUD_MODEL or "gemini/gemini-embedding-2"
+    os.environ["GEMINI_API_KEY"] = _GEMINI_KEY
+
+# 2. Try direct OpenAI
+elif _is_valid(_OPENAI_KEY):
+    CLOUD_API_KEY = _OPENAI_KEY
+    CLOUD_MODEL = CLOUD_MODEL or "text-embedding-3-small"
+    os.environ["OPENAI_API_KEY"] = _OPENAI_KEY
+
+# 3. Try Router (LiteLLM)
+elif _is_valid(_ROUTER_KEY) and _ROUTER_BASE:
+    import requests
+    try:
+        r = requests.get(f"{_ROUTER_BASE.rstrip('/')}/models", headers={"Authorization": f"Bearer {_ROUTER_KEY}"}, timeout=5)
+        if r.status_code == 200:
+            for m in r.json().get("data", []):
+                m_id = m.get("id", "")
+                if "embed" in m_id.lower() or "bge" in m_id.lower() or "nomic" in m_id.lower():
+                    CLOUD_MODEL = f"openai/{m_id}"  # Force litellm to treat router as OpenAI compatible
+                    CLOUD_API_KEY = _ROUTER_KEY
+                    os.environ["OPENAI_API_KEY"] = _ROUTER_KEY
+                    os.environ["OPENAI_API_BASE"] = _ROUTER_BASE
+                    break
+    except Exception:
+        pass
+
+import importlib
+import litellm
+litellm.num_retries = 3
+
+import rag_manager
+import oracle_agent
+importlib.reload(rag_manager)
+importlib.reload(oracle_agent)
+embed_texts = rag_manager.embed_texts
+
+@pytest.fixture(autouse=True)
+def restore_cloud_env():
+    """Ensure API keys are present during test execution, defeating test pollution from env_utils tests."""
+    if _is_valid(_GEMINI_KEY):
+        os.environ["GEMINI_API_KEY"] = _GEMINI_KEY
+    if _is_valid(_OPENAI_KEY):
+        os.environ["OPENAI_API_KEY"] = _OPENAI_KEY
+    if _is_valid(_ROUTER_KEY):
+        os.environ["OPENAI_API_KEY"] = _ROUTER_KEY
+        os.environ["LITELLM_API_KEY"] = _ROUTER_KEY
+
+_IS_CI = os.environ.get("CI") == "true"
+_RUN_LIVE = os.environ.get("AIDER_FACTORY_LIVE_CLOUD_E2E") == "1"
+
+_SKIP_MSG = "No valid embedding configuration found (need GEMINI_API_KEY, OPENAI_API_KEY, or a router with embedding models)."
+requires_cloud_key = pytest.mark.skipif(
+    not (CLOUD_API_KEY and CLOUD_MODEL and (not _IS_CI or _RUN_LIVE)),
+    reason=_SKIP_MSG + " (In CI, set AIDER_FACTORY_LIVE_CLOUD_E2E=1 with an unexhausted API quota to run).",
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _has_cloud_key() -> bool:
-    """Check that a Google/Gemini API key is available in environment."""
-    return bool(
-        os.environ.get("GEMINI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-        or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    )
-
 
 def _cloud_embed(texts: list[str], batch_size: int = 8) -> list[list[float]]:
     """Convenience: embed via cloud path (api_base empty → litellm)."""
@@ -67,15 +130,9 @@ def _cloud_embed(texts: list[str], batch_size: int = 8) -> list[list[float]]:
         texts,
         backend=CLOUD_BACKEND,
         model=CLOUD_MODEL,
-        api_base="",  # empty → cloud path
+        api_base=CLOUD_API_BASE,
         batch_size=batch_size,
     )
-
-
-requires_cloud_key = pytest.mark.skipif(
-    not _has_cloud_key(),
-    reason="GEMINI_API_KEY / GOOGLE_API_KEY not set in environment",
-)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -153,7 +210,7 @@ def cloud_oracle_env(cloud_lancedb_dir):
         "ORACLE_COLLECTION": "cloud_fx_report",
         "ORACLE_EMBED_BACKEND": CLOUD_BACKEND,
         "ORACLE_EMBED_MODEL": CLOUD_MODEL,
-        "ORACLE_EMBED_API_BASE": "",
+        "ORACLE_EMBED_API_BASE": CLOUD_API_BASE,
         "ORACLE_TYPE_FILTER": "",
         "ORACLE_QUERY_PREFIX": "",
         "ORACLE_NO_RERANK": "1",
@@ -176,10 +233,7 @@ def cloud_oracle_env(cloud_lancedb_dir):
 @requires_cloud_key
 def test_cloud_routing_uses_litellm():
     """api_base='' must route through litellm.embedding, NOT requests.post."""
-    import types
-
     captured = {}
-    mock_litellm = types.ModuleType("litellm")
 
     def fake_embedding(model=None, input=None, **kw):
         captured["model"] = model
@@ -187,11 +241,7 @@ def test_cloud_routing_uses_litellm():
         captured["kw"] = kw
         return {"data": [{"embedding": [0.1] * 10} for _ in input]}
 
-    mock_litellm.embedding = fake_embedding
-    orig = sys.modules.get("litellm")
-    sys.modules["litellm"] = mock_litellm
-
-    try:
+    with patch("litellm.embedding", side_effect=fake_embedding):
         vecs = embed_texts(["test"], backend="openai",
                            model=CLOUD_MODEL, api_base="")
         assert captured["model"] == CLOUD_MODEL, (
@@ -199,11 +249,9 @@ def test_cloud_routing_uses_litellm():
         )
         assert captured["input"] == ["test"]
         print(f"  [PASS] Cloud routing: litellm.embedding called with model={CLOUD_MODEL}")
-    finally:
-        if orig is not None:
-            sys.modules["litellm"] = orig
-        else:
-            sys.modules.pop("litellm", None)
+
+    # Force clear litellm from sys.modules to prevent mock leakage into live tests
+    sys.modules.pop("litellm", None)
 
 
 # ---------------------------------------------------------------------------
@@ -248,19 +296,12 @@ def test_cloud_embed_deterministic():
 def test_cloud_embed_batching():
     """batch_size must be respected: 10 texts with batch_size=3 → 4 API calls."""
     call_count = {"n": 0}
-    import types
-
-    mock_litellm = types.ModuleType("litellm")
 
     def fake_embedding(model=None, input=None, **kw):
         call_count["n"] += 1
         return {"data": [{"embedding": [0.1] * 10} for _ in input]}
 
-    mock_litellm.embedding = fake_embedding
-    orig = sys.modules.get("litellm")
-    sys.modules["litellm"] = mock_litellm
-
-    try:
+    with patch("litellm.embedding", side_effect=fake_embedding):
         texts = [f"text_{i}" for i in range(10)]
         vecs = embed_texts(texts, backend="openai",
                            model=CLOUD_MODEL, api_base="", batch_size=3)
@@ -268,11 +309,9 @@ def test_cloud_embed_batching():
         # 10 / 3 = 4 batches (3+3+3+1)
         assert call_count["n"] == 4, f"Expected 4 batches, got {call_count['n']}"
         print(f"  [PASS] Cloud batching: 10 texts → {call_count['n']} API calls")
-    finally:
-        if orig is not None:
-            sys.modules["litellm"] = orig
-        else:
-            sys.modules.pop("litellm", None)
+
+    # Force clear litellm from sys.modules to prevent mock leakage into live tests
+    sys.modules.pop("litellm", None)
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +373,7 @@ def test_cloud_retrieve_uses_configured_model(cloud_lancedb_dir, cloud_populated
         os.environ["ORACLE_COLLECTION"] = "cloud_fx_report"
         os.environ["ORACLE_EMBED_BACKEND"] = CLOUD_BACKEND
         os.environ["ORACLE_EMBED_MODEL"] = CLOUD_MODEL
-        os.environ["ORACLE_EMBED_API_BASE"] = ""
+        os.environ["ORACLE_EMBED_API_BASE"] = CLOUD_API_BASE
         os.environ["ORACLE_NO_RERANK"] = "1"
         os.environ["ORACLE_TYPE_FILTER"] = ""
 
@@ -391,6 +430,7 @@ def test_cloud_cross_model_mismatch(cloud_lancedb_dir, cloud_populated_db):
 @requires_cloud_key
 def test_cloud_type_filter():
     """ORACLE_TYPE_FILTER=code must only return _code tables (cloud vectors)."""
+    time.sleep(2.0)
     import lancedb
     from lancedb.pydantic import LanceModel, Vector
     from oracle_agent import _retrieve
@@ -428,7 +468,7 @@ def test_cloud_type_filter():
             "ORACLE_COLLECTION": "cloudtest",
             "ORACLE_EMBED_BACKEND": CLOUD_BACKEND,
             "ORACLE_EMBED_MODEL": CLOUD_MODEL,
-            "ORACLE_EMBED_API_BASE": "",
+            "ORACLE_EMBED_API_BASE": CLOUD_API_BASE,
             "ORACLE_NO_RERANK": "1",
         }.items():
             saved_env[k] = os.environ.get(k)
@@ -470,7 +510,7 @@ def test_cloud_bad_model_name():
             ["test"],
             backend="openai",
             model="google/nonexistent-model-xyz-99999",
-            api_base="",
+            api_base=CLOUD_API_BASE,
         )
     print("  [PASS] Bad cloud model name raises exception (no silent zeros)")
 
@@ -482,7 +522,7 @@ def test_cloud_bad_model_name():
 @requires_cloud_key
 def test_cloud_empty_input():
     """Empty input must return [] without hitting the API."""
-    vecs = embed_texts([], backend="openai", model=CLOUD_MODEL, api_base="")
+    vecs = embed_texts([], backend="openai", model=CLOUD_MODEL, api_base=CLOUD_API_BASE)
     assert vecs == []
     print("  [PASS] Empty cloud input returns [] (no API call)")
 
@@ -494,6 +534,7 @@ def test_cloud_empty_input():
 @requires_cloud_key
 def test_cloud_full_ingest_pipeline():
     """rag_manager.ingest() end-to-end with cloud embedding model."""
+    time.sleep(2.0)
     import lancedb
     from rag_manager import ingest
 
@@ -526,7 +567,7 @@ def test_cloud_full_ingest_pipeline():
             collection_name=collection,
             embed_model=CLOUD_MODEL,
             embed_backend=CLOUD_BACKEND,
-            embed_api_base="",  # cloud path
+            embed_api_base=CLOUD_API_BASE,
             chunk_size_chars=800,
             chunk_overlap_chars=100,
             ocr_api_base=None,
@@ -556,7 +597,7 @@ def test_cloud_full_ingest_pipeline():
         os.environ["ORACLE_COLLECTION"] = tables[0]
         os.environ["ORACLE_EMBED_BACKEND"] = CLOUD_BACKEND
         os.environ["ORACLE_EMBED_MODEL"] = CLOUD_MODEL
-        os.environ["ORACLE_EMBED_API_BASE"] = ""
+        os.environ["ORACLE_EMBED_API_BASE"] = CLOUD_API_BASE
         os.environ["ORACLE_NO_RERANK"] = "1"
         os.environ["ORACLE_TYPE_FILTER"] = ""
 
@@ -608,8 +649,8 @@ if __name__ == "__main__":
     print("=" * 70)
     print(f"E2E Cloud Embed → LanceDB → Query Roundtrip ({CLOUD_MODEL})")
     print("=" * 70)
-    if not _has_cloud_key():
-        print("SKIP: No GEMINI_API_KEY / GOOGLE_API_KEY in environment.")
+    if not CLOUD_API_KEY:
+        print(f"SKIP: {_SKIP_MSG}")
         sys.exit(0)
 
     import subprocess

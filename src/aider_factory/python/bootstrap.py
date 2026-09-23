@@ -212,6 +212,7 @@ def run_bootstrap(target_dir: str) -> None:
     Always produces a valid YAML file even with zero keys or no router.
     """
     cwd = os.path.abspath(target_dir)
+    os.makedirs(cwd, exist_ok=True)
     repo_name = os.path.basename(cwd).strip().replace(" ", "_")
 
     # --- Step 1: Detect keys ---
@@ -242,18 +243,21 @@ def run_bootstrap(target_dir: str) -> None:
     # Project identity
     sensible_name = f"{repo_name.replace('_', ' ').replace('-', ' ').title()} Pipeline"
     content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{sensible_name}"', content, count=1)
-    content = re.sub(r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd}"', content, count=1)
+    cwd_forward = cwd.replace("\\", "/")
+    content = re.sub(r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd_forward}"', content, count=1)
 
     # Test framework
     content = re.sub(r'test_command_prefix:\s*".*?"', lambda _: f'test_command_prefix: "{fw_prefix}"', content, count=1)
     content = re.sub(r'test_runner:\s*".*?"', lambda _: f'test_runner: "{fw_runner}"', content, count=1)
     content = re.sub(r'test_naming_and_path:\s*".*?"', lambda _: f'test_naming_and_path: "{fw_path}"', content, count=1)
 
-    # Router endpoints (only if router detected)
+    # Router endpoints: only traditional-LLM slots get the detected router URL.
+    # RAG, OCR, embed, ranking, grounding stay at template defaults —
+    # auto-resolved locally at runtime (llama.cpp, sentence-transformers, MiniCheck).
     if router_base:
-        for ep_key in ("architect_api_base", "editor_api", "editor_api_fallback",
-                       "rag_agent_api", "grounding_agent_api", "ocr_api_base",
-                       "embed_api_base"):
+        _ROUTER_ENDPOINTS = ("architect_api_base", "editor_api",
+                             "editor_api_fallback")
+        for ep_key in _ROUTER_ENDPOINTS:
             content = re.sub(
                 rf'{ep_key}:\s*".*?"',
                 lambda _, k=ep_key: f'{k}: "{router_base}"',
@@ -286,6 +290,80 @@ def run_bootstrap(target_dir: str) -> None:
         count=1,
     )
 
+    # --- Step 4b: Auto-discover target_files and context_files_job ---
+    _SOURCE_EXTS = {".py", ".r", ".rs", ".go", ".js", ".ts", ".jsx", ".tsx"}
+    _EXCLUDE_DIRS = frozenset({
+        ".git", ".aider_factory", "node_modules", "__pycache__",
+        ".venv", "venv", "dist", "build", ".cache", ".pytest_cache",
+        "site-packages", ".eggs",
+    })
+    _EXCLUDE_RE = re.compile(
+        r"(?:^|[\\/])(?:tests?[\\/]|test_|conftest\.py|setup\.py|__init__\.py$)"
+    )
+
+    def _discover_target_files(base_dir: str) -> list:
+        found = []
+        for root, dirs, files in os.walk(base_dir):
+            dirs[:] = [d for d in dirs
+                       if d not in _EXCLUDE_DIRS
+                       and not d.endswith(".egg-info")]
+            for fname in files:
+                if os.path.splitext(fname)[1].lower() not in _SOURCE_EXTS:
+                    continue
+                rel = os.path.relpath(os.path.join(root, fname), base_dir).replace("\\", "/")
+                if _EXCLUDE_RE.search(rel):
+                    continue
+                found.append(rel)
+        found.sort()
+        return found
+
+    def _discover_context_files(base_dir: str) -> list:
+        ctx = []
+        for name in ("README.md", "CHANGELOG.md"):
+            if os.path.isfile(os.path.join(base_dir, name)):
+                ctx.append(name)
+        docs_dir = os.path.join(base_dir, "docs")
+        if os.path.isdir(docs_dir):
+            for sub in sorted(os.listdir(docs_dir)):
+                if sub.endswith(".md"):
+                    ctx.append(os.path.join("docs", sub).replace("\\", "/"))
+        return ctx
+
+    target_files = _discover_target_files(cwd)
+    context_files = _discover_context_files(cwd)
+
+    # Pipeline processes one file per session — pick exactly ONE anchor file
+    # that physically exists. Prefer first source file; fall back to any
+    # discoverable file so aider never creates a phantom path.
+    _anchor = None
+    if target_files:
+        _anchor = target_files[0]
+    else:
+        # Broaden: pick any real file at repo root (README, DESCRIPTION, etc.)
+        for _candidate in sorted(os.listdir(cwd)):
+            _full = os.path.join(cwd, _candidate)
+            if os.path.isfile(_full) and not _candidate.startswith("."):
+                _anchor = _candidate
+                break
+
+    if _anchor:
+        content = re.sub(
+            r'(target_files:\s*)\[\]',
+            lambda m: m.group(1) + f'\n        - "{_anchor}"',
+            content,
+            count=1,
+        )
+
+    if context_files:
+        _cf = "\n".join(f'        - "{f}"' for f in context_files[:15])
+        content = re.sub(
+            r'(context_files_job:\s*)\[\]',
+            lambda m: m.group(1) + "\n" + _cf,
+            content,
+            count=1,
+        )
+    # context_files_test: left as [] — user populates manually.
+
     # Provision .aider_factory directory
     local_aider_factory_dir = Path(cwd) / ".aider_factory"
     local_aider_factory_dir.mkdir(parents=True, exist_ok=True)
@@ -304,6 +382,10 @@ def run_bootstrap(target_dir: str) -> None:
     # Print structured summary
     print(f"\n\u2705 .aider_factory/.env_{repo_name}.yml written")
     print(f"   Framework:  {fw_name} (detected from filesystem)")
+    print(f"   Target:     {_anchor or '\u26a0\ufe0f none found'}"
+          + (f"  ({len(target_files)} source files available)" if len(target_files) > 1 else ""))
+    print(f"   Context:    {len(context_files)} file(s)"
+          + (f"  e.g. {context_files[0]}" if context_files else ""))
     if model_choices.get("embed"):
         _em = model_choices["embed"]
         _src = "cloud/router" if any(x in _em.lower() for x in ("gemini", "openai", "embedding", "qwen")) else "local"
@@ -362,10 +444,11 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
                     os.makedirs(".aider_factory", exist_ok=True)
                     sensible_name = f"{repo_name.replace('_', ' ').replace('-', ' ').title()} Pipeline"
                     cwd = os.getcwd()
+                    cwd_forward = cwd.replace("\\", "/")
                     with open(master_env_path, "r", encoding="utf-8") as f:
                         content = f.read()
                     content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{sensible_name}"', content)
-                    content = re.sub(r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd}"', content)
+                    content = re.sub(r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd_forward}"', content)
                     with open(file_path, "w", encoding="utf-8") as f:
                         f.write(content)
                     print(f"ℹ️ Created configuration file from template: {file_path}")
@@ -392,11 +475,13 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
     history_text = "".join([m.get("content", "") for m in messages if m.get("role") != "system"])
     persistent_additions = ""
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    repo_root = os.path.dirname(os.path.dirname(pkg_dir))
     
     if not terminal_mode and "<reference_schema>" not in history_text:
         candidate_ref_schemas = [
             os.path.join(".aider_factory", "sample_yaml_config", "complete_env.yml"),
             os.path.join(pkg_dir, "default_configs", "sample_yaml_config", "complete_env.yml"),
+            os.path.join(repo_root, "src", "aider_factory", "default_configs", "sample_yaml_config", "complete_env.yml"),
             os.path.join(pkg_dir, "sample_yaml_config", "complete_env.yml"),
             os.path.join(pkg_dir, "default_configs", "env.yml"),
         ]
@@ -415,6 +500,7 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         candidate_yaml_docs = [
             os.path.join(".aider_factory", "markdown", "docs", "yaml_docs_sample.md"),
             os.path.join(pkg_dir, "markdown", "docs", "yaml_docs_sample.md"),
+            os.path.join(repo_root, "src", "aider_factory", "markdown", "docs", "yaml_docs_sample.md"),
             os.path.join(pkg_dir, "markdown", "yaml_docs_sample.md"),
         ]
         yaml_docs_path = next((p for p in candidate_yaml_docs if os.path.exists(p)), None)
@@ -432,6 +518,7 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         candidate_skills_dirs = [
             os.path.join(".aider_factory", "markdown", "skills"),
             os.path.join(pkg_dir, "markdown", "skills"),
+            os.path.join(repo_root, "src", "aider_factory", "markdown", "skills"),
         ]
         skills_dir = next((d for d in candidate_skills_dirs if os.path.isdir(d)), None)
         skills_content = ""
@@ -444,11 +531,15 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
             persistent_additions += f"<skills_reference>\n{skills_content.strip()}\n</skills_reference>\n\n"
 
     if expert_mode and "<factory_service_manual>" not in history_text:
+        repo_root = os.path.dirname(os.path.dirname(pkg_dir))
         candidate_paths = [
             os.path.join(".aider_factory", "markdown", "docs", "factory_service_manual.md"),
             os.path.join(pkg_dir, "markdown", "docs", "factory_service_manual.md"),
-            os.path.join(os.path.dirname(os.path.dirname(pkg_dir)), "docs", "factory_service_manual.md"),
+            os.path.join(repo_root, "docs", "factory_service_manual.md"),
             os.path.join(pkg_dir, "markdown", "factory_service_manual.md"),
+            os.path.join(pkg_dir, "docs", "factory_service_manual.md"),
+            os.path.join(repo_root, "src", "aider_factory", "markdown", "docs", "factory_service_manual.md"),
+            os.path.join(repo_root, "src", "aider_factory", "docs", "factory_service_manual.md"),
         ]
         manual_path = next((p for p in candidate_paths if os.path.exists(p)), None)
         if manual_path:
@@ -634,10 +725,8 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
         
         # Save session history directly
         session_dir = os.path.dirname(session_file)
-        if session_dir and os.path.exists(session_dir):
-            with open(session_file, "w", encoding="utf-8") as f:
-                json.dump(messages, f, ensure_ascii=False, indent=2)
-        elif not ask_mode:
+        # In ask/terminal mode, do not pollute pristine directories with .aider_factory
+        if not ask_mode or not session_dir or os.path.exists(session_dir):
             if session_dir:
                 os.makedirs(session_dir, exist_ok=True)
             with open(session_file, "w", encoding="utf-8") as f:

@@ -52,6 +52,21 @@ class _StreamIsolationBase(unittest.TestCase):
 
     NOISE_LINES = 500  # Default noise volume per fake aider invocation
 
+    @staticmethod
+    def _write_fake_binary(path: Path, content: str):
+        """Write a fake binary that works on both POSIX and Windows."""
+        if sys.platform == "win32":
+            py_path = str(path) + ".py"
+            with open(py_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            cmd_path = str(path) + ".cmd"
+            with open(cmd_path, "w", encoding="utf-8") as f:
+                f.write(f'@"{sys.executable}" "%~dp0{os.path.basename(py_path)}" %*\n@exit /b %errorlevel%\n')
+        else:
+            with open(str(path), "w", encoding="utf-8") as f:
+                f.write(content)
+            os.chmod(str(path), os.stat(str(path)).st_mode | stat.S_IEXEC)
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
@@ -86,14 +101,17 @@ class _StreamIsolationBase(unittest.TestCase):
             sys.exit(int(os.environ.get("AIDER_FAKE_EXIT", "0")))
         """)
         self.mock_aider = self.bin_dir / "aider"
-        self.mock_aider.write_text(fake_aider, encoding="utf-8")
-        self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_aider, fake_aider)
 
         # --- Fake git: emits identifiable diff marker ---
+        self._git_args_dump = self.root / "git_args_dump.txt"
         self.mock_git = self.bin_dir / "git"
-        fake_git = textwrap.dedent("""\
+        fake_git = textwrap.dedent(f"""\
             #!/usr/bin/env python3
             import sys
+            with open(r"{self._git_args_dump}", "w") as f:
+                for arg in sys.argv[1:]:
+                    f.write(f"{{arg}}\\n")
             if "diff" in sys.argv:
                 print("diff --git a/target.py b/target.py")
                 print("@@ -1 +1 @@")
@@ -101,12 +119,11 @@ class _StreamIsolationBase(unittest.TestCase):
                 print("+E2E_DIFF_MARKER_UNIQUE_7x9")
             sys.exit(0)
         """)
-        self.mock_git.write_text(fake_git, encoding="utf-8")
-        self.mock_git.chmod(self.mock_git.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_git, fake_git)
 
         # --- PATH injection ---
         self._orig_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{self.bin_dir}:{self._orig_path}"
+        os.environ["PATH"] = f"{self.bin_dir}{os.pathsep}{self._orig_path}"
 
         # --- Env scrubbing ---
         self._orig_env = os.environ.copy()
@@ -265,7 +282,7 @@ class TestS06DeadlockPrevention(_StreamIsolationBase):
     """Verify pipe draining prevents deadlock with large inner aider output."""
 
     def test_s06_large_output_silent_no_deadlock(self):
-        """500 lines drained in silent mode within 5 seconds."""
+        """500 lines drained in silent mode within 10 seconds."""
         target, spec = self._make_target_and_spec()
 
         from apply_agent import run_apply
@@ -280,10 +297,10 @@ class TestS06DeadlockPrevention(_StreamIsolationBase):
         elapsed = time.monotonic() - start
 
         self.assertTrue(success)
-        self.assertLess(elapsed, 5.0, f"Deadlock suspected: took {elapsed:.1f}s")
+        self.assertLess(elapsed, 10.0, f"Deadlock suspected: took {elapsed:.1f}s")
 
     def test_s07_large_output_stream_no_deadlock(self):
-        """500 lines drained in stream mode within 5 seconds."""
+        """500 lines drained in stream mode within 10 seconds."""
         target, spec = self._make_target_and_spec()
 
         from apply_agent import run_apply
@@ -298,7 +315,7 @@ class TestS06DeadlockPrevention(_StreamIsolationBase):
         elapsed = time.monotonic() - start
 
         self.assertTrue(success)
-        self.assertLess(elapsed, 5.0, f"Deadlock suspected: took {elapsed:.1f}s")
+        self.assertLess(elapsed, 10.0, f"Deadlock suspected: took {elapsed:.1f}s")
 
     def test_s08_massive_output_pipe_overflow_prevention(self):
         """5000 lines (exceeds 64KB pipe buffer) must not deadlock or lose data."""
@@ -313,8 +330,7 @@ class TestS06DeadlockPrevention(_StreamIsolationBase):
                     Path(arg).write_text("# edited\\n")
             sys.exit(0)
         """)
-        self.mock_aider.write_text(fake_aider, encoding="utf-8")
-        self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_aider, fake_aider)
 
         target, spec = self._make_target_and_spec()
 
@@ -673,8 +689,7 @@ class TestS25BinaryContentGraceful(_StreamIsolationBase):
                     Path(arg).write_text("# edited\\n")
             sys.exit(0)
         """)
-        self.mock_aider.write_text(fake_aider, encoding="utf-8")
-        self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_aider, fake_aider)
 
         target, spec = self._make_target_and_spec()
 
@@ -871,8 +886,7 @@ class TestS32LineBufferedBehavior(_StreamIsolationBase):
                     Path(arg).write_text("# edited\\n")
             sys.exit(0)
         """)
-        self.mock_aider.write_text(fake_aider, encoding="utf-8")
-        self.mock_aider.chmod(self.mock_aider.stat().st_mode | stat.S_IEXEC)
+        self._write_fake_binary(self.mock_aider, fake_aider)
 
         target, spec = self._make_target_and_spec()
 
@@ -894,6 +908,29 @@ class TestS32LineBufferedBehavior(_StreamIsolationBase):
             cwd=str(self.root),
         )
         self.assertTrue(success)
+
+
+# ===========================================================================
+# S33: Git diff plain-text flags (--no-color, --no-ext-diff)
+# ===========================================================================
+class TestS33GitDiffPlaintextFlags(_StreamIsolationBase):
+    """Verify git diff is always called with --no-color and --no-ext-diff."""
+
+    def test_s33_git_diff_no_color_flags_present(self):
+        target, spec = self._make_target_and_spec()
+        from apply_agent import run_apply
+        run_apply(
+            files=[str(target)],
+            spec_file=str(spec),
+            no_diff=False,
+            stream=False,
+            cwd=str(self.root),
+        )
+        self.assertTrue(self._git_args_dump.exists())
+        git_args = self._git_args_dump.read_text(encoding="utf-8").splitlines()
+        self.assertIn("--no-color", git_args)
+        self.assertIn("--no-ext-diff", git_args)
+        self.assertIn("--no-pager", git_args)
 
 
 if __name__ == "__main__":

@@ -1262,17 +1262,17 @@ def _add_maintenance(action, paths):
     if not os.path.exists(config_path):
         config_path = os.path.join(project_dir, ".env.yml")
 
-    if not os.path.exists(config_path):
-        print(f"[oracle] config file not found: {config_path}", file=sys.stderr)
-        return 1
-
-    print(f"[oracle] Loading configuration from: {config_path}", file=sys.stderr)
-    try:
-        with open(config_path, "r") as f:
-            cfg = yaml.safe_load(f) or {}
-    except Exception as e:
-        print(f"[oracle] failed to load config: {e}", file=sys.stderr)
-        return 1
+    cfg = {}
+    if config_path and os.path.exists(config_path):
+        print(f"[oracle] Loading configuration from: {config_path}", file=sys.stderr)
+        try:
+            with open(config_path, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"[oracle] failed to load config: {e}", file=sys.stderr)
+            return 1
+    else:
+        print(f"[oracle] Config file not found; using default configuration.", file=sys.stderr)
 
     project_dir = str(cfg.get("working_directory", project_dir))
     context_root = os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB")
@@ -1463,16 +1463,17 @@ def _add_web_maintenance(urls):
     if not os.path.exists(config_path):
         config_path = os.path.join(project_dir, ".env.yml")
 
-    if not os.path.exists(config_path):
-        print(f"[oracle] config file not found: {config_path}", file=sys.stderr)
-        return 1
-
-    try:
-        with open(config_path, "r") as f:
-            cfg = yaml.safe_load(f) or {}
-    except Exception as e:
-        print(f"[oracle] failed to load config: {e}", file=sys.stderr)
-        return 1
+    cfg = {}
+    if config_path and os.path.exists(config_path):
+        print(f"[oracle] Loading configuration from: {config_path}", file=sys.stderr)
+        try:
+            with open(config_path, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"[oracle] failed to load config: {e}", file=sys.stderr)
+            return 1
+    else:
+        print(f"[oracle] Config file not found; using default configuration.", file=sys.stderr)
 
     project_dir = str(cfg.get("working_directory", project_dir))
     context_root = os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB")
@@ -1710,11 +1711,13 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
             pass
 
     # 3. Session state: Aider history file (architect) + persistent oracle session
-    debate_aider_history = os.path.join(
-        project_dir, ".aider_factory", ".debate_aider_history.md"
+    debate_aider_history = os.environ.get(
+        "ORACLE_DEBATE_AIDER_HISTORY",
+        os.path.join(project_dir, ".aider_factory", ".debate_aider_history.md")
     )
-    _debate_session_file = os.path.join(
-        project_dir, ".aider_factory", ".oracle_debate_session.json"
+    _debate_session_file = os.environ.get(
+        "ORACLE_DEBATE_SESSION_FILE",
+        os.path.join(project_dir, ".aider_factory", ".oracle_debate_session.json")
     )
 
     # 4. Determine oracle system prompt (stable across all turns)
@@ -2074,10 +2077,6 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
 def _ensure_oracle_config():
     """Populate missing ORACLE_* environment variables from the active YAML config."""
     load_env_files()
-    # Inject LITELLM_BASE_URL fallback for cluster mode
-    if os.environ.get("LITELLM_BASE_URL"):
-        os.environ.setdefault("ORACLE_AGENT_API_BASE", os.environ["LITELLM_BASE_URL"])
-        os.environ.setdefault("ORACLE_EMBED_API_BASE", os.environ["LITELLM_BASE_URL"])
 
     project_dir = os.getcwd()
     yaml_path = os.environ.get("ORACLE_CONFIG_FILE")
@@ -2181,6 +2180,13 @@ def _ensure_oracle_config():
             os.environ.setdefault("ORACLE_ARCHITECT_API_BASE", endpoints.get("architect_api_base"))
     except Exception:
         pass
+
+    # Inject LITELLM_BASE_URL fallback for cluster mode AFTER yaml
+    if os.environ.get("LITELLM_BASE_URL"):
+        rag_agent = os.environ.get("ORACLE_AGENT_MODEL", "")
+        if not any(rag_agent.startswith(p) for p in ("gemini/", "anthropic/", "groq/")):
+            os.environ.setdefault("ORACLE_AGENT_API_BASE", os.environ["LITELLM_BASE_URL"])
+        os.environ.setdefault("ORACLE_EMBED_API_BASE", os.environ["LITELLM_BASE_URL"])
 
 
 def main():

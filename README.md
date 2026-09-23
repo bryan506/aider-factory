@@ -5,6 +5,8 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python: 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![Platform: Linux](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)](https://www.kernel.org/)
+[![Platform: macOS](https://img.shields.io/badge/Platform-macOS-lightgrey.svg)](https://www.apple.com/macos/)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows/)
 [![Powered by Aider](https://img.shields.io/badge/Powered%20by-Aider-orange.svg)](https://aider.chat)
 
 **aider-factory** is a modular, lightweight, YAML-driven automation harness, grounding validator, and RAG/debate engine built on top of [Aider](https://aider.chat).
@@ -29,11 +31,15 @@ You do not have to buy into a monolithic ecosystem. Each component of `aider-fac
 
 - **`aider-helper`**: Dual-purpose configuration architect and general AI terminal assistant.
 - **`aider-oracle`**: A blazing-fast local RAG client.
-- **`aider-validate`**: A deterministic fact-checker and quote-sticher for CI/CD.
-
-For a deep dive into the system's architecture and load-bearing rules, see the **[Core Philosophies & Invariants Specification](src/aider_factory/markdown/docs/core_philosophies.md)**.
+- **`aider-validate`**: A deterministic fact-checker and quote-stitcher for CI/CD.
 - **`aider-research`**: A private metasearch CLI.
-- **`aider-factory`**: The pipeline orchestrator.
+- **`aider-factory`**: The pipeline orchestrator and multi-session manager.
+- **`aider-launcher`**: Cross-platform workflow launcher with output teeing and cost accounting.
+- **`aider-clean-lancedb`**: Cross-platform cleanup of ephemeral RAG artifacts.
+
+For deep dives into the system's architecture, load-bearing rules, and cross-platform matrix:
+- **[Core Philosophies & Invariants](src/aider_factory/markdown/docs/core_philosophies.md)**
+- **[Cross-Platform OS Support Guide](src/aider_factory/markdown/docs/cross_platform_os_support.md)**
 
 ### 3. Deterministic Grounding & Validation (Code & Review)
 

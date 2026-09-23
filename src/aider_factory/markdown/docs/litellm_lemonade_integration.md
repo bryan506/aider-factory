@@ -98,23 +98,18 @@ Reload: `source ~/.zshrc`
 
 ## 4. Pipeline Configuration (`.aider_factory/.env_<repo>.yml`)
 
-### 4.1 Endpoints block
+### 4.1 Endpoints block & Bootstrap Routing Boundaries
 
-Point **all** endpoints at the router. The router internally dispatches to the correct backend:
+When configuring endpoints for a LiteLLM Router, point the primary conversational LLM slots to the router URL. The bootstrapper (`aider-helper bootstrap`) strictly scopes router substitutions to:
 
 ```yaml
 endpoints:
     architect_api_base: "http://YOUR_ROUTER_IP:4000/v1"
     editor_api: "http://YOUR_ROUTER_IP:4000/v1"
     editor_api_fallback: "http://YOUR_ROUTER_IP:4000/v1"
-    rag_agent_api: "http://YOUR_ROUTER_IP:4000/v1"
-    grounding_agent_api: "http://YOUR_ROUTER_IP:4000/v1"
-    ranking_api_base: "http://YOUR_ROUTER_IP:4000/v1"
-    ocr_api_base: "http://YOUR_ROUTER_IP:4000/v1"
-    embed_api_base: "http://YOUR_ROUTER_IP:4000/v1"
 ```
 
-> **Note:** If your router does not serve embedding or OCR models, leave those pointing at their dedicated local servers (e.g. `http://<embed-server-host>:8080/v1` for embeddings).
+> **Critical Routing Boundary:** Endpoints for `rag_agent_api`, `grounding_agent_api`, `ranking_api_base`, `ocr_api_base`, and `embed_api_base` remain at their template placeholders or dedicated server addresses. This prevents the router configuration from stomping local in-process engines (such as local `llama-server`, `sentence-transformers`, or `MiniCheck`). If your router specifically serves embeddings or vision models, you can explicitly point `embed_api_base` or `ocr_api_base` to the router URL.
 
 ### 4.2 Models block
 
@@ -214,19 +209,26 @@ aider-helper query -am "How do I add a second phase?"
 aider-helper query --clear
 ```
 
-### 6.3 How auth works (internal flow)
+### 6.3 How auth works (internal flow & `_router_key` resolution)
 
 ```
 detect_api_key()
   → AIDER_HELPER_API_BASE set? → return ("CUSTOM_LOCAL", "dummy")
 
-run_query() api_base branch:
-  _explicit = LITELLM_API_KEY          ← falls back to real token
-  helper_key = resolve_api_key(model, api_base, _explicit)
-  if helper_key is real → kwargs["api_key"] = helper_key
-  elif _explicit is real → kwargs["api_key"] = _explicit
-  else → omit api_key (local llama.cpp ignores auth)
+run_query() / orchestrate.py / run_workflow.py:
+  _router_key = os.environ.get("LITELLM_API_KEY", "")
+  _router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
+  
+  if task.architect_api_base:
+      env["OPENAI_API_BASE"] = task.architect_api_base
+      env["OPENAI_API_KEY"] = _router_key
+  if task.editor_api_base:
+      env["OLLAMA_API_BASE"] = task.editor_api_base
+      env["LM_STUDIO_API_BASE"] = task.editor_api_base
+      env["LM_STUDIO_API_KEY"] = _router_key
 ```
+
+If `LITELLM_API_KEY` contains a valid bearer token, it propagates directly into child processes, satisfying LiteLLM router proxy validation. If unset or configured with placeholders (`sk-dummy`, `none`), it falls back to `"sk-dummy"` for unauthenticated local inference servers.
 
 ---
 

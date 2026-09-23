@@ -4,21 +4,16 @@
 
 `aider-factory` provides a private, automated web research and ingestion subsystem composed of `research_agent.py` (metasearch & sitemap harvesting) and `rag_web.py` (multi-stage URL extraction & `llms.txt` discovery). This subsystem enables agents to query live web data, harvest documentation manifests, and ingest external HTML/PDFs into LanceDB without relying on commercial search APIs.
 
-### SearXNG Service Auto-Provisioning (`ensure_searxng_service`)
+### SearXNG Service Auto-Provisioning & OS Boundary (`ensure_searxng_service`)
 
-The pipeline automatically manages and provisions the local SearXNG service (`http://localhost:8088`)
-in user-space via `cli.py` on first run or whenever `aider-research` is invoked:
+The pipeline automatically provisions and probes the local SearXNG service (`http://localhost:8088`) via `cli.py`:
 
-1.  **Health Check Probe:** Attempts a 1-second `GET http://localhost:8088/healthz` probe.
-2.  **Container Engine Precedence (Podman-First):**
-    - **Podman (Primary):** Checks for `podman` first (`podman info`). Preferred for rootless,
-      zero-sudo execution.
-    - **Docker (Fallback):** Checked only if Podman is missing or unusable.
-3.  **Configuration & Systemd Unit Synthesis:** Auto-generates `~/.config/searxng/settings.yml`
-    (enabling JSON format) and writes a user-space systemd unit file at
-    `~/.config/systemd/user/searxng.service`.
-4.  **Daemon Launch:** Executes `systemctl --user enable --now searxng.service` without requiring
-    `sudo` privileges.
+1.  **Health Check Probe (All Platforms):** Attempts a fast 1-second `GET http://localhost:8088/healthz` probe. If healthy (`200 OK`), execution continues immediately.
+2.  **Linux Systemd Auto-Provisioning:** If the service is not running and `sys.platform == "linux"`:
+    - **Container Engine Precedence (Podman-First):** Checks for rootless `podman` first; falls back to `docker` if podman is unavailable.
+    - **Configuration & Systemd Unit Synthesis:** Auto-generates `~/.config/searxng/settings.yml` (enabling JSON format) and writes a user-space systemd unit at `~/.config/systemd/user/searxng.service`.
+    - **Daemon Launch:** Executes `systemctl --user enable --now searxng.service` without requiring `sudo` privileges.
+3.  **Windows & macOS Fallback:** On non-Linux platforms (`win32`, `darwin`), systemd is unavailable. The CLI outputs an informational notice advising the user to start SearXNG manually (e.g., via Docker Desktop or a remote container) or configure `SEARXNG_BASE_URL`.
 
 ### Foundational Invariants
 
@@ -188,6 +183,7 @@ phases:
 | Edge Case / Failure Mode            | Root Cause / Symptom                                                                     | Mitigation & System Recovery                                                                                               |
 | :---------------------------------- | :--------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------- |
 | **SearXNG Rate Limit (CAPTCHA)**    | Local SearXNG returns 0 results or `unresponsive_engines`.                               | `research_agent.py` automatically fetches healthy public instances from `searx.space` and retries the query.               |
+| **SearXNG on Windows / macOS**      | `ensure_searxng_service()` emits notice; service is offline.                             | Run SearXNG via Docker Desktop (`docker run -d -p 8088:8080 searxng/searxng`) or point `SEARXNG_BASE_URL` to an external host. |
 | **Playwright Provisioning Blocked** | `playwright install chromium` fails due to corporate firewall or air-gapped environment. | Exception is caught safely. Extraction fails gracefully without crashing the pipeline, logging a warning to `stderr`.      |
 | **Sitemap 404 Not Found**           | Target domain does not expose `/sitemap.xml`.                                            | Pipeline automatically fetches `/robots.txt` to parse `Sitemap:` directives. If absent, falls back to probing `/llms.txt`. |
 | **SPA Yields Empty Markdown**       | Target URL is a React/Vue SPA; Trafilatura extracts $< 100$ bytes.                       | Pipeline detects low byte count and escalates to the Headless Playwright fallback to render the DOM before extraction.     |

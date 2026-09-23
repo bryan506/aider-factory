@@ -118,6 +118,8 @@ The Knowledge Oracle provides both a search/query interface and a full-featured 
 | `--rm-table` | `<table_name>` | Drops a specific LanceDB table directly from the database. |
 | `--rm-db` | None | Wipes the entire `lancedb/` vector store directory while preserving raw Markdown text and OCR image caches. |
 
+> **Resilient Standalone Maintenance:** Maintenance commands (`--add-file`, `--add-table`, `--add-web`) do not fail if a local `.env.yml` configuration file is absent. If no configuration file is detected, `oracle_agent.py` automatically initializes default ingestion parameters and routes to the default `"knowledge"` collection, allowing standalone usage in pristine repositories.
+
 ---
 
 ## 5. Configuration Schema & YAML Knobs
@@ -166,11 +168,12 @@ phases:
 
 ## 6. Operational Edge Cases, Failure Modes & Telemetry
 
-### Session File Isolation
+### Session File Isolation & Environment Overrides
 To prevent cross-phase context contamination and preserve debate history during apply-phase cleanups, the Oracle maintains isolated session sidecars in `.aider_factory/`:
 
-- `.oracle_session.json`: Stores interactive multi-turn `/run aider-oracle` conversation history. Cleared automatically between Aider tasks.
-- `.oracle_debate_session.json`: Stores debate back-and-forth turns. Configured via `ORACLE_SESSION_FILE`. Cleared between rounds only when `pass_round_history: false`.
+- `.oracle_session.json`: Stores interactive multi-turn `/run aider-oracle` conversation history. Cleared automatically between Aider tasks. Overridable via `ORACLE_SESSION_FILE`.
+- `.oracle_debate_session.json`: Stores debate back-and-forth turns. Overridable via `ORACLE_DEBATE_SESSION_FILE` to prevent test pollution or cross-session collisions. Cleared between rounds only when `pass_history: false`.
+- `.debate_aider_history.md`: Stores the Architect's ask-mode debate conversation turns. Overridable via `ORACLE_DEBATE_AIDER_HISTORY`.
 - `.oracle_chat.history.md`: Human-readable transcript containing questions, answers, and collapsible `<details>` blocks holding raw retrieved LanceDB chunks.
 
 ### `E2BIG` Linux Kernel Safeguard

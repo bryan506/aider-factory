@@ -36,12 +36,27 @@ The `aider-helper` CLI is the primary interactive configuration architect and ge
 
 ## 3. Technical Mechanics & Deep-Dive Logic
 
-### Interactive Workspace Onboarding (`run_bootstrap`)
-The `bootstrap` command initiates a terminal-based interview to capture user intent. It performs the following sequence:
-1. **API Key Detection:** Scans the environment for valid provider keys (e.g., `GEMINI_API_KEY`, `OPENAI_API_KEY`) to determine the default provider.
-2. **Cluster Auto-Discovery:** Queries the `LITELLM_BASE_URL` (if set) to auto-discover available models, prepending the `openai/` prefix for Aider routing.
-3. **Parameter Collection:** Prompts the user for target files, context files, test frameworks, operating mode (autonomous vs. pair programming), model selection, and RAG/Oracle configuration.
-4. **Deterministic Synthesis:** Reads the master `default_configs/env.yml` template, applies string replacements based on user input, and writes the final `.env_<repo>.yml` to `.aider_factory/`.
+### Deterministic Workspace Scaffold (`run_bootstrap`)
+The `bootstrap` command provisions a workspace completely deterministically. No interview prompts. No LLM calls. It executes in 5 automated steps:
+
+1. **Detect Keys & Router**: Scans environment variables for `LITELLM_API_KEY`, `LITELLM_BASE_URL`, and provider keys (`GEMINI_API_KEY`, `OPENAI_API_KEY`, etc.).
+2. **Detect Test Framework**: Scans the filesystem in priority order:
+   - `pytest.ini`, `setup.cfg`, or `pyproject.toml` with `[tool.pytest]` $\rightarrow$ Python (`uv run --with pytest pytest`)
+   - `DESCRIPTION` $\rightarrow$ R (`Rscript .aider_factory/tests/run_tests.R {file}`)
+   - `Cargo.toml` $\rightarrow$ Rust (`cargo test --test {stem}`)
+   - `package.json` $\rightarrow$ JavaScript (`npm test {file}`)
+   - `go.mod` $\rightarrow$ Go (`go test {file}`)
+3. **Query Router for Models**: If `LITELLM_BASE_URL` is reachable, queries `/v1/models` and selects models:
+   - **Architect & Editor**: Prefers models with `"27b"` in their name, else the first available model.
+   - **Embed**: First model containing `"embed"`. Automatically flips `embed_backend` to `"openai"`.
+   - **Reranker**: First model containing `"rerank"`.
+   - Bare IDs receive the `openai/` prefix automatically.
+4. **Scaffold Configuration & Auto-Discover Files**:
+   - Performs regex substitution on `default_configs/env.yml`, normalizing all paths to forward slashes (`/`).
+   - Scopes router endpoint substitution strictly to `architect_api_base`, `editor_api`, and `editor_api_fallback`.
+   - **Target File Discovery**: Scans the codebase for source files (`.py`, `.r`, `.rs`, `.go`, `.js`, `.ts`), excluding test files and virtual environments, and selects **exactly one real anchor file** for `target_files` (since pipelines process one file per session).
+   - **Context File Discovery**: Populates `context_files_job` with `README.md`, `CHANGELOG.md`, and up to 15 markdown files from `docs/`.
+5. **Provision & Report**: Creates `.aider_factory/`, writes `.env_<repo>.yml`, provisions bash launchers (on Linux/macOS), and prints a structured summary.
 
 ### Append-Only KV Cache Mechanics (`run_query`)
 To maximize GPU VRAM efficiency and minimize Time-To-First-Token (TTFT), `aider-helper` utilizes an append-only memory architecture. 
@@ -112,9 +127,10 @@ phases:
 ### Failure Modes & Edge Cases
 
 1. **Missing API Keys:** If no valid API key is detected in the environment (and `AIDER_HELPER_API_BASE` is unset), the CLI intercepts the execution, calls `print_key_help_and_exit()`, and outputs instructions for exporting keys to `~/.bashrc`.
-2. **Missing Repository Map:** If `--repo-map` (`-r`) is requested but `.aider_factory/static_repo_map.md` does not exist, the helper emits a warning to `stderr` (`Warning: --repo-map requested, but... not found`) and gracefully continues the query without the map.
-3. **Cache Busting Risks:** Manually editing the `.helper_session.json` file or changing the underlying system prompt will alter the token sequence, breaking the prefix cache on the inference server and forcing a full prompt re-evaluation.
-4. **YAML Parsing Failures:** In Configuration Architect mode, the agent is instructed to return ONLY the updated YAML block. If the agent hallucinates conversational text outside the markdown fences, the deterministic parser in `bootstrap.py` attempts to extract the content between ` ```yaml ` and ` ``` `. If extraction fails, the disk write is safely aborted.
+2. **Pristine Directory Protection (Ask/Terminal Mode):** In conversational (`--ask`) or terminal assistant (`--terminal`) mode, `run_query` never creates a `.aider_factory/` folder on disk if one does not already exist, keeping uninitialized directories completely clean.
+3. **Missing Repository Map:** If `--repo-map` (`-r`) is requested but `.aider_factory/static_repo_map.md` does not exist, the helper emits a warning to `stderr` and gracefully continues the query without the map.
+4. **Cache Busting Risks:** Manually editing the `.helper_session.json` file or changing the underlying system prompt will alter the token sequence, breaking the prefix cache on the inference server and forcing a full prompt re-evaluation.
+5. **YAML Parsing Failures:** In Configuration Architect mode, the agent is instructed to return ONLY the updated YAML block. If the agent hallucinates conversational text outside the markdown fences, the deterministic parser in `bootstrap.py` attempts to extract the content between ` ```yaml ` and ` ``` `. If extraction fails, the disk write is safely aborted.
 
 ### Telemetry & Diagnostics
 - **Cost Accounting:** `aider-helper` queries are fully integrated into the global `cost_tracker.py` engine. It streams responses via `litellm` and calculates costs per-token. It prints `Tokens: X sent, Y received. Cost: $Z message, $W session` to `stderr` after every turn, aggregating the total session cost in memory. This means terminal assistance and configuration costs are tracked just like autonomous pipeline costs.

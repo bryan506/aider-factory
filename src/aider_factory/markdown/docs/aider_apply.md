@@ -98,6 +98,7 @@ aider-apply <files...> [options]
 | `--model` | `-m` | `None` | Override the editor model (e.g., `openai/qwen3.6-27b-90k:LATEST`). |
 | `--session` | | `None` | Explicit session name to resolve chat history and `session.yml` from. If omitted, auto-discovers active session by `mtime`. |
 | `--no-diff` | | `False` | Suppress printing the `git --no-pager diff --no-color --no-ext-diff HEAD~1` output to stdout after execution. |
+| `--stream` | | `False` | Stream inner Aider progress to the console (`/dev/tty` or `CONOUT$`) without polluting stdout. |
 
 ---
 
@@ -134,18 +135,26 @@ To prevent headless editor output from corrupting the active interactive session
 - `.aider_factory/temp/.apply.chat.history.md` — Isolated chat history for the editor pass.
 - `.aider_factory/temp/.apply.input.history` — Isolated input log.
 
-### Diff Telemetry Stream
+### Diff Telemetry Stream (`--no-color` & `--no-ext-diff`)
 Upon completing the headless edit pass, `aider-apply` streams the resulting plain-text Git diff to stdout using:
 ```bash
 git --no-pager diff --no-color --no-ext-diff HEAD~1
 ```
-This suppresses ANSI escape sequences and custom external diff tools, preventing token bloat (~30–40% token savings) and ensuring optimal plain-text diff comprehension by downstream LLMs. This can be suppressed using `--no-diff`.
 
-### Failure Modes & Exit Codes
-* **Exit Code 1 (Missing History)**: Triggered if `.aider.chat.history.md` cannot be found in the session path or workspace root.
-* **Exit Code 1 (Empty Spec)**: Triggered if the parser finds no actionable turns or valid specification text.
-* **Exit Code 1 (Subprocess Error)**: Triggered if the underlying `aider` process exits with a non-zero returncode.
-* **Exit Code 0 (Success)**: Returned when `aider` successfully applies the edits and generates a Git commit.
+#### Why these exact flags matter:
+1. `--no-pager`: Prevents Git from launching interactive pagers (`less`, `more`) which hang automated subprocesses.
+2. `--no-color`: Strips raw 24-bit ANSI color escape sequences from the diff. This yields a **30% to 40% token savings** when the diff is folded into downstream LLM context windows and prevents tokenizer corruption.
+3. `--no-ext-diff`: Disables custom user diff drivers (such as `difftastic` or GUI diff viewers), ensuring deterministic standard unified diff format across all workstations and CI runners.
+4. `--no-diff`: CLI flag to completely suppress diff output if only on-disk modification is required.
+
+### Cross-Platform Execution & Stream Isolation
+When `aider-apply` runs via Aider's `/run` directive:
+- **Stream Isolation**: The inner editor emits 40k–120k raw tokens (file echoes, thinking blocks). The outer Aider captures `sys.stdout` as "command output". To give the user live visibility without polluting the outer chat context, `--stream` routes progress to `/dev/tty` (on Linux/macOS) or `CONOUT$` (on Windows).
+- **Windows Binary Resolution**: `shutil.which("aider")` resolves `aider.cmd` on Windows. If resolved to a `.cmd` or `.bat` wrapper, the subprocess is invoked via `["cmd.exe", "/c"] + cmd`.
+- **Exit Code 1 (Missing History)**: Triggered if `.aider.chat.history.md` cannot be found in the session path or workspace root.
+- **Exit Code 1 (Empty Spec)**: Triggered if the parser finds no actionable turns or valid specification text.
+- **Exit Code 1 (Subprocess Error)**: Triggered if the underlying `aider` process exits with a non-zero returncode.
+- **Exit Code 0 (Success)**: Returned when `aider` successfully applies the edits and generates a Git commit.
 
 ### Diagnostic Recovery Workflows
 

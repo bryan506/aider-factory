@@ -15,7 +15,7 @@ These 13 load-bearing invariants govern all pipeline operations and agent behavi
 7. **Full cross-validation after EVERY change**: Verification relies on logic independent of the code under test (e.g., compile, DAG dry-run, backward-compat pass).
 8. **Splittable & combinable DAG**: Phases are order-independent and file-coupled. Every node reads inputs from disk, allowing steps to scale identically whether run as one phase or many.
 9. **No pipeline git commits except Aider auto-commits**: `.aider_factory/python/` remains untracked. Provenance is maintained via auto-commits on artifacts, ledgers, and verdicts.
-10. **Single bundled Python interpreter runtime**: Everything runs under Aider's bundled Python (`AIDER_PY`), ensuring consistent access to `lancedb`, `sentence-transformers`, `litellm`, and `yaml`.
+10. **Single Python interpreter & universal CLI entrypoints**: Everything runs under Aider's Python environment. Core workflows are exposed as native cross-platform console scripts (`aider-factory`, `aider-launcher`, `aider-oracle`, `aider-validate`, `aider-helper`, `aider-apply`, `aider-clean-lancedb`) defined in `pyproject.toml`, with convenience POSIX bash wrappers (`.aider_factory/bash/*`) auto-provisioned on Linux and macOS.
 11. **Native Aider framework integration**: The pipeline extends Aider's framework (ask mode, iterate-test loop, `.aider.conf.yml`) rather than reinventing it.
 12. **Reactive ground-truth Knowledge Oracle**: The Oracle owns ground truth and judges the Architect's proposals by citing exact evidence. It is reactive, not a whole-document auditor.
 13. **Plain, objective communication**: Agents must communicate plainly, prioritizing objectivity and course correction over agreeable confirmation.
@@ -78,10 +78,13 @@ The core philosophies are enforced via specific CLI tools that operate independe
 
 | Command / Tool | Primary Flags | Runtime Behavior | Invariant Enforced |
 | :--- | :--- | :--- | :--- |
+| `aider-factory` | `[session_name] [config.yml]` | Multi-agent DAG workflow runner and session manager. | Splittable & combinable DAG (Invariant 8). |
+| `aider-launcher` | `[session_name] [config.yml]` | Cross-platform pipeline launcher with live stream teeing and post-run cost accounting. | Full cross-validation (Invariant 7). |
 | `aider-validate` | `--file`, `--source`, `--report` | Executes exact-substring grounding and region similarity annotation. | Provable truth (Invariant 2), Embeddings as annotation (Invariant 3). |
 | `aider-validate` | `--autofix` | Deterministically stitches ellipsis-spliced quotes (`...`) if fragments form a contiguous span $\le 200$ chars. | Deterministic-first (Invariant 1). |
 | `aider-validate` | `--finalize-unsupported` | Terminal step that promotes grounded quotes and flags ungrounded quotes as `[unsupported]`. | Validator tag authority (Invariant 5), Only PROMOTE tags (Invariant 4). |
 | `aider-oracle` | `--debate [code\|review]` | Initiates a refereed two-party debate for escalation. | Oracle owns ground truth (Invariant 12). |
+| `aider-clean-lancedb`| `<collection_name>` | Cross-platform cleanup of ephemeral OCR images, validations, and debate logs. | Minimal-delta scoping (Invariant 6). |
 
 ## 5. Configuration Schema & YAML Knobs
 
@@ -154,7 +157,7 @@ The AI Factory pipeline wraps the Aider chat engine to orchestrate complex DAG w
 
 ### Execution Modes: Autonomous vs. Pair Programming
 - **Autonomous Mode (`pair_programming: false`)**: Optimized for overnight batch jobs and test-fixing loops. `yes_always` and `auto_commits` default to `true`. Aider's stdout/stderr flows directly through `OSTee` to the master run log.
-- **Pair Programming Mode (`pair_programming: true`)**: Optimized for complex research, strategy drafting, and code architecture. `yes_always` and `auto_commits` default to `false`. Wraps Aider in `script -qfe` to create a real interactive PTY, allowing direct interaction at the `architect>` prompt.
+- **Pair Programming Mode (`pair_programming: true`)**: Optimized for complex research, strategy drafting, and code architecture. `yes_always` and `auto_commits` default to `false`. Dynamically wraps Aider in an interactive terminal harness (GNU `script -qfe` on Linux, BSD `script -q` on macOS, and line-buffered stdout streaming on Windows) to support `prompt_toolkit` interaction at the `architect>` prompt.
 
 ### Operational Quirks & Shell Commands
 Getting the *model* to run a shell command reliably has specific constraints:

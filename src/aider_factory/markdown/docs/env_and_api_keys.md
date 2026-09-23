@@ -62,14 +62,34 @@ DUMMY_KEYS = frozenset({"sk-dummy", "dummy", "none", "null", ""})
 ### Intelligent Key Resolution (`resolve_api_key`)
 `resolve_api_key(model: str = "", api_base: Optional[str] = None, explicit_key: Optional[str] = None) -> Optional[str]`
 1. Triggers `load_env_files()`.
-2. **Local Endpoint Branch (`api_base` is present):**
+2. **Local / Proxy Endpoint Branch (`api_base` is present):**
    - Checks `explicit_key` -> `os.environ["ORACLE_AGENT_API_KEY"]` -> `os.environ["OPENAI_API_KEY"]`.
-   - If none are set or non-dummy, defaults to `"sk-dummy"`.
+   - If a valid key is found (not in `DUMMY_KEYS`), returns it.
+   - Otherwise defaults to `"sk-dummy"`.
 3. **Cloud Endpoint Branch (`api_base` is `None` or empty):**
    - Returns `explicit_key` if non-dummy.
    - Converts `model` to lowercase and checks provider matches in `PROVIDER_ENV_KEYS`.
    - If no provider match succeeds, iterates over `ALL_PROVIDER_KEYS`.
    - Returns `None` if no valid key is present.
+
+### Subprocess Router Key Resolution (`_router_key`)
+In `orchestrate.py` and `run_workflow.py`, subprocess environment variables for local/proxy endpoints are resolved dynamically to ensure authenticated LiteLLM proxies receive valid tokens:
+
+```python
+_router_key = os.environ.get("LITELLM_API_KEY", "")
+_router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
+
+if task.architect_api_base:
+    env["OPENAI_API_BASE"] = task.architect_api_base
+    env["OPENAI_API_KEY"] = _router_key
+if task.editor_api_base:
+    env["OLLAMA_API_BASE"] = task.editor_api_base
+    env["LM_STUDIO_API_BASE"] = task.editor_api_base
+    env["LM_STUDIO_API_KEY"] = _router_key
+```
+
+### Non-Clobbering Router Fallback (`oracle_agent.py`)
+In `_ensure_oracle_config()`, `LITELLM_BASE_URL` is applied as a fallback only after parsing YAML settings. Furthermore, if `ORACLE_AGENT_MODEL` routes to a known cloud provider (`gemini/`, `anthropic/`, `groq/`), `ORACLE_AGENT_API_BASE` is preserved as `None` to prevent accidental proxy misdirection.
 
 ---
 
@@ -163,5 +183,7 @@ While you should **never export these manually**, they are critical for debuggin
 * `GROUNDING_VERIFY_ALL`: If `1`, scores all claims; if `0`, scores only failing quotes.
 * `GROUNDING_ENTAIL_THRESHOLD`: Probability cutoff for the entailment verifier.
 
-**Proxy KV-Cache Stickiness:**
+**Proxy Routing & KV-Cache Stickiness:**
+* `LITELLM_API_KEY`: Authentication Bearer token sent to the LiteLLM Router. Automatically mapped into `OPENAI_API_KEY`, `LM_STUDIO_API_KEY`, `ORACLE_AGENT_API_KEY`, and `GROUNDING_AGENT_API_KEY` for subprocesses.
+* `LITELLM_BASE_URL`: Root URL of the LiteLLM proxy (e.g., `http://10.0.0.5:4000/v1`). Used by `probe_router()` during bootstrap and as a fallback endpoint.
 * `LITELLM_SESSION_ID`: A unique UUID (`uuid.uuid4()`) generated and injected automatically by the pipeline. It is passed via `custom_headers: {"x-litellm-session-id": ...}` to ensure KV-cache stickiness across pipeline runs when routing through remote LiteLLM proxies.

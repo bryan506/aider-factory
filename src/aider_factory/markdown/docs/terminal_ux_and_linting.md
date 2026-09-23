@@ -77,6 +77,18 @@ Upstream Aider includes telemetry instrumentation that pings external servers on
 
 > **Unbreakable Code-Level Guarantee:** Beyond configuration files, `orchestrate.py` and `apply_agent.py` hardcode `--no-analytics`, `--no-check-update`, `--no-show-release-notes`, and `--no-notifications` directly into the subprocess execution CLI arguments. This provides an unbreakable guarantee of privacy and offline execution that supersedes any user misconfiguration or missing `.aider.conf.yml`.
 
+### 3.2 Windows Console UTF-8 Reconfiguration
+Windows command prompt and PowerShell environments default to legacy code page 1252, which crashes when printing Unicode emojis or Truecolor ANSI headers. CLI tools and test runners (`uv_run.py`, `uv_run_local.py`) reconfigure standard streams at initialization:
+
+```python
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+```
+
+Setting `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8` in the process environment guarantees clean Unicode rendering across all Windows runners.
+
 #### Local Cost Accounting Mechanics
 Cost tracking remains 100% operational despite telemetry silencing because usage data is extracted directly from model API response payloads:
 $$\text{Cost}_{\text{message}} = (\text{Prompt Tokens} \times \text{Rate}_{\text{input}}) + (\text{Completion Tokens} \times \text{Rate}_{\text{output}})$$
@@ -87,12 +99,13 @@ The local session cost is maintained in `.aider_factory/sessions/<slug>/.oracle_
 Tokens: 12.4k sent, 1.2k received. Cost: $0.0024 message, $0.0148 session.
 ```
 
-### 3.2 Automated Linting Hook Execution (`auto_lint` & `lint_cmd`)
+### 3.3 Automated Linting Hook Execution (`auto_lint` & `lint_cmd`)
 When `auto_lint: true` is set, Aider monitors modified target files. Upon applying a SEARCH/REPLACE diff, Aider intercepts the workflow prior to git auto-commit:
 
-1. **Command Resolution**: If `lint_cmd` is specified as a string (e.g., `"ruff check --fix {file}"`), `{file}` is dynamically replaced with the relative path of the modified target. If `lint_cmd` is `null`, Aider inspects the file extension and selects a default linter binary.
-2. **Subprocess Execution**: The linter command runs in a child process within `working_directory`.
-3. **Feedback Loop**:
+1. **Task-Level Propagation**: In `orchestrate.py`, `Task.auto_lint` and `Task.lint_cmd` are compiled directly into the session-scoped `.aider.conf.yml` and injected into the subprocess environment as `AIDER_AUTO_LINT` and `AIDER_LINT_CMD`.
+2. **Command Resolution**: If `lint_cmd` is specified as a string (e.g., `"ruff check --fix {file}"`), `{file}` is dynamically replaced with the relative path of the modified target. If `lint_cmd` is `null`, Aider inspects the file extension and selects a default linter binary.
+3. **Subprocess Execution**: The linter command runs in a child process within `working_directory`.
+4. **Feedback Loop**:
    - **Exit Code `0`**: Code is clean. Aider proceeds to `git commit`.
    - **Non-Zero Exit Code**: Standard output and standard error are captured, wrapped in a `<lint_errors>` context block, and presented to the LLM model as an auto-correction prompt.
 

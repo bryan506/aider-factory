@@ -71,24 +71,23 @@ When transitioning from Phase 0 (Planning) to Phase 1 (Execution), `_render_vali
 ### 3.3 Multi-Round Escalation Reflexion (`escalation_debate`)
 If the test suite fails during Stage 4 (`iterate_test`), the orchestrator triggers an escalation debate:
 - **Debate Rounds (`rounds`)**: Chained full debate cycles (Debate $\to$ Apply $\to$ Re-Test).
-- **Cross-Round Memory (`pass_round_history`)**: Carries prior turn context and model KV caches across rounds.
+- **Cross-Round Memory (`pass_history`)**: Carries prior turn context and model KV caches across rounds (`pass_history: true`).
 - **Ledger Chaining**: Passes `<stem>.job_verdict_r1.md` and `<stem>.job_debate_r1.json` to Round 2. The orchestrator explicitly parses the `prior_ledger` to extract the exact failed proposal from the previous round and injects it into the new prompt, giving the model memory of its past attempts to prevent infinite loops of identical fixes.
 
-### 3.4 OS-Level File Descriptor Multiplexing (`OSTee`)
+### 3.4 OS-Level Stream Multiplexing (`OSTee` & `_TeeWriter`)
 Standard Python logging drops subprocess stdout/stderr. `run_workflow.py` wraps execution in `OSTee`:
-```python
-self.orig_stdout_fd = os.dup(1)
-self.orig_stderr_fd = os.dup(2)
-self.pipe_r, self.pipe_w = os.pipe()
-os.dup2(self.pipe_w, 1)
-os.dup2(self.pipe_w, 2)
-```
-A background daemon thread drains the pipe to the real terminal while recording an unbuffered, timestamped log file.
+- **POSIX Platforms (Linux & macOS)**: Duplicates file descriptors 1 and 2 at the kernel level using `os.dup()` and redirects them via `os.dup2()` to an OS pipe drained by a background pump thread.
+- **Windows (`win32`)**: Redirects `sys.stdout` and `sys.stderr` to `_TeeWriter` stream proxies that simultaneously write to the active console and the log file, avoiding `os.dup2` descriptor corruption on Windows.
 
-### 3.5 Token & Cost Extraction Regex
+### 3.5 Polymorphic Gate Execution (`_gate_run`)
+In review and grounding modes, the deterministic verification gate is constructed as a structured command list (`[sys.executable, validator.py, ...]`) rather than a shell string. `orchestrate.py` inspects the command type:
+- **List Command (`isinstance(cmd, list)`)**: Executes with `shell=False` and indexes the gate cache using an immutable tuple `tuple(cmd)`. This prevents shell injection vulnerabilities and eliminates platform-specific shell escaping bugs on Windows.
+- **String Command (`isinstance(cmd, str)`)**: Executes with `shell=True` using the user's configured `test_cmd`, indexed in cache by the raw command string.
+
+### 3.6 Token & Cost Extraction Regex
 At the conclusion of a run, `aggregate_costs.py` parses the master log file using a strict regular expression to extract token counts and USD costs from LiteLLM/Aider output lines. Tokens with metric suffixes (`k`, `M`) are mathematically expanded.
 
-### 3.6 Vector Database & Chunking Telemetry
+### 3.7 Vector Database & Chunking Telemetry
 During document and codebase ingestion, `rag_manager.py` emits continuous diagnostic traces captured by the master log:
 - **AST Symbol Resolution:** Logs Tree-Sitter grammar parsing, function/class structural boundaries, and oversized leaf fallback line splits.
 - **Docling Extraction Traces:** Logs isolated subprocess status, structural metadata headers, and table extraction boundaries.
@@ -100,8 +99,11 @@ During document and codebase ingestion, `rag_manager.py` emits continuous diagno
 
 | Command / Invocation | Target Alias | Exit Code | Runtime Behavior |
 | -------------------- | ------------ | --------- | ---------------- |
-| `.aider_factory/bash/factory .env.yml` | Pipeline Launcher | `0` on success, `1` on failure | Parses the YAML, builds the DAG, and executes all enabled phases sequentially. Wraps execution in `OSTee`. |
-| `.aider_factory/bash/oracle --debate code --loops 3 "query"` | CLI Debate | `0` | Launches an interactive, multi-turn debate between the Architect and Oracle. |
+| `aider-launcher [options] [session] [config.yml]` | Cross-Platform Launcher | Preserves exit code | Universal Python pipeline launcher (Linux, macOS, Windows). Tees output to log file and runs `aggregate_costs.py`. |
+| `aider-factory [options] [session] [config.yml]` | Pipeline CLI | `0` on success, `1` on failure | Core orchestrator entry point. Parses YAML, manages session state, and executes DAG. |
+| `.aider_factory/bash/factory .env.yml` | Bash Launcher | `0` on success, `1` on failure | Convenience POSIX wrapper for `aider-launcher` (Linux and macOS). |
+| `aider-oracle --debate code --loops 3 "query"` | CLI Debate | `0` | Launches an interactive, multi-turn debate between the Architect and Oracle. |
+| `aider-clean-lancedb <collection>` | RAG Cleanup | `0` | Cross-platform cleanup of OCR images and ephemeral validation/debate logs. |
 | `aider-helper query "instruction"` | Config Helper | `0` | Modifies the active pipeline configuration using minimal-delta edits. |
 | `uv run src/aider_factory/python/aggregate_costs.py <log_file>` | Cost Aggregation | `0` | Manually parse a master log file and print the total USD cost and token counts. |
 | `less -R <log_file>` | Log Replay | `0` | Replay a master log file preserving ANSI color codes. |

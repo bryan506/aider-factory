@@ -9,7 +9,7 @@ This document is the master architectural and operational specification for Lanc
 ### Foundational Invariants
 - **Schema Safety Invariant**: When appending new files to an existing table (`overwrite: false`), `rag_manager.py` verifies that `source_type` and `language` columns exist in the Arrow schema, and that the vector dimension matches the active embedding model (`table.schema.field("vector").type.list_size == _dim`). If a legacy schema or dimension mismatch is detected, ingestion safely aborts with an actionable error rather than corrupting the database.
 - **Query Vector Truncation Guard**: `_MAX_EMBED_CHARS = 6000`. When retrieving via `top_k`, the query text is truncated to 6,000 characters before embedding to prevent long debate prompts or attached code context from overflowing embedding model context windows (e.g. `sentence-transformers` or `BAAI/bge-m3`) and causing VRAM OOMs.
-- **Active Working File Exclusion**: Any file listed under `target_files`, `extra_editable_files`, or `context_files_job` in the active phase is automatically excluded from ingestion scanning. The `working_repo` is auto-derived from `os.path.basename(working_directory)`. This prevents stale code copies from polluting vector retrieval during active refactoring.
+- **Active Working File Exclusion & Path Normalization**: Any file listed under `target_files`, `extra_editable_files`, or `context_files_job` in the active phase is automatically excluded from ingestion scanning. In `rag_manager._walk_repo()`, all repository relative paths and exclusion patterns are normalized by replacing `\\` with `/`, and directory stems use `.rstrip("/\\")`. This guarantees that active file exclusion works identically on Windows and POSIX systems.
 - **Zero-RAG Bypass Mode**: If a phase configuration specifies `rag.collection_name: ""` (empty string or `[]`), the pipeline bypasses LanceDB vector ingestion and retrieval entirely. Both the Programmatic Oracle and Pre-Edit debates will rely strictly on the raw text contents of the files defined in `target_files` and `context_files_job` injected directly into the prompt.
 
 ### Academic Foundations
@@ -143,10 +143,12 @@ The AI Factory is completely decoupled from any specific Vision model. It sends 
 
 ## 4. Exhaustive CLI Invocations & Command Matrix
 
-The Oracle CLI (`aider-oracle`) provides a complete administrative suite for managing LanceDB collections:
+The Oracle CLI (`aider-oracle`) and RAG cleanup tool (`aider-clean-lancedb`) provide a complete administrative suite for managing LanceDB collections:
 
 | Command | Description |
 | :--- | :--- |
+| `aider-clean-lancedb <collection>` | Cross-platform cleanup of OCR `images/`, validation logs, and debate logs while preserving LanceDB tables and source documents. |
+| `aider-clean-lancedb <collection> --project-dir <path>` | Target a specific project directory for RAG artifact cleanup. |
 | `aider-oracle --list` | List all tables in the active collection directory. |
 | `aider-oracle --list-files` | List all unique source files ingested across all tables. |
 | `aider-oracle --add-file docs/architecture.pdf notes/specs.md` | Incrementally add and ingest one or more files into LanceDB. |
@@ -221,3 +223,4 @@ available_tables = list(getattr(_names, "tables", _names))
 | **Chat template ValueError with `sentence-transformers >= 3.0`** | LLM-based reranker lacks standard query/document template in tokenizer config. | Engine automatically injects standard `<Query>` / `<Document>` Jinja template. |
 | **Padding token crash during batch prediction** | Tokenizer missing `pad_token`. | Engine automatically binds `pad_token = eos_token` and syncs `pad_token_id`. |
 | **Inverted ranking (irrelevant chunks ranked top)** | Model outputs 2D classification logits `[neg, pos]`, evaluated at index 0. | `_extract_score` safely retrieves positive relevance class (`val[-1]`). |
+| **`[WinError 32] Access denied` on `_remove_db()`** | Windows holds file locks on open LanceDB Arrow files. | Dereference all open table/DB handles (`del tbl, db`) and trigger `gc.collect()` before deleting directories. |

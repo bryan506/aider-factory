@@ -29,6 +29,7 @@ The AI Factory pipeline decouples pipeline orchestration from language-specific 
 2. **Zero-Mock Integration Testing:** Integration and End-to-End (E2E) tests must execute real entrypoints against temporary on-disk fixtures (`tempfile`) and physical OS processes without mocking the system under test.
 3. **Language & Environment Agnosticism:** Execution wrappers operate seamlessly across local native environments, Python `uv` sandboxes, Docker containers, and custom SSH or Bash wrappers.
 4. **Context Window Protection:** Test runners must filter uninformative warning blocks, noise, or verbose progress indicators to prevent context window bloat during LLM feedback passes.
+5. **Polymorphic Verification Execution:** Verification gates accept both structured command lists (`list[str]` executed with `shell=False`) and user-defined test command strings (`str` executed with `shell=True`), maintaining hashable cache isolation for both forms.
 
 ---
 
@@ -174,6 +175,40 @@ When `iterate_test: true` is enabled, the pipeline enters an autonomous loop to 
 1. **Aider Internal Loops (`auto_test: true`):** Aider manages up to 3 fast internal fix-and-test attempts before yielding back to Python.
 2. **Orchestrator Outer Loops (`loop_aider_test`):** `orchestrate.py` manages the outer loop ceiling (defaulting to 1). On each outer attempt, fresh failure logs are captured and passed as a new prompt to Aider.
 3. **Outer Loop Tracking (`VALIDATION_ATTEMPT`):** The orchestrator injects `VALIDATION_ATTEMPT: str(attempt)` into the test subprocess environment. This allows contextual validators (like `validator.py`) to track outer loop progress and reset their no-progress ledgers on attempt 0.
+
+### Polymorphic Gate Command Execution & Cache Key Hashing (`_gate_run`)
+
+In `orchestrate.py`, `_gate_run(task, gate_cmd)` dynamically adapts to command representation:
+- **Command Lists (`isinstance(gate_cmd, list)`)**: Used for internally-constructed verification commands (such as `[sys.executable, validator.py, ...]`). Executed with `shell=False` to prevent shell injection and platform escaping bugs. The result is cached under `tuple(gate_cmd)`.
+- **Command Strings (`isinstance(gate_cmd, str)`)**: Used for user-configured test commands (`test_cmd`) that may include shell operators (`&&`, pipes). Executed with `shell=True` and cached under the string `gate_cmd`.
+
+```python
+env = {**os.environ, **(task.rag_env or {})}
+use_shell = isinstance(gate_cmd, str)
+cache_key = gate_cmd if use_shell else tuple(gate_cmd)
+try:
+    p = subprocess.run(
+        gate_cmd,
+        shell=use_shell,
+        cwd=self.project_dir,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    passed = (p.returncode == 0)
+    self.last_test_result[cache_key] = passed
+    return passed, p.stdout or ""
+except Exception as e:
+    self.last_test_result[cache_key] = False
+    return False, f"(gate error: {e})"
+```
+
+### Cross-Platform CI Runners (`uv_run.py` & `uv_run_local.py`)
+
+The test suite runs across Linux, macOS, and Windows via GitHub Actions:
+- **Windows UTF-8 Reconfiguration**: `uv_run.py` reconfigures `sys.stdout` and `sys.stderr` to `utf-8` on launch, preventing `cp1252` encoding exceptions on emojis and status banners.
+- **Selective Suite Execution**: `uv_run.py` runs headless CI-safe unit tests in pull requests. `uv_run_local.py` runs local GPU cluster, Vision OCR, and live model persistence suites with `--ci-only` and start-file filtering options.
 
 ### Eliminating False Positives: `Task.final_check` & `Task.soft_fail`
 

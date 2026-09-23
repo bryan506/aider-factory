@@ -4,18 +4,24 @@
 > documented inline with its runtime behavior, codepaths, and multi-toggle combinations. Copy any phase block as a
 > starting template for new projects or tasks.
 >
-> **How to run (use the `factory` launcher or `aider-factory` CLI):**
+> **How to run (cross-platform commands):**
 >
 > ```bash
-> # Default config (.aider_factory/.env.yml)
-> .aider_factory/bash/factory
+> # Universal cross-platform launcher (Linux, macOS, Windows):
+> aider-launcher my_session .aider_factory/.env.yml
 >
-> # Named session with default configuration
+> # Direct CLI orchestrator:
 > aider-factory my_session
 >
-> # Custom config with named session
+> # Custom configuration with named session:
 > aider-factory .aider_factory/.env_custom.yml my_session
+>
+> # POSIX convenience launcher (Linux & macOS only):
+> .aider_factory/bash/factory my_session
 > ```
+>
+> **Path Normalization Invariant (Windows & POSIX):**
+> Always use forward slashes (`/`) in all YAML file paths (e.g., `working_directory: "C:/projects/myapp"` or `"src/core/engine.py"`). Forward slashes avoid backslash escaping issues across all operating systems.
 >
 > **Cost analysis on archived logs** (re-run the aggregator standalone):
 >
@@ -205,6 +211,8 @@ phases:
         run_job_three: false                # Execute Job 3 (Write Tests)
         iterate_test: false                 # Loop test suite automatically until passing
         auto_test: false                    # Let Aider iterate tests natively in 3-loop batches
+        auto_lint: true                     # Run automated linter on edited target files before commit
+        lint_cmd: null                      # Custom linter command string (null = language default)
         sticky_context: false               # Retain completed files from prior tasks in context
         map_tokens: 0                       # Repository map token budget (0 = disabled)
         map_refresh: "manual"               # Repo map refresh mode ("manual", "auto", "always")
@@ -268,7 +276,8 @@ phases:
 | `oracle.start_job` | Discriminator between Review Mode (`start_job: true`) and Code Mode (`start_job: false`). | `start_job: true` executes programmatic synthesis before launching validator tasks. `start_job: false` executes Job 1/2/3 code plans. |
 | `oracle.pre_edit_debate.insert_debate` | 3-tuple boolean list `[j1, j2, j3]` parsed by `_parse_insert_debate()` in `run_workflow.py`. | Controls exactly which edit jobs receive an Architect <-> Oracle consensus debate before file modifications begin. |
 | `oracle.pre_edit_debate.job_debate_template` / `job_debate_collection` | Resolves prompt templates and vector collections for pre-edit debates in `run_workflow.py`. | Accepts either a single string (applied to all active jobs) or a 3-element list `[j1, j2, j3]` to assign dedicated debate prompt templates and vector collections to each respective job. |
-| `toggles.pair_programming` | Wraps Aider in a `script -qfe` PTY session for interactive terminal pairing. | Disables non-interactive outer retry loops; plans are loaded via `--read` so the user drives the conversation directly. |
+| `toggles.pair_programming` | Wraps Aider in an interactive terminal harness (GNU `script`, BSD `script`, or Win32 line-tee). | Disables non-interactive outer retry loops; plans are loaded via `--read` so the user drives the conversation directly. |
+| `toggles.auto_lint` / `lint_cmd` | Executes automated linter before committing code edits. | If `lint_cmd` is specified (e.g. `"ruff check --fix {file}"`), `{file}` is substituted. When null, resolves language default. |
 | `toggles.shared_history` | Toggles state isolation. `false` saves separate chat histories per file (`.aider.chat.history_<stem>.md`). | Always use `shared_history: false` when processing multiple independent files to prevent prompt history pollution. |
 | `toggles.map_tokens` / `map_refresh` | Controls Aider's repository map size and refresh policy. | Set `map_tokens: 0` and `map_refresh: manual` for isolated single-file tasks to maximize KV-cache reuse. |
 | `validation.enabled` / `validation_tag` | Activates exact-substring quote grounding in `validator.py`. | Scans generated documents for `[evidence]...[/evidence]` tags and scores them against source documents using Cosine and MiniCheck entailment. |
@@ -278,24 +287,27 @@ phases:
 
 ## Complete Database Maintenance & CLI Reference
 
-### Knowledge Oracle Maintenance (`aider-oracle` / `.aider_factory/bash/oracle`)
+### Knowledge Oracle Maintenance & Cleanup (`aider-oracle`, `aider-clean-lancedb`)
 ```bash
+# Clean ephemeral OCR images, validations, and debate logs (cross-platform)
+aider-clean-lancedb my_collection
+
 # List all files and tables in the LanceDB database
-.aider_factory/bash/oracle --list-files
-.aider_factory/bash/oracle --list-tables
+aider-oracle --list-files
+aider-oracle --list-tables
 
 # Ingest specific files or entire folders
-.aider_factory/bash/oracle --add-file docs/architecture.pdf
-.aider_factory/bash/oracle --add-table research_papers/
+aider-oracle --add-file docs/architecture.pdf
+aider-oracle --add-table research_papers/
 
 # Web Ingestion & Sitemap Crawling
-.aider_factory/bash/oracle --add-web https://docs.example.com/sitemap.xml
-.aider_factory/bash/oracle --add-web --file urls.txt --workers 8
+aider-oracle --add-web https://docs.example.com/sitemap.xml
+aider-oracle --add-web --file urls.txt --workers 8
 
 # Deletion & Database Cleanup
-.aider_factory/bash/oracle --rm-file old_paper.pdf
-.aider_factory/bash/oracle --rm-table legacy_collection
-.aider_factory/bash/oracle --rm-db
+aider-oracle --rm-file old_paper.pdf
+aider-oracle --rm-table legacy_collection
+aider-oracle --rm-db
 ```
 
 ### Standalone Web Research Agent (`aider-research` / `.aider_factory/bash/research`)

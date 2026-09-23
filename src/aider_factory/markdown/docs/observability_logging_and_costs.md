@@ -43,18 +43,27 @@ flowchart TD
 
 ## 3. Technical Mechanics & Deep-Dive Logic
 
-### 3.1 Kernel-Level Multiplexing (`OSTee`)
-To capture raw bytes from all subprocesses and C-extensions, `run_workflow.py` duplicates the underlying POSIX file descriptors (1 for `stdout`, 2 for `stderr`) and wires them to an OS pipe. A background thread pumps this pipe to the master log file.
+### 3.1 Kernel-Level Multiplexing (`OSTee` & `_TeeWriter`)
+To capture raw bytes from all subprocesses and C-extensions, `run_workflow.py` adapts its multiplexing strategy based on the host operating system:
+- **POSIX (Linux & macOS)**: Duplicates underlying file descriptors (1 for `stdout`, 2 for `stderr`) and wires them to an OS pipe via `os.dup2()`. A background thread drains the pipe to the terminal and master log.
+- **Windows (`win32`)**: Replaces `sys.stdout` and `sys.stderr` with `_TeeWriter` stream wrappers. Writes are dispatched concurrently to the active terminal buffer and the open log file handle, preventing file descriptor deadlocks.
 
 ```python
-# OS-Level File Descriptor Duplication
-self.orig_stdout_fd = os.dup(1)
-self.orig_stderr_fd = os.dup(2)
-self.pipe_r, self.pipe_w = os.pipe()
-
-# Redirect standard output/error to the write-end of the pipe
-os.dup2(self.pipe_w, 1)
-os.dup2(self.pipe_w, 2)
+if sys.platform == "win32":
+    self._orig_stdout = sys.stdout
+    self._orig_stderr = sys.stderr
+    sys.stdout = _TeeWriter(self._orig_stdout, self.log_file)
+    sys.stderr = _TeeWriter(self._orig_stderr, self.log_file)
+    self.orig_stdout_fd = None
+    self.thread = None
+else:
+    self.orig_stdout_fd = os.dup(1)
+    self.orig_stderr_fd = os.dup(2)
+    self.pipe_r, self.pipe_w = os.pipe()
+    os.dup2(self.pipe_w, 1)
+    os.dup2(self.pipe_w, 2)
+    self.thread = threading.Thread(target=self._pump, daemon=True)
+    self.thread.start()
 ```
 
 ### 3.2 Token & Cost Extraction Regex (`aggregate_costs.py`)
@@ -99,10 +108,12 @@ During document and codebase ingestion, `rag_manager.py` emits continuous diagno
 
 | Command | Target Alias | Exit Code | Runtime Behavior |
 | :--- | :--- | :--- | :--- |
+| `aider-launcher [options] [session] [config.yml]` | Pipeline Launcher | Matches child | Universal cross-platform runner (Linux, macOS, Windows). Spawns workflow, tees output, and aggregates costs. |
+| `aider-clean-lancedb <collection>` | RAG Cleanup | `0` | Cross-platform Python cleaner. Deletes ephemeral OCR images, validation reports, and debate logs. |
 | `uv run aggregate_costs.py <log>` | Cost Aggregator | `0` | Parses the master log file and prints total USD cost and token counts. |
 | `less -R <log_file>` | Log Replay | `0` | Replays a master log file preserving ANSI color codes (Teal for Architect, Pink for Oracle). |
-| `bash watch_loops.sh <log> <pid>` | Watchdog | `0` | Monitors a log file for redundant volume (75% threshold) and `kill -9`s the target PID if an infinite loop is detected. |
-| `bash clean_lancedb_runs.sh <coll>` | Cleanup | `0` | Cleans up ephemeral artifacts (images, validations, debates) for a specific RAG collection without touching LanceDB tables. |
+| `bash watch_loops.sh <log> <pid>` | Watchdog | `0` | POSIX watchdog: monitors a log file for redundant volume (75% threshold) and terminates looping processes. |
+| `bash clean_lancedb_runs.sh <coll>` | Bash Cleanup | `0` | POSIX convenience wrapper for ephemeral RAG artifact cleanup. |
 
 ### 4.1 Structured Artifact Matrix
 | Artifact | Path (relative to `.aider_factory/`) | Purpose |

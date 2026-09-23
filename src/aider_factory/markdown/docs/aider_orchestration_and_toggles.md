@@ -9,8 +9,8 @@ The AI Factory pipeline wraps the Aider chat engine to orchestrate complex Direc
 1. **YAML-Driven Orchestration Scope**: The pipeline configuration file (`.env.yml` / `session.yml`) is the single source of truth for execution parameters. Global default configuration files (`.aider.conf.yml`, `.aider.model.settings.yml`) are overridden dynamically at runtime by task-specific flags parsed from the YAML `toggles:` block.
 2. **Tri-Layer Flag Enforcement (Belt-and-Suspenders)**: When overriding Aider flags, the pipeline applies them across three simultaneous mechanisms: dynamically compiled session configuration files (`.aider.conf.yml`), CLI command-line arguments (e.g., `--yes-always`, `--map-tokens`), and environment variables (e.g., `AIDER_YES_ALWAYS=true`).
 3. **Session State & Per-Target History Isolation**: Multi-turn conversation histories (`.aider.chat.history.md`, `.aider.input.history`) and session cost accounting ledgers are stored inside isolated session directories (`.aider_factory/sessions/<slug>/`). When `shared_history: false` is configured, active staging files are dynamically swapped and wiped per target file via `chat_history/` vaulting, guaranteeing zero conversation bleeding across sequential target files.
-4. **Strict Single-Target Scoping & Prompt Defense**: In autonomous execution (`pair_programming: false`), all tasks are strictly bound to their explicitly declared `target_files`. Out-of-scope mid-run confirmation prompts (`Add file to the chat?`, `Create new file?`) are deterministically rejected via buffered `b"n\n"` stream responses, preventing model wandering and duplicate file creation.
-5. **PTY Interactive Wrapping**: When `pair_programming: true` is configured, Aider is executed inside a pseudo-terminal wrapper (`script -qfe`) to provide a real PTY for `prompt_toolkit` interactive prompt rendering, while piping full telemetry to stdout and `.pair_capture.log`.
+4. **Strict Single-Target Scoping & Prompt Defense**: In autonomous execution (`pair_programming: false`), all tasks are strictly bound to their explicitly declared `target_files`. Out-of-scope mid-run confirmation prompts (`Add file to the chat?`, `Create new file?`) are deterministically rejected via a continuous rejection buffer (`b"n\n" * 50`) and the `--exit` flag, preventing model wandering and duplicate file creation.
+5. **Cross-Platform PTY & Stream Wrapping**: When `pair_programming: true` is configured, Aider is executed inside a platform-tailored wrapper (GNU `script -qfe` on Linux, BSD `script -q` on macOS, and direct line-buffered `Popen` on Windows) to support `prompt_toolkit` interactive prompt rendering while capturing all telemetry to `.pair_capture.log`.
 6. **Deterministic Fallback Escalation**: In iterative testing loops (`iterate_test: true`), if an initial execution attempt fails using `editor_agent`, subsequent outer-loop retry attempts automatically escalate model routing to `fallback_editor_model` (if configured) on attempt $N > 0$.
 
 ---
@@ -102,17 +102,17 @@ The `AiderFactory` manages state isolation across sequential tasks using a two-s
 
 ### Headless Prompt Defense & Stdin Stream Management (`yes_always: false`)
 In headless/autonomous mode (`pair_programming: false`), unexpected interactive prompts can cause catastrophic scope drift:
-* **The `Add file to chat?` Prompt**: If the Architect proposes edits referencing non-target files, passing `'d'` ("Don't ask again") causes Aider to auto-accept all future file additions, giving write access to unassigned files.
-* **The `Create new file?` Prompt**: When `stdin` is closed after a single response, secondary prompts hit `EOF`, which falls back to Aider's default `[Yes]` and silently creates duplicate or hallucinated files on disk (e.g., creating `oracle_tool.md` instead of updating `oracle.md`).
+* **The `Add file to chat?` Prompt**: If the Architect proposes edits referencing non-target files, accepting prompts causes Aider to auto-accept future file additions, giving write access to unassigned files.
+* **The `Create new file?` Prompt**: When `stdin` is closed prematurely after a single response, secondary prompts hit `EOF`, which falls back to Aider's default `[Yes]` and silently creates duplicate or hallucinated files on disk.
 
-To prevent this, `orchestrate.py` injects a continuous rejection buffer:
+To prevent this, `orchestrate.py` appends `--exit` to the invocation arguments and injects a continuous rejection buffer into `stdin`:
 ```python
 # Send repeated 'n\n' (No) to gracefully reject all out-of-scope mid-run prompts
 process.stdin.write(b"n\n" * 50)
 process.stdin.flush()
 process.stdin.close()
 ```
-Because all intended `target_files` and derived test files (`test_{stem}.*`) are declared in YAML and passed as positional CLI arguments at startup, Aider pre-authorizes them with zero confirmation prompts. Any mid-run confirmation dialog is therefore an undeclared, hallucinated file and is safely rejected.
+Because all intended `target_files` and derived test files (`test_{stem}.*`) are declared in YAML and passed as positional CLI arguments at startup, Aider pre-authorizes them with zero confirmation prompts. Any mid-run confirmation dialog represents an out-of-scope prompt and is safely rejected. When execution completes, `--exit` immediately shuts down Aider without polling for trailing interactive chat turns.
 
 ### Dynamic Target Scoping in `--message`
 To prevent the Architect model from applying global repository-wide goals across all files simultaneously, `orchestrate.py` dynamically anchors the `--message` payload to the active target file:
@@ -140,6 +140,15 @@ if base_aider_conf and os.path.exists(base_aider_conf):
     except Exception as e:
         log.warning(f"⚠️ Could not load base config {base_aider_conf}: {e}")
 
+# Strip history-path keys so CLI arguments remain the sole authority
+for _hist_key in (
+    "chat-history-file",
+    "input-history-file",
+    "llm-history-file",
+    "restore-chat-history",
+):
+    conf_data.pop(_hist_key, None)
+
 # Inject task-specific overrides into the compiled session config
 if task.map_tokens is not None:
     conf_data["map-tokens"] = task.map_tokens
@@ -155,6 +164,10 @@ if task.auto_accept_architect is not None:
     conf_data["auto-accept-architect"] = bool(task.auto_accept_architect)
 if task.auto_commits is not None:
     conf_data["auto-commits"] = bool(task.auto_commits)
+if task.auto_lint is not None:
+    conf_data["auto-lint"] = bool(task.auto_lint)
+if task.lint_cmd is not None:
+    conf_data["lint-cmd"] = task.lint_cmd
 if task.suggest_shell_commands is not None:
     conf_data["suggest-shell-commands"] = bool(task.suggest_shell_commands)
 if task.detect_urls is not None:
@@ -192,18 +205,44 @@ cmd = [
 ]
 ```
 
-### Pseudo-Terminal (PTY) Wrapping in Pair Programming Mode
-Standard Python `subprocess.Popen` calls attach pipes to `stdout` and `stdin`. When Aider is run autonomously, this works cleanly. However, Aider's interactive user interface relies on `prompt_toolkit`, which requires a true TTY terminal device. 
+### Cross-Platform Pseudo-Terminal (PTY) Wrapping in Pair Programming Mode
+Standard Python `subprocess.Popen` calls attach pipes to `stdout` and `stdin`. In autonomous mode, this works cleanly. In pair-programming mode, however, Aider's interactive prompt requires a TTY terminal device for `prompt_toolkit`.
 
-When `pair_programming: true` is configured, `orchestrate.py` wraps Aider using the Unix `script` utility:
+`orchestrate.py` provides cross-platform execution branching:
 
 ```python
 cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
-process = subprocess.Popen(
-    ["script", "-qfe", "-c", cmd_str, _pair_capture],
-    env=env,
-    cwd=self.project_dir,
-)
+if sys.platform == "win32":
+    # Windows: ConPTY cannot be injected via standard script; run directly and
+    # tee stdout line-by-line to the capture file for cost accounting.
+    _cap_fh = open(_pair_capture, "w", encoding="utf-8", errors="replace")
+    process = subprocess.Popen(
+        cmd, env=env, cwd=self.project_dir,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+    try:
+        if process.stdout:
+            for _line in process.stdout:
+                sys.stdout.write(_line)
+                sys.stdout.flush()
+                _cap_fh.write(_line)
+            process.stdout.close()
+    finally:
+        _cap_fh.close()
+elif sys.platform == "darwin":
+    # macOS BSD script: positional arguments, no -e/-f flags.
+    _shell = os.environ.get("SHELL", "/bin/bash")
+    process = subprocess.Popen(
+        ["script", "-q", _pair_capture, _shell, "-c", cmd_str],
+        env=env, cwd=self.project_dir,
+    )
+else:
+    # Linux GNU script: flag-based invocation.
+    process = subprocess.Popen(
+        ["script", "-qfe", "-c", cmd_str, _pair_capture],
+        env=env, cwd=self.project_dir,
+    )
 ```
 
 #### Flags breakdown:
@@ -221,15 +260,17 @@ The table below maps every supported YAML toggle to its corresponding Aider CLI 
 
 | YAML Toggle (under `toggles:`) | Aider CLI Flag | Environment Variable | Default Value | Functional Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `pair_programming` | N/A (Wraps `script -qfe`) | N/A | `false` | **True**: Executes Aider inside an interactive PTY session.<br>**False**: Executes Aider headlessly in autonomous mode. |
+| `pair_programming` | N/A (PTY / Line-Tee) | N/A | `false` | **True**: Executes Aider inside an interactive PTY session (GNU `script`, BSD `script`, or Win32 line-tee).<br>**False**: Executes Aider headlessly in autonomous mode. |
 | `shared_history` | N/A (Internal State Vault) | N/A | `false` | **False**: Strictly isolates chat history per target file via `chat_history/` vaulting and wipes active staging files between tasks.<br>**True**: Shares a single continuous `.aider.chat.history.md` across all target files. |
-| `yes_always` | `--yes-always` (Omitted when `false`) | `AIDER_YES_ALWAYS` | Inverse of `pair_programming` | **True**: Auto-confirms all prompts.<br>**False**: Omitted from CLI; in headless mode, unexpected out-of-scope prompts are answered with `"n"` to protect target boundaries. |
+| `yes_always` | `--yes-always` (Omitted when `false`) | `AIDER_YES_ALWAYS` | Inverse of `pair_programming` | **True**: Auto-confirms all prompts.<br>**False**: Omitted from CLI; in headless mode, unexpected out-of-scope prompts are answered with continuous `"n"` buffer. |
 | `auto_accept_architect` | `--auto-accept-architect`<br>`--no-auto-accept-architect` | `AIDER_AUTO_ACCEPT_ARCHITECT` | Inverse of `pair_programming` | **True**: Automatically applies Architect plans to the Editor without manual review. |
 | `auto_commits` | `--auto-commits`<br>`--no-auto-commits` | `AIDER_AUTO_COMMITS` | `true` | **True**: Automatically creates git commits after successful edits.<br>**False**: Leaves edits uncommitted in working tree. |
+| `auto_lint` | `--auto-lint`<br>`--no-auto-lint` | `AIDER_AUTO_LINT` | `true` | **True**: Runs automated linter on edited target files before commit.<br>**False**: Bypasses post-edit linting. |
+| `lint_cmd` | `--lint-cmd <str>` | `AIDER_LINT_CMD` | `null` | Custom linter command with `{file}` placeholder. When null, uses language default. |
 | `suggest_shell_commands` | `--suggest-shell-commands`<br>`--no-suggest-shell-commands` | `AIDER_SUGGEST_SHELL_COMMANDS` | `true` | **True**: Allows the model to propose shell execution blocks.<br>**False**: Disables shell command suggestions. |
 | `detect_urls` | `--detect-urls`<br>`--no-detect-urls` | `AIDER_DETECT_URLS` | `false` | **True**: Auto-scrapes URLs found in LLM responses.<br>**False**: Disables web URL scraping. |
 | `disable_playwright` | `--disable-playwright` | `AIDER_DISABLE_PLAYWRIGHT` | `false` | **True**: Explicitly disables Playwright/Chromium browser initialization. |
-| `sticky_context` | N/A | N/A | `false` | **True**: Automatically passes target files modified in the current phase as `--read` context to subsequent phases. Ideal for passing Phase 0 strategy docs into Phase 1 implementation. |
+| `sticky_context` | N/A | N/A | `false` | **True**: Automatically passes target files modified in the current phase as `--read` context to subsequent phases. |
 | `map_tokens` | `--map-tokens <int>` | N/A (via config) | Config default (`0`) | Sets token budget for repository map generation. `0` disables repository map. |
 | `map_refresh` | `--map-refresh <str>` | N/A (via config) | `"manual"` | Controls repository map refresh frequency (`manual`, `auto`, `always`). |
 | `map_multiplier_no_files`| `--map-multiplier-no-files <float>`| N/A (via config) | `0.0` | Multiplier for repository map token allocation when no files are in chat context. |
@@ -354,26 +395,39 @@ prompt_file.close()
 args = [oracle, "--mode", mode, "--file", prompt_file.name]
 ```
 
-### OS-Level Telemetry Redirection (`OSTee`)
+### OS-Level Telemetry Redirection (`OSTee` & `_TeeWriter`)
 Standard Python logging redirects `sys.stdout` and `sys.stderr` in user-space, which misses output from native C/Rust extensions (such as LanceDB), child processes (Aider, pytest, Docker), and PTY script wrappers.
 
-`run_workflow.py` uses low-level OS file descriptor redirection (`OSTee`):
+`run_workflow.py` uses low-level OS redirection:
+- **POSIX (Linux / macOS)**: Uses `os.dup2` to redirect file descriptors 1 and 2 to an OS pipe pumped by a daemon thread.
+- **Windows (`win32`)**: Redirects `sys.stdout` and `sys.stderr` to `_TeeWriter` objects to prevent buffered I/O deadlocks with child processes:
 
 ```python
 class OSTee:
     def __init__(self, log_path: str):
         self.log_path = log_path
-        self.orig_stdout_fd = os.dup(1)
-        self.orig_stderr_fd = os.dup(2)
-        self.pipe_r, self.pipe_w = os.pipe()
-
-        os.dup2(self.pipe_w, 1)
-        os.dup2(self.pipe_w, 2)
         self.log_file = open(self.log_path, "a", encoding="utf-8", errors="replace")
-        ...
+
+        if sys.platform == "win32":
+            self._orig_stdout = sys.stdout
+            self._orig_stderr = sys.stderr
+            sys.stdout = _TeeWriter(self._orig_stdout, self.log_file)
+            sys.stderr = _TeeWriter(self._orig_stderr, self.log_file)
+            self.orig_stdout_fd = None
+            self.thread = None
+        else:
+            self._orig_stdout = None
+            self.orig_stdout_fd = os.dup(1)
+            self.orig_stderr_fd = os.dup(2)
+            self.pipe_r, self.pipe_w = os.pipe()
+            os.dup2(self.pipe_w, 1)
+            os.dup2(self.pipe_w, 2)
+            self.running = True
+            self.thread = threading.Thread(target=self._pump, daemon=True)
+            self.thread.start()
 ```
 
-This intercepts all output at the kernel level across C, C++, Rust, Python, and subprocess layers, streaming live output to the console while maintaining a master log file (`.aider_factory/logs/<config_stem>_run_<timestamp>.log`) for cost accounting (`aggregate_costs.py`).
+This guarantees that all terminal output is captured into `.aider_factory/logs/<config_stem>_run_<timestamp>.log` across all operating systems for cost accounting (`aggregate_costs.py`).
 
 ### 6.4 The Factory Launcher Rationale
 The pipeline must be executed using the bundled bash wrappers (e.g., `.aider_factory/bash/factory .env.yml`), rather than calling `python run_workflow.py` directly. 

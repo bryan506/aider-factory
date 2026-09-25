@@ -1382,21 +1382,28 @@ def _add_maintenance(action, paths):
         phase_rag = active_phase.get("rag", {}) or {}
 
     embed_model = (
-        phase_rag.get("embed_model")
+        os.environ.get("ORACLE_EMBED_MODEL")
+        or phase_rag.get("embed_model")
         or global_rag.get("embed_model")
         or phase_models.get("embed_model", "gemini/text-embedding-004")
     )
     embed_api_base = (
-        phase_rag.get("embed_api_base")
+        os.environ.get("ORACLE_EMBED_API_BASE")
+        or phase_rag.get("embed_api_base")
         or global_rag.get("embed_api_base")
         or endpoints.get("embed_api_base")
     )
     embed_backend = (
-        phase_rag.get("embed_backend")
+        os.environ.get("ORACLE_EMBED_BACKEND")
+        or phase_rag.get("embed_backend")
         or global_rag.get("embed_backend")
         or ("openai" if "embedding" in embed_model.lower() else "sentence-transformers")
     )
-    if embed_api_base and embed_backend == "sentence-transformers":
+    if (
+        embed_api_base
+        and embed_backend == "sentence-transformers"
+        and not os.environ.get("ORACLE_EMBED_BACKEND")
+    ):
         embed_backend = "openai"
 
     ocr_only_mode = os.environ.get("ORACLE_NO_RAG_INGEST") == "1"
@@ -1438,10 +1445,10 @@ def _add_maintenance(action, paths):
             return 0
         else:
             print(
-                "[oracle] Ingestion completed but no new files were added or an error occurred.",
+                "[oracle] Ingestion failed: no files were added or an error occurred.",
                 file=sys.stderr,
             )
-            return 0
+            return 1
     except Exception as e:
         print(f"[oracle] Ingestion failed with error: {e}", file=sys.stderr)
         return 1
@@ -1579,21 +1586,28 @@ def _add_web_maintenance(urls):
         phase_rag = active_phase.get("rag", {}) or {}
 
     embed_model = (
-        phase_rag.get("embed_model")
+        os.environ.get("ORACLE_EMBED_MODEL")
+        or phase_rag.get("embed_model")
         or global_rag.get("embed_model")
         or phase_models.get("embed_model", "BAAI/bge-m3")
     )
     embed_api_base = (
-        phase_rag.get("embed_api_base")
+        os.environ.get("ORACLE_EMBED_API_BASE")
+        or phase_rag.get("embed_api_base")
         or global_rag.get("embed_api_base")
         or endpoints.get("embed_api_base")
     )
     embed_backend = (
-        phase_rag.get("embed_backend")
+        os.environ.get("ORACLE_EMBED_BACKEND")
+        or phase_rag.get("embed_backend")
         or global_rag.get("embed_backend")
         or ("openai" if "embedding" in embed_model.lower() else "sentence-transformers")
     )
-    if embed_api_base and embed_backend == "sentence-transformers":
+    if (
+        embed_api_base
+        and embed_backend == "sentence-transformers"
+        and not os.environ.get("ORACLE_EMBED_BACKEND")
+    ):
         embed_backend = "openai"
 
     print(

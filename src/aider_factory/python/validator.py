@@ -238,6 +238,8 @@ def _region(block, db_dir, collection, k):
                     tables = [collection]
                 else:
                     tables = sorted([t for t in all_tables if t.startswith(collection + "_")])
+                    if not tables:
+                        tables = sorted(list(all_tables))
             else:
                 tables = sorted(list(all_tables))
 
@@ -256,8 +258,23 @@ def _region(block, db_dir, collection, k):
             for t in tables:
                 try:
                     table = db.open_table(t)
-                    per_table.append(table.search(bvec).metric("cosine").limit(recall_k).to_list())
-                except Exception:
+                    q = table.search(bvec)
+                    if hasattr(q, "distance_type"):
+                        try:
+                            q = q.distance_type("cosine")
+                        except Exception:
+                            pass
+                    elif hasattr(q, "metric"):
+                        try:
+                            q = q.metric("cosine")
+                        except Exception:
+                            pass
+                    per_table.append(q.limit(recall_k).to_list())
+                except Exception as e:
+                    print(
+                        f"[validator] warning: table '{t}' search error ({e}); skipping.",
+                        file=sys.stderr,
+                    )
                     continue
         except Exception:
             return None, []
@@ -287,9 +304,9 @@ def _region(block, db_dir, collection, k):
 # for a raw MiniCheck gguf you may prefer its native (document, claim) template — kept as a
 # single constant so it's a one-line change.
 _ENTAIL_PROMPT = (
-    "<evidence_passages>\n{document}\n</evidence_passages>\n\n"
-    "<claim_to_verify>\n{claim}\n</claim_to_verify>\n\n"
-    "Is the CLAIM fully supported by the provided evidence passages? "
+    "DOCUMENT:\n{document}\n\n"
+    "CLAIM:\n{claim}\n\n"
+    "Is the CLAIM fully supported by the DOCUMENT? "
     "Answer only 'SUPPORTED' or 'UNSUPPORTED'."
 )
 
@@ -355,6 +372,10 @@ def _entail(claim, chunks, a):
                 kwargs["api_base"] = g_base
             if g_key:
                 kwargs["api_key"] = g_key
+            elif raw_g_key:
+                kwargs["api_key"] = raw_g_key
+            elif g_base:
+                kwargs["api_key"] = "sk-dummy"
             
             r = litellm.completion(**kwargs)
             

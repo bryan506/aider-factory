@@ -47,13 +47,14 @@ class TestValidatorRRF(unittest.TestCase):
             
         mock_db.open_table.side_effect = open_table_side_effect
         
-        # Mock the search chains: table.search().metric().limit().to_list()
-        mock_table_docs.search().metric().limit().to_list.return_value = [
-            {"source_file": "doc.md", "text": "doc text", "_distance": 0.2}
-        ]
-        mock_table_code.search().metric().limit().to_list.return_value = [
-            {"source_file": "code.py", "text": "code text", "_distance": 0.3}
-        ]
+        # Mock the search chains: table.search().metric().limit().to_list() & distance_type()
+        docs_res = [{"source_file": "doc.md", "text": "doc text", "_distance": 0.2}]
+        code_res = [{"source_file": "code.py", "text": "code text", "_distance": 0.3}]
+
+        mock_table_docs.search().metric().limit().to_list.return_value = docs_res
+        mock_table_docs.search().distance_type().limit().to_list.return_value = docs_res
+        mock_table_code.search().metric().limit().to_list.return_value = code_res
+        mock_table_code.search().distance_type().limit().to_list.return_value = code_res
         
         # Execute the region check
         with patch("os.path.isdir", return_value=True):

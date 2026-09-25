@@ -8,6 +8,7 @@
 #   "protobuf",
 #   "fastapi",
 #   "uvicorn",
+#   "nltk",
 # ]
 # ///
 # minicheck_server.py — OpenAI-compatible MiniCheck grounding verifier (Option 1).
@@ -37,6 +38,17 @@ import os
 import re
 import time
 
+try:
+    import nltk
+
+    for _res in ("punkt", "punkt_tab"):
+        try:
+            nltk.download(_res, quiet=True)
+        except Exception:
+            pass
+except ImportError:
+    nltk = None
+
 from fastapi import FastAPI
 from minicheck.minicheck import MiniCheck
 
@@ -56,7 +68,7 @@ _scorer = MiniCheck(model_name=MODEL_NAME, cache_dir=CACHE_DIR)  # loads once at
 # Anchor the CLAIM end on the fixed prompt trailer so blank lines INSIDE the document or the
 # claim block don't truncate the parse (DOTALL, non-greedy).
 _PARSE = re.compile(
-    r"DOCUMENT:\s*(?P<doc>.*?)\n\nCLAIM:\s*(?P<claim>.*?)\n\nIs the CLAIM fully supported",
+    r"DOCUMENT:\s*(?P<doc>.*?)\n+CLAIM:\s*(?P<claim>.*?)(?:\n+Is the CLAIM fully supported|\Z)",
     re.DOTALL,
 )
 
@@ -64,13 +76,19 @@ _PARSE = re.compile(
 def _parse(content: str):
     """Extract (document, claim) from the validator's entailment prompt. Falls back to a
     plain CLAIM: split, then to treating the whole content as the claim."""
-    m = _PARSE.search(content or "")
+    raw = content or ""
+    if "<evidence_passages>" in raw and "<claim_to_verify>" in raw:
+        doc = raw.split("<evidence_passages>")[1].split("</evidence_passages>")[0].strip()
+        claim = raw.split("<claim_to_verify>")[1].split("</claim_to_verify>")[0].strip()
+        return doc, claim
+    m = _PARSE.search(raw)
     if m:
         return m.group("doc").strip(), m.group("claim").strip()
-    if "CLAIM:" in (content or ""):
-        doc, _, claim = content.partition("CLAIM:")
+    if "CLAIM:" in raw:
+        doc, _, claim = raw.partition("CLAIM:")
+        claim = re.split(r"\n+\s*Is the CLAIM fully supported", claim, maxsplit=1)[0]
         return doc.replace("DOCUMENT:", "").strip(), claim.strip()
-    return "", (content or "").strip()
+    return "", raw.strip()
 
 
 def _sentences(claim: str):
@@ -88,11 +106,14 @@ def chat(body: dict):
     doc, claim = _parse(content)
     sents = _sentences(claim)
     try:
-        _labels, probs, _, _ = _scorer.score(docs=[doc] * len(sents), claims=sents)
+        res = _scorer.score(docs=[doc] * len(sents), claims=sents)
+        probs = res[1] if isinstance(res, (tuple, list)) and len(res) > 1 else res
         # MINIMUM: the least-supported sentence governs (conservative — any unsupported
         # sentence flags the whole claim as drifted/ungrounded).
         score = float(min(probs)) if probs else 0.0
-    except Exception:
+    except Exception as e:
+        import sys
+        print(f"[minicheck] error during scoring: {e}", file=sys.stderr, flush=True)
         score = (
             0.0  # scoring failed -> read as unsupported -> pipeline escalates (safe)
         )

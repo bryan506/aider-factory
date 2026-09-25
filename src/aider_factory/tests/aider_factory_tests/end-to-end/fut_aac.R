@@ -7,7 +7,7 @@
 #' @param freq A numeric frequency divisor.
 #' @return A modified data.table with periodStart and periodEnd.
 period_subset <- function(dt, freq) {
-  if (freq == 0) {
+  if (any(freq == 0, na.rm = TRUE)) {
     stop("Frequency cannot be zero")
   }
   if (!data.table::is.data.table(dt)) {

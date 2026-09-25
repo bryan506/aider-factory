@@ -13,6 +13,8 @@ class TestE2ERagResearchDemo(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        if sys.platform == "win32":
+            raise unittest.SkipTest("Bash-based rag_research example scripts require a POSIX environment")
         cls.test_dir = Path(__file__).resolve().parent
         # Locate src/aider_factory/tests/examples/rag_research
         cls.demo_source = cls.test_dir.parents[1] / "examples" / "rag_research"

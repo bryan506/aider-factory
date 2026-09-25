@@ -51,9 +51,11 @@ run_validation_test() {
     local MEMO_SOURCE="$2"
     local REPORT_QUOTE="reports/quote_audit_${TEST_MODE}.md"
     local REPORT_CLAIMS="reports/claims_audit_${TEST_MODE}.md"
+    local TEST_MODE_UPPER
+    TEST_MODE_UPPER=$(echo "$TEST_MODE" | tr '[:lower:]' '[:upper:]')
 
     echo "===================================================================="
-    echo ">>> Running Validation in Mode: [${TEST_MODE^^}] <<<"
+    echo ">>> Running Validation in Mode: [${TEST_MODE_UPPER}] <<<"
     echo "===================================================================="
 
     # Reset active memo to fresh state so autofix is deterministic across runs

@@ -338,6 +338,94 @@ def test_e2e_helper_flags_real_context_loading():
     print("  ✅ Helper Flags Real Context Loading PASS")
 
 
+def test_e2e_helper_non_utf8_context_file():
+    """Verify non-UTF-8 context files are decoded gracefully without crashing during real subprocess helper query."""
+    print("\n[Helper Non-UTF-8 E2E] Testing non-UTF-8 context file ingestion via real subprocess...")
+    import json
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading
+
+    posted_payload = {}
+
+    class _MockSSEHandler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"data": [{"id": "mock-qwen-27b"}]}')
+
+        def do_POST(self):
+            nonlocal posted_payload
+            content_len = int(self.headers.get("Content-Length", 0))
+            if content_len > 0:
+                try:
+                    posted_payload = json.loads(self.rfile.read(content_len).decode("utf-8", errors="replace"))
+                except Exception:
+                    pass
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(
+                b'data: {"id":"1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Found rescue-e2e-cmd"}}]}\n\n'
+                b'data: [DONE]\n\n'
+            )
+
+    mock_server = HTTPServer(("127.0.0.1", 0), _MockSSEHandler)
+    server_port = mock_server.server_port
+    server_thread = threading.Thread(target=mock_server.serve_forever, daemon=True)
+    server_thread.start()
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp_ctx_dir:
+            hist_file = os.path.join(tmp_ctx_dir, ".temp_zshhistory.txt")
+            # Write invalid UTF-8 byte 0x83 (zsh metafied byte)
+            with open(hist_file, "wb") as f:
+                f.write(b": 1700000000:0;\x83echo rescue-e2e-cmd\n: 1700000001:0;git fsck\n")
+
+            # Initialize .aider_factory workspace directory so session history is recorded
+            os.makedirs(os.path.join(tmp_ctx_dir, ".aider_factory"), exist_ok=True)
+
+            src_dir = os.path.abspath(os.path.join(script_dir, "../../../.."))
+            existing_pp = os.environ.get("PYTHONPATH", "")
+            pp = f"{src_dir}{os.pathsep}{python_dir}{os.pathsep}{existing_pp}" if existing_pp else f"{src_dir}{os.pathsep}{python_dir}"
+
+            ctx_env = _get_clean_env({
+                "AIDER_HELPER_API_BASE": f"http://127.0.0.1:{server_port}/v1",
+                "AIDER_HELPER_MODEL": "openai/mock-qwen-27b",
+                "OPENAI_API_KEY": "sk-dummy",
+                "PYTHONPATH": pp,
+            })
+
+            res_ctx = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.argv=['aider-helper', 'query', '-atc', '.temp_zshhistory.txt', 'are these rescue commands?']; from aider_factory.cli import helper_cli; helper_cli()",
+                ],
+                cwd=tmp_ctx_dir,
+                env=ctx_env,
+                capture_output=True,
+                text=True,
+            )
+            assert res_ctx.returncode == 0, f"Non-UTF-8 context query failed: {res_ctx.stderr}"
+            sess_path = os.path.join(tmp_ctx_dir, ".aider_factory", ".helper_terminal_session.json")
+            assert os.path.exists(sess_path), "Terminal session file must be written to disk"
+            with open(sess_path, "r", encoding="utf-8") as f:
+                sess_data = json.load(f)
+            user_msg = sess_data[1]["content"]
+            assert "<extra_context_files>" in user_msg
+            assert "rescue-e2e-cmd" in user_msg
+            assert "git fsck" in user_msg
+            print("  ✅ Physical Non-UTF-8 Context Ingestion E2E PASS")
+    finally:
+        mock_server.shutdown()
+        mock_server.server_close()
+
+
 if __name__ == "__main__":
     print("\n==================================================")
     print("Starting Zero-Mock Factory Matrix Smoke Test Suite")
@@ -350,4 +438,5 @@ if __name__ == "__main__":
     test_e2e_partial_markdown_tree_backfill()
     test_e2e_existing_repo_file_discovery()
     test_e2e_helper_flags_real_context_loading()
+    test_e2e_helper_non_utf8_context_file()
     print("\n🎉 All Initialization Matrix & Edge-Case E2E Tests Passed Successfully!")

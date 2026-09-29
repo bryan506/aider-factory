@@ -218,6 +218,83 @@ class TestHelperKVPersistence(unittest.TestCase):
         bootstrap.clear_helper_session(terminal_mode=False)
         self.assertFalse(os.path.exists(config_session))
 
+    @patch("litellm.completion")
+    def test_context_file_robustness(self, mock_completion):
+        """Verify non-UTF-8 bytes, tildes, empty, and missing context files are handled gracefully."""
+        mock_completion.side_effect = lambda **kwargs: _create_mock_stream("Reply")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # 1. Non-UTF-8 byte sequence (simulating zsh metafied history byte 0x83)
+            history_file = os.path.join(tmp_dir, ".zsh_history")
+            with open(history_file, "wb") as f:
+                f.write(b": 1700000000:0;\x83echo rescue-command-1\n: 1700000001:0;git fsck\n")
+
+            # 2. Empty context file
+            empty_file = os.path.join(tmp_dir, "empty.txt")
+            open(empty_file, "w").close()
+
+            # 3. Missing file
+            missing_file = os.path.join(tmp_dir, "nonexistent.txt")
+
+            context_arg = f"{history_file},{empty_file},{missing_file}"
+
+            bootstrap.run_query("check commands", None, context_arg, ask_mode=True, terminal_mode=True)
+
+            mock_completion.assert_called()
+            sent_messages = mock_completion.call_args.kwargs["messages"]
+            sent_content = sent_messages[1]["content"]
+
+            self.assertIn("<extra_context_files>", sent_content)
+            # Verify non-UTF-8 decoded with replacement character without crashing
+            self.assertIn("rescue-command-1", sent_content)
+            self.assertIn("git fsck", sent_content)
+            self.assertIn(f"File: {empty_file}", sent_content)
+            self.assertNotIn(f"File: {missing_file}", sent_content)
+
+    @patch("litellm.completion")
+    def test_context_file_glob_and_hardening(self, mock_completion):
+        """Verify glob expansion, env var resolution, NUL stripping, and dynamic fence escaping."""
+        mock_completion.side_effect = lambda **kwargs: _create_mock_stream("Reply")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            docs_dir = os.path.join(tmp_dir, "docs")
+            os.makedirs(docs_dir, exist_ok=True)
+
+            f1 = os.path.join(docs_dir, "01_intro.md")
+            with open(f1, "w", encoding="utf-8") as f:
+                f.write("Intro text with ```python\nprint('hello')\n``` embedded fence.")
+
+            f2 = os.path.join(docs_dir, "02_usage.md")
+            with open(f2, "w", encoding="utf-8") as f:
+                f.write("Usage text\x00with NUL byte.")
+
+            env_target = os.path.join(tmp_dir, "env_target.txt")
+            with open(env_target, "w", encoding="utf-8") as f:
+                f.write("Target from env var.")
+
+            os.environ["TEST_HELPER_CTX_FILE"] = env_target
+
+            # Pass glob pattern, an env var, and duplicate reference to f1
+            context_arg = f"{docs_dir}/*.md,{f1},$TEST_HELPER_CTX_FILE"
+
+            bootstrap.run_query("explain docs", None, context_arg, ask_mode=True, terminal_mode=True)
+
+            sent_messages = mock_completion.call_args.kwargs["messages"]
+            sent_content = sent_messages[1]["content"]
+
+            # 1. Glob expansion included both files
+            self.assertIn("01_intro.md", sent_content)
+            self.assertIn("02_usage.md", sent_content)
+            # 2. Env var expanded
+            self.assertIn("Target from env var.", sent_content)
+            # 3. NUL stripped
+            self.assertNotIn("\x00", sent_content)
+            self.assertIn("Usage textwith NUL byte.", sent_content)
+            # 4. Dynamic fence used for f1 (embedded ``` requires ````)
+            self.assertIn("````\nIntro text with ```python", sent_content)
+            # 5. Canonical deduplication: f1 appears exactly once
+            self.assertEqual(sent_content.count("Intro text with"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

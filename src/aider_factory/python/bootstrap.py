@@ -2,6 +2,7 @@
 import os
 import sys
 import json
+import glob
 import re
 import shutil
 import subprocess
@@ -561,14 +562,49 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
 
     if context_paths:
         ctx_blocks = []
-        for path in context_paths.split(","):
-            path = path.strip()
-            if os.path.exists(path):
+        seen_resolved = set()
+        for raw_item in context_paths.split(","):
+            item_str = raw_item.strip().strip("'\"")
+            if not item_str:
+                continue
+            expanded_pattern = os.path.expanduser(os.path.expandvars(item_str))
+
+            if glob.has_magic(expanded_pattern):
+                matched_files = sorted(glob.glob(expanded_pattern, recursive=True))
+                if not matched_files:
+                    print(f"⚠️ [aider-helper] Warning: No files matched glob pattern: {item_str}", file=sys.stderr)
+                    continue
+                file_targets = [(f, f) for f in matched_files]
+            else:
+                file_targets = [(expanded_pattern, item_str)]
+
+            for target_path, label in file_targets:
+                norm_key = os.path.normcase(os.path.normpath(os.path.abspath(target_path)))
+                if norm_key in seen_resolved:
+                    continue
+                seen_resolved.add(norm_key)
+
+                if not os.path.exists(target_path):
+                    print(f"⚠️ [aider-helper] Warning: Context file not found: {label}", file=sys.stderr)
+                    continue
+                if os.path.isdir(target_path):
+                    if not glob.has_magic(expanded_pattern):
+                        print(f"⚠️ [aider-helper] Warning: Context path is a directory, not a file: {label}", file=sys.stderr)
+                    continue
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        ctx_blocks.append(f"File: {path}\n```\n{f.read()}\n```")
-                except Exception:
-                    pass
+                    with open(target_path, "r", encoding="utf-8-sig", errors="replace") as f:
+                        file_content = f.read().replace("\x00", "")
+                    if not file_content.strip():
+                        print(f"⚠️ [aider-helper] Warning: Context file is empty: {label}", file=sys.stderr)
+
+                    fence = "```"
+                    while fence in file_content:
+                        fence += "`"
+
+                    content_str = file_content if file_content.endswith("\n") else file_content + "\n"
+                    ctx_blocks.append(f"File: {label}\n{fence}\n{content_str}{fence}")
+                except Exception as e:
+                    print(f"⚠️ [aider-helper] Warning: Could not read context file '{label}': {e}", file=sys.stderr)
         if ctx_blocks:
             persistent_additions += "<extra_context_files>\n" + "\n\n".join(ctx_blocks) + "\n</extra_context_files>\n\n"
 

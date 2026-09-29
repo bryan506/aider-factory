@@ -7,15 +7,14 @@
 #' @param freq A numeric frequency divisor.
 #' @return A modified data.table with periodStart and periodEnd.
 period_subset <- function(dt, freq) {
-  if (any(freq == 0, na.rm = TRUE)) {
-    stop("Frequency cannot be zero")
-  }
   if (!data.table::is.data.table(dt)) {
     dt <- data.table::as.data.table(dt)
   }
 
-  # INTENTIONAL BUG: Division by zero is not handled when freq == 0, creating NaN/Inf
-  raw_start <- floor(as.numeric(dt$timestamp) / freq) * freq
+  # Fixed division by zero when freq == 0
+  ts_num <- as.numeric(dt$timestamp)
+  freq_vec <- rep_len(freq, length(ts_num))
+  raw_start <- ifelse(freq_vec == 0, ts_num, floor(ts_num / freq_vec) * freq_vec)
   
   dt[, periodStart := bit64::as.integer64(raw_start)]
   dt[, periodEnd := bit64::as.integer64(raw_start + freq)]

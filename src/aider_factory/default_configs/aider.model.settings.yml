@@ -641,20 +641,19 @@
       - reasoning_effort
       - thinking_tokens
 
+
 - name: gemini/gemini-3.6-flash
   edit_format: editor-diff
   use_repo_map: true
-  overeager: true
-  use_temperature: false
   examples_as_sys_msg: true
   reminder: sys
   caches_by_default: true
   extra_params:
-      thinking_tokens: 0
-      reasoning_effort: "minimal"
+      temperature: 0.1
+      reasoning_effort: "minimal" # Sets reasoning depth (Options: minimal, low, medium, high)
   accepts_settings:
-      - reasoning_effort
-      - thinking_tokens
+      - reasoning_effort # Exposes /reasoning-effort command in Aider
+
 
 - name: gemini/gemini-3.7-flash
   edit_format: editor-diff
@@ -680,10 +679,13 @@
   examples_as_sys_msg: true
   reminder: sys
   caches_by_default: true
+  # remove_reasoning: true
+  # reasoning_tag: think
+  # streaming: false
   extra_params:
       temperature: 0.8
-      thinking_tokens: 8192
-      reasoning_effort: "medium"
+      reasoning_effort: "high"
+      # thinking_tokens: 16384
   accepts_settings:
       - reasoning_effort
       - thinking_tokens

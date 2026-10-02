@@ -130,8 +130,8 @@ class TestOrchestratorVaultSwap(unittest.TestCase):
         if os.path.exists(active_oracle):
             os.remove(active_oracle)
 
-        # Active file does NOT exist -> must delete vault file
-        self.factory._swap_out_state("module_a")
+        # Active file does NOT exist and purge_missing=True -> must delete vault file
+        self.factory._swap_out_state("module_a", purge_missing=True)
         self.assertFalse(os.path.exists(vault_oracle))
 
     def test_run_task_oracle_triggers_swap_lifecycle(self):

@@ -23,7 +23,15 @@ for _p in (python_module_dir, src_dir):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from env_utils import is_dummy_key, load_env_files, resolve_api_key, DUMMY_KEYS
+from env_utils import (
+    is_dummy_key,
+    load_env_files,
+    resolve_api_key,
+    is_local_model,
+    is_valid_endpoint,
+    ensure_model_settings,
+    DUMMY_KEYS,
+)
 from apply_agent import (
     parse_chat_history,
     find_active_session_chat_history,
@@ -33,6 +41,157 @@ from apply_agent import (
 )
 
 
+class TestWeakModelRouting(unittest.TestCase):
+    def test_ensure_model_settings_atomic_write(self):
+        """Validates atomic write to model settings and ensures no leftover temp files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = os.path.join(tmpdir, ".aider.model.settings.yml")
+            ensure_model_settings(
+                target_path=out_file,
+                models_to_configure=[
+                    {
+                        "name": "openai/qwen3.8-27b",
+                        "api_base": "http://127.0.0.1:8080/v1",
+                        "api_key": "sk-dummy",
+                    }
+                ],
+            )
+            self.assertTrue(os.path.exists(out_file))
+            files = os.listdir(tmpdir)
+            self.assertEqual(files, [".aider.model.settings.yml"])
+
+    def test_is_local_model(self):
+        self.assertFalse(is_local_model("gemini/gemini-2.5-flash"))
+        self.assertFalse(is_local_model("anthropic/claude-3-5-sonnet"))
+        self.assertFalse(is_local_model("openai/gpt-4o"))
+        self.assertFalse(is_local_model("openai/o1-mini"))
+        self.assertTrue(is_local_model("openai/qwen3.8-27b"))
+        self.assertTrue(is_local_model("lm_studio/qwen3.6-27b-custom"))
+        self.assertTrue(is_local_model("ollama/qwen2.5-coder:7b"))
+        self.assertTrue(is_local_model("my-local-model"))
+
+    def test_ensure_model_settings(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = os.path.join(tmpdir, ".aider.model.settings.yml")
+            ensure_model_settings(
+                target_path=out_file,
+                models_to_configure=[
+                    {
+                        "name": "openai/qwen3.8-27b",
+                        "api_base": "http://192.168.100.2:8080/v1",
+                        "api_key": "sk-dummy",
+                    }
+                ],
+            )
+            with open(out_file, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            names = [entry["name"] for entry in data]
+            self.assertIn("openai/qwen3.8-27b", names)
+            self.assertIn("qwen3.8-27b", names)
+            entry = next(e for e in data if e["name"] == "openai/qwen3.8-27b")
+            self.assertEqual(entry["extra_params"]["api_base"], "http://192.168.100.2:8080/v1")
+
+    def test_ensure_model_settings_null_extra_params(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = os.path.join(tmpdir, ".aider.model.settings.yml")
+            with open(out_file, "w", encoding="utf-8") as f:
+                yaml.dump([{"name": "openai/qwen3.8-27b", "extra_params": None}], f)
+            ensure_model_settings(
+                target_path=out_file,
+                models_to_configure=[
+                    {
+                        "name": "openai/qwen3.8-27b",
+                        "api_base": "http://192.168.100.2:8080/v1",
+                        "api_key": "sk-dummy",
+                    }
+                ],
+            )
+            with open(out_file, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            self.assertEqual(data[0]["extra_params"]["api_base"], "http://192.168.100.2:8080/v1")
+
+    def test_resolve_editor_config_ambient_env_without_config_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_weak = os.environ.get("AIDER_WEAK_MODEL")
+            orig_weak_api = os.environ.get("WEAK_MODEL_API_BASE")
+            try:
+                os.environ["AIDER_WEAK_MODEL"] = "openai/qwen2.5-coder-7b"
+                os.environ["WEAK_MODEL_API_BASE"] = "http://127.0.0.1:8080/v1"
+                cfg = resolve_editor_config(tmpdir)
+                self.assertEqual(cfg["weak_model"], "openai/qwen2.5-coder-7b")
+                self.assertEqual(cfg["weak_model_api_base"], "http://127.0.0.1:8080/v1")
+            finally:
+                if orig_weak is None:
+                    os.environ.pop("AIDER_WEAK_MODEL", None)
+                else:
+                    os.environ["AIDER_WEAK_MODEL"] = orig_weak
+                if orig_weak_api is None:
+                    os.environ.pop("WEAK_MODEL_API_BASE", None)
+                else:
+                    os.environ["WEAK_MODEL_API_BASE"] = orig_weak_api
+
+    def test_is_valid_endpoint(self):
+        self.assertFalse(is_valid_endpoint(None))
+        self.assertFalse(is_valid_endpoint(""))
+        self.assertFalse(is_valid_endpoint("sk-dummy"))
+        self.assertFalse(is_valid_endpoint("http://<your-router-host>:4000/v1"))
+        self.assertFalse(is_valid_endpoint("localhost:8080/v1"))
+        self.assertTrue(is_valid_endpoint("http://127.0.0.1:8080/v1"))
+        self.assertTrue(is_valid_endpoint("https://router.local:4000/v1"))
+
+    def test_bare_cloud_models_classified_as_not_local(self):
+        self.assertFalse(is_local_model("gpt-4o-mini"))
+        self.assertFalse(is_local_model("o3-mini"))
+        self.assertFalse(is_local_model("claude-3-5-haiku-20241022"))
+        self.assertFalse(is_local_model("cohere/command-r"))
+
+    def test_resolve_editor_config_weak_model(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            af_dir = os.path.join(tmpdir, ".aider_factory")
+            os.makedirs(af_dir)
+            cfg_file = os.path.join(af_dir, ".env.yml")
+            with open(cfg_file, "w", encoding="utf-8") as f:
+                yaml.dump(
+                    {
+                        "models": {
+                            "editor_agent": "gemini/gemini-2.5-flash",
+                            "weak_model": "openai/qwen2.5-coder-7b",
+                        },
+                        "endpoints": {
+                            "editor_api": "http://localhost:11434/v1",
+                            "weak_model_api_base": "http://192.168.100.2:8080/v1",
+                        },
+                    },
+                    f,
+                )
+            cfg = resolve_editor_config(tmpdir)
+            self.assertEqual(cfg["weak_model"], "openai/qwen2.5-coder-7b")
+            self.assertEqual(cfg["weak_model_api_base"], "http://192.168.100.2:8080/v1")
+
+    def test_resolve_editor_config_cloud_model_drops_placeholder_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            af_dir = os.path.join(tmpdir, ".aider_factory")
+            os.makedirs(af_dir)
+            cfg_file = os.path.join(af_dir, ".env.yml")
+            with open(cfg_file, "w", encoding="utf-8") as f:
+                yaml.dump(
+                    {
+                        "models": {
+                            "editor_agent": "gemini/gemini-2.5-flash",
+                            "weak_model": "gemini/gemini-3.5-flash-lite",
+                        },
+                        "endpoints": {
+                            "editor_api": "http://<your-router-host>:4000/v1",
+                            "weak_model_api_base": "http://<your-router-host>:4000/v1",
+                        },
+                    },
+                    f,
+                )
+            cfg = resolve_editor_config(tmpdir)
+            self.assertEqual(cfg["weak_model"], "gemini/gemini-3.5-flash-lite")
+            self.assertIsNone(cfg["weak_model_api_base"])
+
+
 class TestEnvUtils(unittest.TestCase):
     """Tests for env_utils.py functions."""
 
@@ -40,6 +199,7 @@ class TestEnvUtils(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self._orig_env = os.environ.copy()
+        os.environ.pop("LITELLM_API_KEY", None)
 
     def tearDown(self):
         os.environ.clear()
@@ -82,9 +242,14 @@ class TestEnvUtils(unittest.TestCase):
         self.assertEqual(os.environ.get("TEST_VAR_D"), "valD")
 
     def test_resolve_api_key_api_base(self):
+        os.environ.pop("LITELLM_API_KEY", None)
         os.environ.pop("ORACLE_AGENT_API_KEY", None)
         os.environ.pop("OPENAI_API_KEY", None)
         self.assertEqual(resolve_api_key(api_base="http://localhost:8000"), "sk-dummy")
+
+        os.environ["LITELLM_API_KEY"] = "litellm-secret"
+        self.assertEqual(resolve_api_key(api_base="http://localhost:8000"), "litellm-secret")
+        os.environ.pop("LITELLM_API_KEY", None)
 
         os.environ["ORACLE_AGENT_API_KEY"] = "oracle-secret"
         self.assertEqual(resolve_api_key(api_base="http://localhost:8000"), "oracle-secret")
@@ -1032,16 +1197,22 @@ class TestRunApplyGaps(unittest.TestCase):
         spec.write_text("Do something.\n", encoding="utf-8")
 
         os.environ.pop("AI_FACTORY_CONFIG", None)
-        run_apply(
-            files=[str(target)],
-            spec_file=str(spec),
-            no_diff=True,
-            cwd=str(self.root),
-        )
-        env_text = self._env_dump.read_text(encoding="utf-8")
-        self.assertIn("OPENAI_API_BASE=http://my-proxy:4000/v1", env_text)
-        self.assertIn("OLLAMA_API_BASE=http://my-proxy:4000/v1", env_text)
-        self.assertIn("LM_STUDIO_API_BASE=http://my-proxy:4000/v1", env_text)
+        os.environ["LITELLM_API_KEY"] = "sk-litellm-secret"
+        try:
+            run_apply(
+                files=[str(target)],
+                spec_file=str(spec),
+                no_diff=True,
+                cwd=str(self.root),
+            )
+            env_text = self._env_dump.read_text(encoding="utf-8")
+            self.assertIn("OPENAI_API_BASE=http://my-proxy:4000/v1", env_text)
+            self.assertIn("OLLAMA_API_BASE=http://my-proxy:4000/v1", env_text)
+            self.assertIn("LM_STUDIO_API_BASE=http://my-proxy:4000/v1", env_text)
+            self.assertIn("OPENAI_API_KEY=sk-litellm-secret", env_text)
+            self.assertIn("LM_STUDIO_API_KEY=sk-litellm-secret", env_text)
+        finally:
+            os.environ.pop("LITELLM_API_KEY", None)
 
     def test_d11_apply_conf_sanitized_and_no_architect(self):
         af = self.root / ".aider_factory"

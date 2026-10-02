@@ -10,12 +10,34 @@ import sys
 import yaml
 
 try:
-    from aider_factory.python.env_utils import load_env_files
+    from aider_factory.python.env_utils import (
+        load_env_files,
+        is_dummy_key,
+        is_local_model,
+        ensure_model_settings,
+        is_valid_endpoint,
+        is_test_path,
+        kill_proc_tree,
+    )
 except ImportError:
     try:
-        from env_utils import load_env_files
+        from env_utils import (
+            load_env_files,
+            is_dummy_key,
+            is_local_model,
+            ensure_model_settings,
+            is_valid_endpoint,
+            is_test_path,
+            kill_proc_tree,
+        )
     except ImportError:
         load_env_files = None
+        is_dummy_key = lambda k: not k
+        is_local_model = lambda m: True
+        ensure_model_settings = lambda p, m, b=None: p
+        is_valid_endpoint = lambda u: bool(u and u.startswith(("http://", "https://")))
+        is_test_path = lambda p: any(x in (p or "").lower() for x in ("test", "spec"))
+        kill_proc_tree = lambda p: getattr(p, "kill", lambda: None)()
 
 if load_env_files:
     load_env_files()
@@ -114,11 +136,21 @@ def find_active_session_chat_history(
         session_name = os.environ.get("AI_FACTORY_SESSION")
 
     if session_name:
-        sess_history = os.path.join(
-            af_dir, "sessions", session_name, ".aider.chat.history.md"
-        )
+        sess_dir = os.path.join(af_dir, "sessions", session_name)
+        sess_history = os.path.join(sess_dir, ".aider.chat.history.md")
         if os.path.isfile(sess_history):
             return sess_history, session_name
+
+        vault_dir = os.path.join(sess_dir, "chat_history")
+        if os.path.isdir(vault_dir):
+            stem_histories = [
+                os.path.join(vault_dir, f)
+                for f in os.listdir(vault_dir)
+                if f.startswith(".aider.chat.history_") and f.endswith(".md")
+            ]
+            if stem_histories:
+                stem_histories.sort(key=os.path.getmtime, reverse=True)
+                return stem_histories[0], session_name
 
     sess_root = os.path.join(af_dir, "sessions")
     if os.path.isdir(sess_root):
@@ -135,7 +167,7 @@ def find_active_session_chat_history(
     if os.path.isfile(root_history):
         return root_history, ""
 
-    return "", ""
+    return "", session_name or ""
 
 
 def resolve_editor_config(
@@ -155,6 +187,11 @@ def resolve_editor_config(
 
     editor_model = explicit_model or "gemini/gemini-2.5-flash"
     editor_api_base = None
+    weak_model = os.environ.get("AIDER_WEAK_MODEL") or os.environ.get("WEAK_MODEL")
+    raw_weak_api_base = (
+        os.environ.get("WEAK_MODEL_API_BASE")
+        or os.environ.get("AIDER_WEAK_MODEL_API_BASE")
+    )
 
     if config_path:
         try:
@@ -171,12 +208,40 @@ def resolve_editor_config(
 
             endpoints_cfg = cfg.get("endpoints", {}) or {}
             editor_api_base = endpoints_cfg.get("editor_api")
+
+            weak_model = (
+                merged_models.get("weak_model")
+                or merged_models.get("weak_agent")
+                or weak_model
+            )
+            raw_weak_api_base = (
+                endpoints_cfg.get("weak_model_api_base")
+                or endpoints_cfg.get("weak_model_api")
+                or endpoints_cfg.get("weak_api_base")
+                or raw_weak_api_base
+            )
         except Exception:
             pass
+
+    if is_valid_endpoint(editor_api_base):
+        editor_api_base = editor_api_base
+    else:
+        editor_api_base = None
+
+    if weak_model and not is_local_model(weak_model):
+        weak_model_api_base = None
+    elif is_valid_endpoint(raw_weak_api_base):
+        weak_model_api_base = raw_weak_api_base
+    elif weak_model and is_local_model(weak_model) and is_valid_endpoint(editor_api_base):
+        weak_model_api_base = editor_api_base
+    else:
+        weak_model_api_base = None
 
     return {
         "editor_model": editor_model,
         "editor_api_base": editor_api_base,
+        "weak_model": weak_model,
+        "weak_model_api_base": weak_model_api_base,
     }
 
 
@@ -210,192 +275,299 @@ def run_apply(
         print("❌ Error: Could not parse a valid specification from chat history.", file=sys.stderr)
         return False
 
-    temp_dir = os.path.join(cwd, ".aider_factory", "temp")
-    os.makedirs(temp_dir, exist_ok=True)
-    active_spec_path = os.path.join(temp_dir, "active_spec.md")
-    with open(active_spec_path, "w", encoding="utf-8") as f:
-        f.write(spec_content)
-
-    cfg = resolve_editor_config(cwd, session_name=session_name, explicit_model=model)
-
-    local_conf = os.path.join(cwd, ".aider_factory", ".aider.conf.yml")
-    root_conf = os.path.join(cwd, ".aider.conf.yml")
-    aider_conf = local_conf if os.path.exists(local_conf) else (root_conf if os.path.exists(root_conf) else None)
-
-    local_settings = os.path.join(cwd, ".aider_factory", ".aider.model.settings.yml")
-    root_settings = os.path.join(cwd, ".aider.model.settings.yml")
-    aider_settings = local_settings if os.path.exists(local_settings) else (root_settings if os.path.exists(root_settings) else None)
-
-    # Sanitize aider_conf to prevent ambient read-only files (e.g. repo maps) from leaking into apply
-    sanitized_conf = None
-    if aider_conf:
-        try:
-            with open(aider_conf, "r", encoding="utf-8") as f:
-                raw_cfg = yaml.safe_load(f) or {}
-            cleaned_cfg = {k: v for k, v in raw_cfg.items() if k not in ("read", "files")}
-            cleaned_cfg["architect"] = False
-            sanitized_conf = os.path.join(temp_dir, ".apply.aider.conf.yml")
-            with open(sanitized_conf, "w", encoding="utf-8") as f:
-                yaml.safe_dump(cleaned_cfg, f)
-        except Exception:
-            sanitized_conf = aider_conf
-
-    apply_chat_hist = os.path.join(temp_dir, ".apply.chat.history.md")
-    apply_input_hist = os.path.join(temp_dir, ".apply.input.history")
-
-    cmd = [
-        "aider",
-        "--model",
-        cfg["editor_model"],
-        "--editor-model",
-        cfg["editor_model"],
-        "--edit-format",
-        "editor-diff",
-        "--message-file",
-        active_spec_path,
-        "--no-restore-chat-history",
-        "--chat-history-file",
-        apply_chat_hist,
-        "--input-history-file",
-        apply_input_hist,
-        "--map-tokens",
-        "0",
-        "--map-refresh",
-        "manual",
-        "--map-multiplier-no-files",
-        "0",
-        "--max-chat-history-tokens",
-        "100000",
-        "--no-check-update",
-        "--no-show-release-notes",
-        "--no-notifications",
-        "--no-analytics",
-        "--no-detect-urls",
-        "--no-suggest-shell-commands",
-        "--exit",
-        "--auto-commits",
-        "--no-show-model-warnings",
-    ]
-
-    if sanitized_conf:
-        cmd.extend(["--config", sanitized_conf])
-    if aider_settings:
-        cmd.extend(["--model-settings-file", aider_settings])
-
-    for file_path in files:
-        cmd.append(file_path)
-
-    env = os.environ.copy()
-    env["AIDER_ARCHITECT"] = "false"
-    if cfg["editor_api_base"]:
-        env["OPENAI_API_BASE"] = cfg["editor_api_base"]
-        env["OPENAI_API_KEY"] = env.get("OPENAI_API_KEY", "sk-dummy")
-        env["OLLAMA_API_BASE"] = cfg["editor_api_base"]
-        env["LM_STUDIO_API_BASE"] = cfg["editor_api_base"]
-        env["LM_STUDIO_API_KEY"] = "sk-dummy"
-
-    # --- Output isolation: /dev/tty for visibility, stdout for outer aider ---
-    #
-    # When aider-apply is invoked via aider's /run, the outer aider captures
-    # our stdout (and stderr) as "command output" tokens. The inner aider
-    # emits 40–120k raw bytes (file echoes, thinking blocks, ANSI codes,
-    # commit confirmations). Streaming those to /dev/tty gives the user live
-    # terminal visibility WITHOUT polluting the outer aider's context window.
-    # Only the git diff (~3–4k tokens) is written to stdout.
-    #
-    # In pipeline mode (orchestrate.py), there is no outer aider capturing
-    # stdout, so _aider_ask_turn streams to sys.stdout directly. See the
-    # NOTE in orchestrate.py._aider_ask_turn for the inverse pattern.
-    #
-    # Default (stream=False): inner aider output is silently discarded.
-    # Only the git diff at the end reaches stdout. Use --stream to watch.
-    print(
-        f"🚀 Running apply pass via {cfg['editor_model']} on files: {', '.join(files)}...",
-        file=sys.stderr,
-    )
-
-    if sys.platform == "win32":
-        try:
-            aider_bin = shutil.which("aider") or "aider"
-        except Exception:
-            aider_bin = "aider"
-        cmd[0] = aider_bin
-        if aider_bin.lower().endswith((".cmd", ".bat")):
-            cmd = ["cmd.exe", "/c"] + cmd
-
-    proc = subprocess.Popen(
-        cmd,
-        cwd=cwd,
-        env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        errors="replace",
-        bufsize=1,
-    )
-
+    EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    temp_cleanup_files = []
     try:
-        if proc.stdin:
-            proc.stdin.write("n\n" * 50)
-            proc.stdin.flush()
-            proc.stdin.close()
-    except Exception:
-        pass
+        temp_dir = os.path.join(cwd, ".aider_factory", "temp")
+        os.makedirs(temp_dir, exist_ok=True)
+        active_spec_path = os.path.join(temp_dir, "active_spec.md")
+        with open(active_spec_path, "w", encoding="utf-8") as f:
+            f.write(spec_content)
 
-    if stream:
-        # Open /dev/tty for live streaming (invisible to outer aider's /run capture).
-        # Falls back gracefully if unavailable (CI, headless, redirected stdin).
-        tty_fh = None
-        try:
-            tty_path = "CONOUT$" if sys.platform == "win32" else "/dev/tty"
-            tty_fh = open(tty_path, "w", encoding="utf-8", errors="replace")
-        except OSError:
-            pass
+        cfg = resolve_editor_config(cwd, session_name=session_name, explicit_model=model)
 
-        try:
-            if proc.stdout:
-                for line in proc.stdout:
-                    if tty_fh:
-                        tty_fh.write(line)
-                        tty_fh.flush()
-                    # else: no TTY — discard (deadlock-safe, loop drains pipe)
-                proc.stdout.close()
-            proc.wait()
-        finally:
-            if tty_fh:
-                tty_fh.close()
-    else:
-        # Silent mode: drain pipe to prevent deadlock, discard all content.
-        if proc.stdout:
-            proc.stdout.read()
-            proc.stdout.close()
-        proc.wait()
+        local_conf = os.path.join(cwd, ".aider_factory", ".aider.conf.yml")
+        root_conf = os.path.join(cwd, ".aider.conf.yml")
+        aider_conf = local_conf if os.path.exists(local_conf) else (root_conf if os.path.exists(root_conf) else None)
 
-    if proc.returncode != 0:
+        local_settings = os.path.join(cwd, ".aider_factory", ".aider.model.settings.yml")
+        root_settings = os.path.join(cwd, ".aider.model.settings.yml")
+        aider_settings = local_settings if os.path.exists(local_settings) else (root_settings if os.path.exists(root_settings) else None)
+
+        resolved_weak_model = cfg.get("weak_model")
+        resolved_weak_api_base = cfg.get("weak_model_api_base")
+        if resolved_weak_model and not is_local_model(resolved_weak_model):
+            resolved_weak_api_base = None
+        elif not is_valid_endpoint(resolved_weak_api_base):
+            resolved_weak_api_base = None
+
+        _litellm_key = os.environ.get("LITELLM_API_KEY", "")
+        _openai_key = os.environ.get("OPENAI_API_KEY", "")
+        _router_key = (
+            _litellm_key if (_litellm_key and not is_dummy_key(_litellm_key))
+            else (_openai_key if (_openai_key and not is_dummy_key(_openai_key)) else "sk-dummy")
+        )
+
+        if resolved_weak_model and resolved_weak_api_base:
+            apply_settings = os.path.join(temp_dir, ".apply.aider.model.settings.yml")
+            ensure_model_settings(
+                target_path=apply_settings,
+                models_to_configure=[
+                    {
+                        "name": resolved_weak_model,
+                        "api_base": resolved_weak_api_base,
+                        "api_key": _router_key,
+                    }
+                ],
+                base_settings_path=aider_settings,
+            )
+            aider_settings = apply_settings
+
+        # Sanitize aider_conf to prevent ambient read-only files (e.g. repo maps) from leaking into apply
+        sanitized_conf = None
+        if aider_conf:
+            try:
+                with open(aider_conf, "r", encoding="utf-8") as f:
+                    raw_cfg = yaml.safe_load(f) or {}
+                cleaned_cfg = {k: v for k, v in raw_cfg.items() if k not in ("read", "files")}
+                cleaned_cfg["architect"] = False
+                sanitized_conf = os.path.join(temp_dir, ".apply.aider.conf.yml")
+                with open(sanitized_conf, "w", encoding="utf-8") as f:
+                    yaml.safe_dump(cleaned_cfg, f)
+            except Exception:
+                sanitized_conf = aider_conf
+
+        apply_chat_hist = os.path.join(temp_dir, f".apply.chat.history_{os.getpid()}.md")
+        apply_input_hist = os.path.join(temp_dir, f".apply.input.history_{os.getpid()}")
+        temp_cleanup_files.extend([apply_chat_hist, apply_input_hist])
+
+        cmd = [
+            "aider",
+            "--model",
+            cfg["editor_model"],
+            "--editor-model",
+            cfg["editor_model"],
+            "--edit-format",
+            "editor-diff",
+            "--message-file",
+            active_spec_path,
+            "--no-restore-chat-history",
+            "--chat-history-file",
+            apply_chat_hist,
+            "--input-history-file",
+            apply_input_hist,
+            "--map-tokens",
+            "0",
+            "--map-refresh",
+            "manual",
+            "--map-multiplier-no-files",
+            "0",
+            "--max-chat-history-tokens",
+            "100000",
+            "--no-check-update",
+            "--no-show-release-notes",
+            "--no-notifications",
+            "--no-analytics",
+            "--no-detect-urls",
+            "--no-suggest-shell-commands",
+            "--exit",
+            "--auto-commits",
+            "--no-show-model-warnings",
+        ]
+
+        if resolved_weak_model:
+            cmd.extend(["--weak-model", resolved_weak_model])
+        if sanitized_conf:
+            cmd.extend(["--config", sanitized_conf])
+        if aider_settings:
+            cmd.extend(["--model-settings-file", aider_settings])
+
+        for file_path in files:
+            cmd.append(file_path)
+
+        env = os.environ.copy()
+        env["AIDER_ARCHITECT"] = "false"
+        if cfg["editor_api_base"]:
+            env["OPENAI_API_BASE"] = cfg["editor_api_base"]
+            if _router_key and not is_dummy_key(_router_key):
+                env["OPENAI_API_KEY"] = _router_key
+            elif "OPENAI_API_KEY" not in env:
+                env["OPENAI_API_KEY"] = "sk-dummy"
+            env["OLLAMA_API_BASE"] = cfg["editor_api_base"]
+            env["LM_STUDIO_API_BASE"] = cfg["editor_api_base"]
+            if _router_key and not is_dummy_key(_router_key):
+                env["LM_STUDIO_API_KEY"] = _router_key
+            elif "LM_STUDIO_API_KEY" not in env:
+                env["LM_STUDIO_API_KEY"] = "sk-dummy"
+        if resolved_weak_api_base and is_valid_endpoint(resolved_weak_api_base):
+            env["WEAK_MODEL_API_BASE"] = resolved_weak_api_base
+            env["AIDER_WEAK_MODEL_API_BASE"] = resolved_weak_api_base
+            if is_local_model(cfg.get("editor_model")) and not cfg["editor_api_base"] and "OPENAI_API_BASE" not in env:
+                env["OPENAI_API_BASE"] = resolved_weak_api_base
+                env["OPENAI_API_KEY"] = _router_key
+
+        # --- Output isolation: /dev/tty for visibility, stdout for outer aider ---
+        #
+        # When aider-apply is invoked via aider's /run, the outer aider captures
+        # our stdout (and stderr) as "command output" tokens. The inner aider
+        # emits 40–120k raw bytes (file echoes, thinking blocks, ANSI codes,
+        # commit confirmations). Streaming those to /dev/tty gives the user live
+        # terminal visibility WITHOUT polluting the outer aider's context window.
+        # Only the git diff (~3–4k tokens) is written to stdout.
+        #
+        # In pipeline mode (orchestrate.py), there is no outer aider capturing
+        # stdout, so _aider_ask_turn streams to sys.stdout directly. See the
+        # NOTE in orchestrate.py._aider_ask_turn for the inverse pattern.
+        #
+        # Default (stream=False): inner aider output is silently discarded.
+        # Only the git diff at the end reaches stdout. Use --stream to watch.
         print(
-            f"❌ Error: Aider apply execution failed with exit code {proc.returncode}",
+            f"🚀 Running apply pass via {cfg['editor_model']} on files: {', '.join(files)}...",
             file=sys.stderr,
         )
-        return False
 
-    # Only the git diff reaches stdout (~3–4k tokens, plain text without ANSI
-    # escape codes or external pagers to prevent token bloat and optimize for
-    # LLM reasoning; outer aider captures this as the sole "command output").
-    if not no_diff:
-        print("\n" + "=" * 70)
-        print("Git Diff Result (HEAD~1):")
-        print("=" * 70)
+        if sys.platform == "win32":
+            try:
+                aider_bin = shutil.which("aider") or "aider"
+            except Exception:
+                aider_bin = "aider"
+            cmd[0] = aider_bin
+            if aider_bin.lower().endswith((".cmd", ".bat")):
+                comspec = os.environ.get("COMSPEC", "cmd.exe")
+                cmd = [comspec, "/c"] + cmd
+
+        popen_kwargs = {"start_new_session": True} if sys.platform != "win32" else {}
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            bufsize=1,
+            **popen_kwargs,
+        )
+
+        import threading
         try:
-            git_bin = shutil.which("git") or "git"
-        except Exception:
-            git_bin = "git"
-        git_cmd = [git_bin, "--no-pager", "diff", "--no-color", "--no-ext-diff", "HEAD~1"]
-        if sys.platform == "win32" and git_bin.lower().endswith((".cmd", ".bat")):
-            git_cmd = ["cmd.exe", "/c"] + git_cmd
-        subprocess.run(git_cmd, cwd=cwd)
+            timeout_secs = float(os.environ.get("AIDER_STREAM_TIMEOUT", "300"))
+            if timeout_secs <= 0.0:
+                timeout_secs = 300.0
+        except (ValueError, TypeError):
+            timeout_secs = 300.0
 
-    return True
+        timed_out = threading.Event()
+        def _on_timeout():
+            timed_out.set()
+            kill_proc_tree(proc)
+
+        watchdog = threading.Timer(timeout_secs, _on_timeout)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            if stream:
+                try:
+                    if proc.stdin:
+                        proc.stdin.write("n\n" * 50)
+                        proc.stdin.flush()
+                        proc.stdin.close()
+                except Exception:
+                    pass
+
+                tty_fh = None
+                try:
+                    tty_path = "CONOUT$" if sys.platform == "win32" else "/dev/tty"
+                    tty_fh = open(tty_path, "w", encoding="utf-8", errors="replace")
+                except OSError:
+                    pass
+
+                try:
+                    if proc.stdout:
+                        while True:
+                            try:
+                                line = proc.stdout.readline()
+                            except (ValueError, OSError):
+                                break
+                            if not line and proc.poll() is not None:
+                                break
+                            if line and tty_fh:
+                                tty_fh.write(line)
+                                tty_fh.flush()
+                        try:
+                            proc.stdout.close()
+                        except Exception:
+                            pass
+                    proc.wait()
+                finally:
+                    if tty_fh:
+                        tty_fh.close()
+            else:
+                try:
+                    proc.communicate(input="n\n" * 50, timeout=timeout_secs)
+                except subprocess.TimeoutExpired:
+                    timed_out.set()
+                    kill_proc_tree(proc)
+                except Exception as e:
+                    print(f"❌ Error: Aider apply execution failed with unexpected exception: {e}", file=sys.stderr)
+                    kill_proc_tree(proc)
+                    return False
+        except KeyboardInterrupt:
+            kill_proc_tree(proc)
+            raise
+        finally:
+            watchdog.cancel()
+
+        if timed_out.is_set():
+            print(f"❌ Error: Aider apply execution timed out after {timeout_secs}s. Terminating process tree.", file=sys.stderr)
+            return False
+
+        if proc.returncode != 0:
+            print(
+                f"❌ Error: Aider apply execution failed with exit code {proc.returncode}",
+                file=sys.stderr,
+            )
+            return False
+
+        if not no_diff:
+            print("\n" + "=" * 70)
+            print("Git Diff Result:")
+            print("=" * 70)
+            try:
+                git_bin = shutil.which("git") or "git"
+            except Exception:
+                git_bin = "git"
+            git_target = "HEAD~1"
+            try:
+                rev_check = subprocess.run(
+                    [git_bin, "rev-parse", "--verify", "HEAD~1"],
+                    cwd=cwd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                )
+                if rev_check.returncode != 0:
+                    git_target = EMPTY_TREE_SHA
+            except Exception:
+                git_target = EMPTY_TREE_SHA
+
+            git_cmd = [git_bin, "--no-pager", "diff", "--no-color", "--no-ext-diff", git_target, "HEAD"]
+            if sys.platform == "win32" and git_bin.lower().endswith((".cmd", ".bat")):
+                git_cmd = ["cmd.exe", "/c"] + git_cmd
+            try:
+                subprocess.run(git_cmd, cwd=cwd, timeout=30)
+            except Exception as e:
+                print(f"⚠️ Warning: Git diff execution failed or timed out: {e}", file=sys.stderr)
+
+        return True
+    finally:
+        for p in temp_cleanup_files:
+            if p and os.path.exists(p):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
 
 def main():

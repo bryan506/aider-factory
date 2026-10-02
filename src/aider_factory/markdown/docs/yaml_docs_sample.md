@@ -46,9 +46,13 @@ The pipeline operates in two primary modes determined by the phase configuration
 1. **Code Mode (`oracle.start_job: false` or standard edit toggles active):**
    * **Job 1 (Implementation):** Applies primary code or architecture modifications using `plans.job_one_plan`.
    * **Job 2 (Spec Audit / Validation):** Performs a second-pass audit or mathematical validation using `plans.job_two_plan`.
-   * **Job 3 (Write Tests):** Authors unit or integration tests using `plans.job_three_plan`.
+   * **Job 3 (Write Tests):** Authors unit, integration, or smoke tests using `plans.job_three_plan` (`testing.md` for standalone mode, or `testing_exec.md` when executing consensus from a pre-test debate).
    * **Job 4 (Iterate / Fix Tests):** Loops test execution and pushes compiler/test output back to the model until all tests pass.
-   * **Pre-Edit Debate (`oracle.pre_edit_debate`):** Inserts an ask-mode debate before Job 1, Job 2, or Job 3 (`insert_debate: [1, 0, 0]`) to reach consensus before files are modified.
+   * **Pre-Edit Debate (`oracle.pre_edit_debate`):** Inserts an ask-mode debate before Job 1, Job 2, or Job 3 (`insert_debate: [d1, d2, d3]`):
+     - `[1, 0, 0]`: Debates the implementation strategy before Job 1 modifies source code.
+     - `[0, 1, 0]`: Debates the audit/validation criteria before Job 2 runs.
+     - `[0, 0, 1]`: Launches a Pre-Test Debate between Role 1 (Oracle Test Critic) and Role 2 (Architect Test Designer) using `testing_debate.md` to build an exhaustive `## Test Decision Matrix` before tests are authored in Job 3.
+   * **Hierarchical Multi-Tier Testing:** Test paths (`test_naming_and_path`) and runners (`test_runner`, `test_command_prefix`) can be overridden per-phase, enabling multi-stage DAGs that seamlessly transition across `tests/unit/`, `tests/integration/`, and `tests/e2e/`.
    * **Escalation Debate (`escalation_debate`):** If tests fail after loop exhaustion, launches a multi-turn Architect <-> Oracle debate and applies the consensus verdict.
 
 2. **Review / Evidence Grounding Mode (`oracle.start_job: true` or `validation.enabled: true`):**
@@ -123,10 +127,11 @@ colors:
 
 # -----------------------------------------------------------------------------
 # 3. GLOBAL TEST HARNESS & LINTING CONTROLS
+# (Default fallback settings; can be overridden per-phase inside phases: [])
 # -----------------------------------------------------------------------------
-test_command_prefix: ""         # Optional command prefix (e.g., Docker wrapper, SSH)
-test_runner: "uv run --with pytest pytest {file}" # Execution command template substituting {file}
-test_naming_and_path: "src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_{stem}.py" # Default test mapping
+test_command_prefix: ""         # Optional global command prefix (e.g., Docker wrapper, env vars)
+test_runner: "uv run --with pytest pytest {file}" # Global execution template substituting {file}
+test_naming_and_path: "tests/test_{stem}.py"      # Global fallback test file naming convention
 lint_cmd: null                  # Optional custom linter command string
 auto_lint: true                 # Run linter automatically after edits
 loop_aider_test: 3              # Outer test retry loops in autonomous mode
@@ -150,6 +155,11 @@ endpoints:
 phases:
   - name: "Code — Implement, Test, Debate-Escalate"
     enabled: true
+
+    # Optional: Per-Phase Test Harness Overrides (fall back to global section 3 if omitted)
+    test_naming_and_path: "tests/unit/test_{stem}.py" # Override test path for this phase (e.g. unit vs integration)
+    test_runner: "uv run --with pytest pytest {file}" # Override test runner command for this phase
+    test_command_prefix: ""                          # Override command prefix for this phase
 
     # Model Routing for this Phase
     models:
@@ -197,10 +207,10 @@ phases:
         full_document: false                # Inject complete document text instead of retrieved chunks
         pre_edit_debate:
             enabled: false                  # Hold Architect <-> Oracle debate before editing files
-            insert_debate: [1, 0, 0]        # 3-tuple: [Job 1 debate, Job 2 debate, Job 3 debate]
-            loops: 3                        # Max debate turns per job
-            job_debate_template: ""         # Template path or list [/j1_tmpl, /j2_tmpl, /j3_tmpl]
-            job_debate_collection: ""       # Collection name or list [/coll1, /coll2, /coll3]
+            insert_debate: [0, 0, 1]        # 3-tuple: [Job 1 debate, Job 2 debate, Job 3 debate]
+            loops: 3                        # Max debate turns per job (default: 3)
+            job_debate_template: "markdown/templates/testing_debate.md" # Single path or [/j1, /j2, /j3] list
+            job_debate_collection: ""       # Collection name or list (set to "" to bypass RAG and audit source AST)
 
     # Aider Runtime & Session Toggles
     toggles:
@@ -256,7 +266,7 @@ phases:
     plans:
         job_one_plan: "markdown/templates/implement.md"
         job_two_plan: "markdown/templates/validate.md"
-        job_three_plan: "markdown/templates/testing.md"
+        job_three_plan: "markdown/templates/testing_exec.md" # testing.md (standalone) or testing_exec.md (post-debate)
         iterate_plan: "markdown/templates/testing_unit_iterate.md"
 ```
 
@@ -267,21 +277,22 @@ phases:
 | Parameter Path | Layman Explanation & Codepath | Edge Cases & Optimization |
 | :--- | :--- | :--- |
 | `colors.architect_debate` / `oracle_debate` | Sets 24-bit ANSI terminal colors for debate turns in `orchestrate.py`. | Hex strings (e.g. `#38bdf8`) are parsed into ANSI escape sequences. Bad strings fall back to standard colors. |
-| `test_runner` / `test_command_prefix` | Defines the test execution command. Formatted dynamically as `{test_command_prefix} {test_runner.replace('{file}', specific_test_file)}`. | If running natively on host, keep `test_command_prefix: ""` empty. For containerized test suites, pass `docker exec -i ...`. |
+| `test_runner` / `test_command_prefix` / `test_naming_and_path` | Hierarchical test resolution. Formatted dynamically as `{test_command_prefix} {test_runner.replace('{file}', specific_test_file)}`. | Evaluated with per-phase precedence: `phase` > `phase.files/toggles` > global fallback. Allows stacking separate phases for unit (`tests/unit/test_{stem}.py`), integration (`tests/integration/test_{stem}.py`), and E2E testing without manual file enumeration. |
 | `loop_aider_test` | Outer retry loop count in `run_workflow.py` for test-fixing passes. | In Review Mode, this is overridden per phase by `validation.validation_loops`. |
 | `models.editor_agent_test_fallback` | Escalation model substituted during iterative test repair on attempt $> 0$. | When an initial cheap editor model fails to fix a test error, Aider automatically escalates to this model on subsequent attempts. |
 | `rag.batch` | Controls LanceDB table topology. `true` = single shared table (`collection_name`). `false` = per-document table and per-document `.md` outputs. | Use `batch: true` for codebase search and technical libraries. Use `batch: false` for multi-paper academic reviews. |
 | `rag.use_docling` / `docling_timeout` | Enables digital document extraction via Docling before rasterizing to image OCR. | Bypasses slow pixel OCR for clean digital PDFs, Word documents (`.docx`), presentations (`.pptx`), and Excel sheets (`.xlsx`). |
 | `rag.recall_k` / `top_k` | Two-stage retrieval parameters in `oracle_agent.py`. `recall_k` vector candidates are fetched from LanceDB, then reranked down to `top_k` via Cross-Encoder. | If reranking is disabled or unavailable, the system truncates candidates to `top_k` directly. |
 | `oracle.start_job` | Discriminator between Review Mode (`start_job: true`) and Code Mode (`start_job: false`). | `start_job: true` executes programmatic synthesis before launching validator tasks. `start_job: false` executes Job 1/2/3 code plans. |
-| `oracle.pre_edit_debate.insert_debate` | 3-tuple boolean list `[j1, j2, j3]` parsed by `_parse_insert_debate()` in `run_workflow.py`. | Controls exactly which edit jobs receive an Architect <-> Oracle consensus debate before file modifications begin. |
-| `oracle.pre_edit_debate.job_debate_template` / `job_debate_collection` | Resolves prompt templates and vector collections for pre-edit debates in `run_workflow.py`. | Accepts either a single string (applied to all active jobs) or a 3-element list `[j1, j2, j3]` to assign dedicated debate prompt templates and vector collections to each respective job. |
+| `oracle.pre_edit_debate.insert_debate` | 3-tuple boolean list `[j1, j2, j3]` parsed by `_parse_insert_debate()` in `run_workflow.py`. | Controls exactly which edit jobs receive an Architect <-> Oracle consensus debate before file modifications begin. Set `[0, 0, 1]` with `job_debate_template: testing_debate.md` to run an adversarial test critic debate before authoring tests in Job 3. |
+| `oracle.pre_edit_debate.job_debate_template` / `job_debate_collection` | Resolves prompt templates and vector collections for pre-edit debates in `run_workflow.py`. | Accepts either a single string or a 3-element list `[j1, j2, j3]`. Setting `job_debate_collection: ""` bypasses LanceDB retrieval so the Oracle evaluates physical source code directly under `<project_files>`. |
 | `toggles.pair_programming` | Wraps Aider in an interactive terminal harness (GNU `script`, BSD `script`, or Win32 line-tee). | Disables non-interactive outer retry loops; plans are loaded via `--read` so the user drives the conversation directly. |
 | `toggles.auto_lint` / `lint_cmd` | Executes automated linter before committing code edits. | If `lint_cmd` is specified (e.g. `"ruff check --fix {file}"`), `{file}` is substituted. When null, resolves language default. |
 | `toggles.shared_history` | Toggles state isolation. `false` saves separate chat histories per file (`.aider.chat.history_<stem>.md`). | Always use `shared_history: false` when processing multiple independent files to prevent prompt history pollution. |
 | `toggles.map_tokens` / `map_refresh` | Controls Aider's repository map size and refresh policy. | Set `map_tokens: 0` and `map_refresh: manual` for isolated single-file tasks to maximize KV-cache reuse. |
 | `validation.enabled` / `validation_tag` | Activates exact-substring quote grounding in `validator.py`. | Scans generated documents for `[evidence]...[/evidence]` tags and scores them against source documents using Cosine and MiniCheck entailment. |
 | `escalation_debate.rounds` / `pass_history` | Multi-round debate -> apply -> test re-check cycle on persistent test failures. | `pass_history: true` carries accumulated debate context and ledgers across rounds so the model learns from prior attempts. |
+| `plans.job_three_plan` | Injected template for Job 3 test authoring. | Use `markdown/templates/testing.md` for standalone test generation directly from source AST. Use `markdown/templates/testing_exec.md` when preceded by a pre-test debate (`[0, 0, 1]`) to audit and execute the consensus verdict (`<stem>.job3_verdict.md`). |
 
 ---
 

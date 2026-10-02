@@ -7,8 +7,8 @@ colors:
     oracle_debate: "#d3869b" # gruvbox pink — oracle turns in debates
 
 test_command_prefix: ""
-test_runner: "uv run --with pytest pytest"
-test_naming_and_path: "src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_{stem}.py"
+test_runner: "uv run --with pytest pytest {file}"
+test_naming_and_path: "tests/test_{stem}.py"
 lint_cmd: null
 auto_lint: true
 loop_aider_test: 3
@@ -21,7 +21,7 @@ endpoints: # set multiple local endpoints, ignored when cloud model chosen
     editor_api: "http://192.168.100.1:8080/v1"
     editor_api_fallback: "http://192.168.100.1:8080/v1"
     rag_agent_api: "http://192.168.100.1:8080/v1"
-    grounding_agent_api: "http://192.168.100.1:8090/v1"
+    grounding_agent_api: "http://192.168.100.2:8090/v1"
     ranking_api_base: "http://192.168.100.1:8080/v1"
     ocr_api_base: "http://192.168.100.2:8081/v1"
     embed_api_base: "http://192.168.100.1:8080/v1"
@@ -31,52 +31,26 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
     enabled: true
 
     models:
-        architect_agent: "gemini/gemini-3.7-flash"
-        editor_agent: "gemini/gemini-3.6-flash"
-        editor_agent_test: "gemini/gemini-3.6-flash"
-        editor_agent_test_fallback: "gemini/gemini-3.6-flash"
-        rag_agent: "gemini/gemini-3.6-flash"
+        architect_agent: "gemini/gemini-3.8-flash"
+        editor_agent: "gemini/gemini-3.7-flash"
+        editor_agent_test: "gemini/gemini-3.7-flash"
+        editor_agent_test_fallback: "gemini/gemini-3.7-flash"
+        rag_agent: "gemini/gemini-3.7-flash"
         ranking_agent: "jinaai/jina-reranker-v3.5"
-        ocr_agent: "gemini/gemini-3.6-flash"
+        ocr_agent: "gemini/gemini-3.7-flash"
         embed_model: "gemini/text-embedding-004"
         grounding_agent: "openai/minicheck-flan-t5-large"
 
     rag:
-        collection_name: "working_repo_lib" # folder name for all rag content
-        batch: true # a table per file/directory or all in one table
-        retrieval_mode: top_k # no_retrieve, top_k, or full_document
-        use_docling: true # fast-path digital document extraction
-        docling_do_ocr: true # internal OCR for hybrid/image pages in Docling
-        docling_timeout: null # Timeout for Docling conversion (sec). null=inf
-        run_ocr_rag: false # can turn off/on to skip OCR step
-        vectordb_overwrite: false # rewrite all documents to lanceDB
-        ocr_prompt: "Extract text, tables, math, code, and documentation into clean Markdown. Preserve all structural integrity."
-        query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: " # important for embedder chunk retrieval
-        chunk_size_chars: 1500 # Max characters per text chunk
-        chunk_overlap_chars: 300  # Overlap characters on consecutive chunks
-        recall_k: 75 # Number of Stage 1 vector candidates before ranking
-        top_k: 20  # Number of Stage 2 chunks returned to prompt context
-        cer_threshold: 0.05 # OCR Character Error Rate before text fallback
-        ocr_max_retries: 2  # Number of OCR attempts on transient failures
-        ocr_parallel: 8 # Number of parallel OCR workers (1 per page)
-        code_chunk_size: 2000 # character length for AST-parsed code chunks
-        ocr_max_tokens: 4096  # max tokens per OCR worker. ~32k/8 = 4096k
+        collection_name: "working_repo_lib"
+        retrieval_mode: top_k # top_k, no_retrieve, full_document
         embed_backend: "sentence-transformers" # openai, sentence-transformers
-        working_repo: "" # override not adviced, pegs to working directory
-        code_exts: null # Override code extensions to ingest (e.g., [.py, .R])
-        text_doc_exts: null  # Override text extensions (e.g., [.md, .txt])
-        ignore: null  # Override directories to skip during ingestion scanning
+        query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: " # important for embedder chunk retrieval
+        ocr_prompt: "<|grounding|>Convert the document to markdown."
 
     oracle:
-        start_job: true # Run programmatic document generator first
-        template: ".aider_factory/markdown/oracle_pre_plan/strategy_instruct_template.md"
-        full_document: false # Send entire paper text instead of chunks
-        pre_edit_debate:
-            enabled: false # Hold debate before making any code edits
-            insert_debate: [1, 0, 0] # [Job 1: Implement, Job 2: Audit, Job 3: Write Tests]
-            loops: 3 # Debate turns per job (0 = 1-shot lone Oracle consultation)
-            job_debate_template: "" # Path or list of 3 paths [job1_tmpl, job2_tmpl, job3_tmpl]
-            job_debate_collection: "" # Collection name or list of 3 names [coll1, coll2, coll3]
+        start_job: false
+        template: ""
 
     toggles:
         pair_programming: true # Interactive mode with terminal chat
@@ -99,32 +73,16 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         detect_urls: false # Scrape URLs found in model responses
         disable_playwright: false # Prevent automated headless browser installs
 
-    validation:
-        enabled: false # Enable strict quote-checking on reviews
-        validation_tag: "evidence" # Tag used to identify quotes
-        region_threshold: 0.60 # Cosine similarity cutoff for matches
-        region_margin: 2 # Extra lines of context around matches
-        region_paragraphs: 0 # Paragraphs to check above/below header limits
-        region_top_k: 5 # Chunks to fetch for each quote check
-        validation_loops: 3 # Max heal attempts for ungrounded quotes
-        redo_oracle_job: false # Force generator to rerun every time
-        verify_all_claims: false # Validate all claims, not just failed
-        entail_threshold: 0.5 # Minimum entailment verifier score
-
-    escalation_debate:
-        loops: 4 # Maximum debate turns per round
-        rounds: 2 # Number of debate rounds to run
-        pass_history: true # Carry debate context to next round
-
     files:
-        target_files: ".aider_factory/markdown/oracle_pre_plan/strategy_template.md" # allowed to edit (e.g., ["src/main.py"])
-        extra_editable_files: [] # may also be edited, but different use case
-        test_files: [] # Optional test files; if empty created from <stem>.lang
-        context_files_job: [] # read only context files for job one
-        context_files_test: [] # read only context files for testing jobs
+        target_files:
+            - ".aider_factory/markdown/oracle_pre_plan/strategy_template.md"
+        extra_editable_files: []
+        test_files: []
+        context_files_job: []
+        context_files_test: []
 
     plans:
-        job_one_plan: []
+        job_one_plan: "markdown/oracle_pre_plan/strategy_instruct_template.md"
         job_two_plan: []
         job_three_plan: []
         iterate_plan: []
@@ -132,204 +90,141 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
 
   - name: "Code — Implement, Validate, Test, Debate-Escalate"
     enabled: true
+    test_naming_and_path: "tests/unit/test_{stem}.py"
+
+    sticky_phases:
+        editable: true
+        readonly: true
 
     models:
-        architect_agent: "gemini/gemini-3.7-flash"
-        editor_agent: "gemini/gemini-3.6-flash"
-        editor_agent_test: "gemini/gemini-3.6-flash"
-        editor_agent_test_fallback: "gemini/gemini-3.6-flash"
-        rag_agent: "gemini/gemini-3.6-flash"
+        architect_agent: "gemini/gemini-3.8-flash"
+        editor_agent: "gemini/gemini-3.7-flash"
+        editor_agent_test: "gemini/gemini-3.7-flash"
+        editor_agent_test_fallback: "gemini/gemini-3.7-flash"
+        rag_agent: "gemini/gemini-3.7-flash"
         ranking_agent: "jinaai/jina-reranker-v3.5"
-        ocr_agent: "gemini/gemini-3.6-flash"
+        ocr_agent: "gemini/gemini-3.7-flash"
         embed_model: "gemini/text-embedding-004"
         grounding_agent: "openai/minicheck-flan-t5-large"
 
     rag:
-        collection_name: "working_repo_lib" # folder name for all rag content
-        batch: true # a table per file/directory or all in one table
-        retrieval_mode: top_k # no_retrieve, top_k, or full_document
-        use_docling: true # fast-path digital document extraction
-        docling_do_ocr: true # internal OCR for hybrid/image pages in Docling
-        docling_timeout: null # Timeout for Docling conversion (sec). null=inf
-        run_ocr_rag: false # can turn off/on to skip OCR step
-        vectordb_overwrite: false # rewrite all documents to lanceDB
-        ocr_prompt: "Extract text, tables, math, code, and documentation into clean Markdown. Preserve all structural integrity."
-        query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: " # important for embedder chunk retrieval
-        chunk_size_chars: 800 # Max characters per text chunk
-        chunk_overlap_chars: 100  # Overlap characters on consecutive chunks
-        recall_k: 30 # Number of Stage 1 dense vector candidates before ranking
-        top_k: 5 # Number of Stage 2 semantic chunks returned to prompt context
-        cer_threshold: 0.05 # OCR Character Error Rate before text fallback
-        ocr_max_retries: 2  # Number of OCR attempts on transient failures
-        ocr_parallel: 8 # Number of parallel OCR workers (1 per page)
-        code_chunk_size: 2000 # character length for AST-parsed code chunks
-        ocr_max_tokens: 4096  # max tokens per OCR worker. ~32k/8 = 4096k
+        collection_name: "working_repo_lib"
+        retrieval_mode: top_k # top_k, no_retrieve, full_document
         embed_backend: "sentence-transformers" # openai, sentence-transformers
-        working_repo: "" # override not adviced, pegs to working directory
-        code_exts: null # Override code extensions to ingest (e.g., [.py, .R])
-        text_doc_exts: null  # Override text extensions (e.g., [.md, .txt])
-        ignore: null  # Override directories to skip during ingestion scanning
+        query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: " # important for embedder chunk retrieval
+        ocr_prompt: "<|grounding|>Convert the document to markdown."
 
     oracle:
-        start_job: false # Run programmatic document generator first
-        template: ".aider_factory/markdown/internal/analyze_bugs.md"
-        full_document: false # Send entire paper text instead of chunks
+        start_job: false
+        template: "markdown/internal/analyze_bugs.md"
+        full_document: false
         pre_edit_debate:
-            enabled: false # Hold debate before making any code edits
-            insert_debate: [1, 0, 0] # [Job 1: Implement, Job 2: Audit, Job 3: Write Tests]
-            loops: 3 # Debate turns per job (0 = 1-shot lone Oracle consultation)
-            job_debate_template: "" # Path or list of 3 paths [job1_tmpl, job2_tmpl, job3_tmpl]
-            job_debate_collection: "" # Collection name or list of 3 names [coll1, coll2, coll3]
+            enabled: true
+            insert_debate: [0, 0, 1]              # Pre-test debate triggered before Job 3
+            loops: 3                              # 3 turns to reach consensus on test matrix
+            job_debate_template: "markdown/templates/testing_debate.md"
+            job_debate_collection: ""             # Bypass RAG retrieval; Oracle audits target file AST
 
     toggles:
-        pair_programming: false # Interactive mode with terminal chat
-        run_job_one: true # Run first edit phase (implement plan)
-        run_job_two: true # Run second edit phase (validate/audit spec)
-        run_job_three: true # Run third edit phase (write tests)
-        iterate_test: true # Loop tests automatically until they pass
-        auto_test: false # Let Aider run tests natively (3 loops)
-        shared_history: false # Isolate chat history per-file
-        sticky_context: false # Keep edits from prior tasks in context
+        pair_programming: false
+        run_job_one: true
+        run_job_two: true
+        run_job_three: true
+        iterate_test: true
+        auto_test: false
+        shared_history: false
+        sticky_context: false
         ## settings to help with KV cache and autonomous vs paired sessions
-        map_tokens: 0 # Token limit for repo map (0 = disabled)
-        map_refresh: "manual" # Repo map refresh mode (manual/auto/always)
-        map_multiplier_no_files: 0 # Map multiplier when no files loaded
-        max_chat_history_tokens: 100000 # Chat token budget before truncation
-        yes_always: true # Auto-confirm all prompts
-        auto_accept_architect: true # Auto-apply architect proposal to editor
-        auto_commits: true # Auto-commit git changes after each edit
-        suggest_shell_commands: true # Allow model to propose shell commands
-        detect_urls: false # Scrape URLs found in model responses
-        disable_playwright: false # Prevent automated headless browser installs
-
-    validation:
-        enabled: false # Enable strict quote-checking on reviews
-        validation_tag: "evidence" # Tag used to identify quotes
-        region_threshold: 0.60 # Cosine similarity cutoff for matches
-        region_margin: 2 # Extra lines of context around matches
-        region_paragraphs: 0 # Paragraphs to check above/below header limits
-        region_top_k: 5 # Chunks to fetch for each quote check
-        validation_loops: 3 # Max heal attempts for ungrounded quotes
-        redo_oracle_job: false # Force generator to rerun every time
-        verify_all_claims: false # Validate all claims, not just failed
-        entail_threshold: 0.5 # Minimum entailment verifier score
+        map_tokens: 0
+        map_refresh: "manual"
+        map_multiplier_no_files: 0
+        max_chat_history_tokens: 100000
+        yes_always: true
+        auto_accept_architect: true
+        auto_commits: true
+        suggest_shell_commands: true
+        detect_urls: false
+        disable_playwright: false
 
     escalation_debate:
-        loops: 4 # Maximum debate turns per round
-        rounds: 2 # Number of debate rounds to run
-        pass_history: true # Carry debate context to next round
+        loops: 4
+        rounds: 2
+        pass_history: true
 
     files:
-        target_files: [] # allowed to edit (e.g., ["src/main.py"])
-        extra_editable_files: [] # may also be edited, but different use case
-        test_files: [] # Optional test files; if empty created from <stem>.lang
-        context_files_job: [] # read only context files for job one
-        context_files_test: [] # read only context files for testing jobs
+        target_files: []
+        extra_editable_files: []
+        test_files: []
+        context_files_job: []
+        context_files_test: []
 
     plans:
-        job_one_plan: []
+        job_one_plan: ".aider_factory/markdown/oracle_pre_plan/strategy_template.md"
         job_two_plan: "markdown/templates/validate.md"
-        job_three_plan: "markdown/templates/testing.md"
+        job_three_plan: "markdown/templates/testing_exec.md"
         iterate_plan: "markdown/templates/testing_unit_iterate.md"
 
-  - name: "post implementation follow-up"
+  - name: "Post-Implementation Review & Follow-up"
     enabled: true
 
+    sticky_phases:
+        editable: true
+        readonly: true
+
     models:
-        architect_agent: "gemini/gemini-3.7-flash"
-        editor_agent: "gemini/gemini-3.6-flash"
-        editor_agent_test: "gemini/gemini-3.6-flash"
-        editor_agent_test_fallback: "gemini/gemini-3.6-flash"
-        rag_agent: "gemini/gemini-3.6-flash"
+        architect_agent: "gemini/gemini-3.8-flash"
+        editor_agent: "gemini/gemini-3.8-flash"
+        editor_agent_test: "gemini/gemini-3.8-flash"
+        editor_agent_test_fallback: "gemini/gemini-3.8-flash"
+        rag_agent: "gemini/gemini-3.7-flash"
         ranking_agent: "jinaai/jina-reranker-v3.5"
-        ocr_agent: "gemini/gemini-3.6-flash"
+        ocr_agent: "gemini/gemini-3.7-flash"
         embed_model: "gemini/text-embedding-004"
         grounding_agent: "openai/minicheck-flan-t5-large"
 
     rag:
-        collection_name: "working_repo_lib" # folder name for all rag content
-        batch: true # a table per file/directory or all in one table
-        retrieval_mode: top_k # no_retrieve, top_k, or full_document
-        use_docling: true # fast-path digital document extraction
-        docling_do_ocr: true # internal OCR for hybrid/image pages in Docling
-        docling_timeout: null # Timeout for Docling conversion (sec). null=inf
-        run_ocr_rag: false # can turn off/on to skip OCR step
-        vectordb_overwrite: false # rewrite all documents to lanceDB
-        ocr_prompt: "Extract text, tables, math, code, and documentation into clean Markdown. Preserve all structural integrity."
-        query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: " # important for embedder chunk retrieval
-        chunk_size_chars: 800 # Max characters per text chunk
-        chunk_overlap_chars: 100  # Overlap characters on consecutive chunks
-        recall_k: 30 # Number of Stage 1 dense vector candidates before ranking
-        top_k: 5 # Number of Stage 2 semantic chunks returned to prompt context
-        cer_threshold: 0.05 # OCR Character Error Rate before text fallback
-        ocr_max_retries: 2  # Number of OCR attempts on transient failures
-        ocr_parallel: 8 # Number of parallel OCR workers (1 per page)
-        code_chunk_size: 2000 # character length for AST-parsed code chunks
-        ocr_max_tokens: 4096  # max tokens per OCR worker. ~32k/8 = 4096k
+        collection_name: "working_repo_lib"
+        retrieval_mode: top_k # top_k, no_retrieve, full_document
         embed_backend: "sentence-transformers" # openai, sentence-transformers
-        working_repo: "" # override not adviced, pegs to working directory
-        code_exts: null # Override code extensions to ingest (e.g., [.py, .R])
-        text_doc_exts: null  # Override text extensions (e.g., [.md, .txt])
-        ignore: null  # Override directories to skip during ingestion scanning
+        query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: " # important for embedder chunk retrieval
+        ocr_prompt: "<|grounding|>Convert the document to markdown."
 
     oracle:
-        start_job: false # Run programmatic document generator first
-        template: ".aider_factory/markdown/internal/analyze_bugs.md"
-        full_document: false # Send entire paper text instead of chunks
+        start_job: false
+        template: ""
         pre_edit_debate:
-            enabled: false # Hold debate before making any code edits
-            insert_debate: [1, 0, 0] # [Job 1: Implement, Job 2: Audit, Job 3: Write Tests]
-            loops: 3 # Debate turns per job (0 = 1-shot lone Oracle consultation)
-            job_debate_template: "" # Path or list of 3 paths [job1_tmpl, job2_tmpl, job3_tmpl]
-            job_debate_collection: "" # Collection name or list of 3 names [coll1, coll2, coll3]
+            enabled: false
 
     toggles:
-        pair_programming: true # Interactive mode with terminal chat
-        run_job_one: false # Run first edit phase (implement plan)
-        run_job_two: false # Run second edit phase (validate/audit spec)
-        run_job_three: true # Run third edit phase (write tests)
-        iterate_test: false # Loop tests automatically until they pass
-        auto_test: false # Let Aider run tests natively (3 loops)
-        shared_history: false # Isolate chat history per-file
-        sticky_context: false # Keep edits from prior tasks in context
+        pair_programming: true
+        run_job_one: true
+        run_job_two: false
+        run_job_three: false
+        iterate_test: false
+        auto_test: false
+        shared_history: false
+        sticky_context: false
         ## settings jto help with KV cache and autonomous vs paired sessions
-        map_tokens: 0 # Token limit for repo map (0 = disabled)
-        map_refresh: "manual" # Repo map refresh mode (manual/auto/always)
-        map_multiplier_no_files: 0 # Map multiplier when no files loaded
-        max_chat_history_tokens: 40000 # Chat token budget before truncation
-        yes_always: false # Auto-confirm all prompts
-        auto_accept_architect: false # Auto-apply architect proposal to editor
-        auto_commits: true # Auto-commit git changes after each edit
-        suggest_shell_commands: true # Allow model to propose shell commands
-        detect_urls: false # Scrape URLs found in model responses
-        disable_playwright: false # Prevent automated headless browser installs
-
-    validation:
-        enabled: false # Enable strict quote-checking on reviews
-        validation_tag: "evidence" # Tag used to identify quotes
-        region_threshold: 0.60 # Cosine similarity cutoff for matches
-        region_margin: 2 # Extra lines of context around matches
-        region_paragraphs: 0 # Paragraphs to check above/below header limits
-        region_top_k: 5 # Chunks to fetch for each quote check
-        validation_loops: 3 # Max heal attempts for ungrounded quotes
-        redo_oracle_job: false # Force generator to rerun every time
-        verify_all_claims: false # Validate all claims, not just failed
-        entail_threshold: 0.5 # Minimum entailment verifier score
-
-    escalation_debate:
-        loops: 4 # Maximum debate turns per round
-        rounds: 2 # Number of debate rounds to run
-        pass_history: true # Carry debate context to next round
+        map_tokens: 0
+        map_refresh: "manual"
+        map_multiplier_no_files: 0
+        max_chat_history_tokens: 60000
+        yes_always: false
+        auto_accept_architect: false
+        auto_commits: true
+        suggest_shell_commands: true
+        detect_urls: false
+        disable_playwright: false
 
     files:
-        target_files: [] # allowed to edit (e.g., ["src/main.py"])
-        extra_editable_files: [] # may also be edited, but different use case
-        test_files: [] # Optional test files; if empty created from <stem>.lang
-        context_files_job: [] # read only context files for job one
-        context_files_test: [] # read only context files for testing jobs
+        target_files: []
+        extra_editable_files: []
+        test_files: []
+        context_files_job: []
+        context_files_test: []
 
     plans:
-        job_one_plan: []
-        job_two_plan: "markdown/templates/validate.md"
-        job_three_plan: "markdown/templates/testing.md"
-        iterate_plan: "markdown/templates/testing_unit_iterate.md"
+        job_one_plan: "markdown/templates/post_test_validation.md"
+        job_two_plan: []
+        job_three_plan: []
+        iterate_plan: []

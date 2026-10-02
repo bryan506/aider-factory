@@ -549,6 +549,135 @@ class TestWorkflow4JobUnits(unittest.TestCase):
             self.assertIn("Prompt A", active_chat.read_text(encoding="utf-8"))
             self.assertNotIn("Prompt B", active_chat.read_text(encoding="utf-8"))
 
+    def test_oracle_verdict_trinary_parsing(self):
+        """Validates trinary oracle_verdict parsing for AGREE, OBJECT, and REVISE."""
+        from deliberate import oracle_verdict
+        self.assertEqual(oracle_verdict("VERDICT: AGREE"), "agree")
+        self.assertEqual(oracle_verdict("  VERDICT: agree  "), "agree")
+        self.assertEqual(oracle_verdict("VERDICT: OBJECT - reason"), "object")
+        self.assertEqual(oracle_verdict("VERDICT: REVISE - need unit tests"), "revise")
+        self.assertEqual(oracle_verdict("Verdict: Revise"), "revise")
+        self.assertIsNone(oracle_verdict("No verdict line here"))
+
+    def test_oracle_verdict_cot_trailing_selection(self):
+        """Validates that oracle_verdict selects the trailing verdict token over critique mentions."""
+        from deliberate import oracle_verdict
+        cot_text = (
+            "<critique>\n"
+            "Earlier we thought VERDICT: AGREE, but upon closer inspection edge cases fail.\n"
+            "</critique>\n"
+            "VERDICT: REVISE - add boundary tests"
+        )
+        self.assertEqual(oracle_verdict(cot_text), "revise")
+
+    def test_oracle_verdict_markdown_formatting(self):
+        """Validates oracle_verdict extracts verdicts wrapped in bold, blockquote, or header markdown."""
+        from deliberate import oracle_verdict
+        self.assertEqual(oracle_verdict("**VERDICT: AGREE**"), "agree")
+        self.assertEqual(oracle_verdict("**VERDICT:** AGREE"), "agree")
+        self.assertEqual(oracle_verdict("**VERDICT**: AGREE"), "agree")
+        self.assertEqual(oracle_verdict("VERDICT: [AGREE]"), "agree")
+        self.assertEqual(oracle_verdict("> VERDICT: REVISE - reason"), "revise")
+        self.assertEqual(oracle_verdict("### VERDICT: OBJECT - reason"), "object")
+        self.assertEqual(oracle_verdict("- VERDICT: AGREE"), "agree")
+        self.assertEqual(oracle_verdict("`VERDICT: AGREE`"), "agree")
+        self.assertEqual(oracle_verdict("*VERDICT: REVISE*"), "revise")
+
+    def test_oracle_verdict_character_class_range_safety(self):
+        """Validates that regex character class does not treat hyphen as an ASCII range."""
+        from deliberate import oracle_verdict
+        # Letters A-Z or numbers before VERDICT without whitespace should not match
+        self.assertIsNone(oracle_verdict("AVERDICT: AGREE"))
+        self.assertIsNone(oracle_verdict("0VERDICT: AGREE"))
+        self.assertEqual(oracle_verdict("- VERDICT: AGREE"), "agree")
+
+    def test_consensus_state_revise_arbitration(self):
+        """Validates consensus_state continues on revise when proposals change and deadlocks when repeated."""
+        from deliberate import consensus_state
+        ledger_continue = {
+            "turns": [
+                {"role": "architect", "proposal_hash": "hash_1"},
+                {"role": "oracle", "verdict": "revise"},
+                {"role": "architect", "proposal_hash": "hash_2"},
+                {"role": "oracle", "verdict": "revise"},
+            ]
+        }
+        self.assertEqual(consensus_state(ledger_continue), "continue")
+
+        ledger_deadlock = {
+            "turns": [
+                {"role": "architect", "proposal_hash": "hash_1"},
+                {"role": "oracle", "verdict": "revise"},
+                {"role": "architect", "proposal_hash": "hash_1"},
+                {"role": "oracle", "verdict": "revise"},
+            ]
+        }
+        self.assertEqual(consensus_state(ledger_deadlock), "deadlock")
+
+        ledger_persist_objection = {
+            "turns": [
+                {"role": "architect", "proposal_hash": "hash_1"},
+                {"role": "oracle", "verdict": "agree"},
+                {"role": "architect", "proposal_hash": "hash_1"},
+                {"role": "oracle", "verdict": "object"},
+            ]
+        }
+        self.assertEqual(consensus_state(ledger_persist_objection), "continue")
+
+    def test_prior_ledger_reverse_proposal_lookup(self):
+        """Validates reverse search finds the latest architect proposal across arbitrary turns."""
+        turns = [
+            {"role": "oracle", "excerpt": "Pre-assessment"},
+            {"role": "architect", "excerpt": "First proposal"},
+            {"role": "oracle", "excerpt": "Objection"},
+            {"role": "architect", "excerpt": "Final agreed proposal"},
+            {"role": "system", "excerpt": "Notice"},
+            {"role": "oracle", "excerpt": "VERDICT: AGREE"},
+        ]
+        arch_turn = next(
+            (t for t in reversed(turns) if t.get("role") == "architect"),
+            None,
+        )
+        self.assertIsNotNone(arch_turn)
+        self.assertEqual(arch_turn.get("excerpt"), "Final agreed proposal")
+
+    def test_oracle_verdict_embedded_critique_quote_isolation(self):
+        """Validates oracle_verdict isolates text after </critique> tag when earlier verdicts are quoted."""
+        from deliberate import oracle_verdict
+        text_with_quote = (
+            "<critique>\n"
+            "In Turn 0 the model said VERDICT: AGREE, but that was premature.\n"
+            "Multiple edge cases remain unhandled.\n"
+            "</critique>\n"
+            "VERDICT: REVISE - add edge cases"
+        )
+        self.assertEqual(oracle_verdict(text_with_quote), "revise")
+
+        contract_quote = (
+            "<evaluation_contract>\n"
+            "Quote: VERDICT: OBJECT - reason\n"
+            "</evaluation_contract>\n"
+            "VERDICT: AGREE"
+        )
+        self.assertEqual(oracle_verdict(contract_quote), "agree")
+
+    def test_extract_files_from_plan_scope_analysis_anchor(self):
+        """Validates that _extract_files_from_plan prioritizes YAML block inside Scope Analysis."""
+        from run_workflow import _extract_files_from_plan
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = os.path.join(tmpdir, "plan.md")
+            os.makedirs(os.path.join(tmpdir, "src"), exist_ok=True)
+            open(os.path.join(tmpdir, "src", "real_target.py"), "w").close()
+            with open(plan_file, "w", encoding="utf-8") as f:
+                f.write(
+                    "# Plan\n\n"
+                    "```yaml\nfiles:\n  target_files: ['src/dummy.py']\n```\n\n"
+                    "## Scope Analysis\n\n"
+                    "```yaml\nfiles:\n  target_files: ['src/real_target.py']\n```\n"
+                )
+            extracted = _extract_files_from_plan(plan_file, tmpdir)
+            self.assertEqual(extracted["target_files"], ["src/real_target.py"])
+
     def test_yes_always_cli_flag_and_config_resolution(self):
         """UNIT: Validates that yes_always toggle logic properly maps:
         - yes_always: True -> adds --yes-always to CLI and 'yes-always: true' to .aider.conf.yml
@@ -587,6 +716,125 @@ class TestWorkflow4JobUnits(unittest.TestCase):
             cmd_yes.append("--yes-always")
 
         self.assertIn("--yes-always", cmd_yes)
+
+    def test_is_test_path_boundary_conditions(self):
+        """Validates is_test_path distinguishes test files from production files containing 'test'/'spec' substrings."""
+        from env_utils import is_test_path
+
+        # Production files containing substrings must NOT evaluate to True
+        self.assertFalse(is_test_path("src/attestation.py"))
+        self.assertFalse(is_test_path("src/contest_engine.py"))
+        self.assertFalse(is_test_path("src/perspective.py"))
+        self.assertFalse(is_test_path("src/special_ops.py"))
+        self.assertFalse(is_test_path("src/inspection.py"))
+
+        # Real test files must evaluate to True
+        self.assertTrue(is_test_path("tests/test_calc.py"))
+        self.assertTrue(is_test_path("src/calc_test.py"))
+        self.assertTrue(is_test_path("src/test-calc.py"))
+        self.assertTrue(is_test_path("tests/testthat/test-algo.R"))
+        self.assertTrue(is_test_path("spec/models/user_spec.rb"))
+        self.assertTrue(is_test_path("tests/conftest.py"))
+
+    def test_oracle_verdict_inside_contract_tag(self):
+        """Validates oracle_verdict extracts verdict enclosed directly inside <evaluation_contract>."""
+        from deliberate import oracle_verdict
+
+        text_inside_contract = (
+            "<evaluation_contract>\n"
+            "<critique>Analysis of logic</critique>\n"
+            "VERDICT: AGREE\n"
+            "</evaluation_contract>"
+        )
+        self.assertEqual(oracle_verdict(text_inside_contract), "agree")
+
+        text_inside_contract_revise = (
+            "<evaluation_contract>\n"
+            "VERDICT: REVISE - probe concurrency\n"
+            "</evaluation_contract>"
+        )
+        self.assertEqual(oracle_verdict(text_inside_contract_revise), "revise")
+
+    def test_gate_cache_cleared_on_mutating_task(self):
+        """Validates that _execute_task_node clears self.last_test_result when task modifies files."""
+        from unittest.mock import MagicMock, patch
+        from orchestrate import AiderFactory, Task
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            factory = AiderFactory(tmpdir, session_name="test_cache_invalidation")
+            factory.last_test_result["test_cmd"] = True
+
+            task = Task(
+                id="mutating_task",
+                files=["src/target.py"],
+                skip_aider=True,
+            )
+            # When skip_aider is True and no out/autofix, cache is retained
+            factory._execute_task_node(task)
+            self.assertIn("test_cmd", factory.last_test_result)
+
+            # When task actually edits, production _execute_task_node clears cache
+            edit_task = Task(
+                id="edit_task",
+                files=["src/target.py"],
+                skip_aider=False,
+            )
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = 0
+            mock_proc.returncode = 0
+            mock_proc.stdin = MagicMock()
+            mock_proc.wait.return_value = 0
+            with patch("subprocess.Popen", return_value=mock_proc):
+                factory._execute_task_node(edit_task)
+            self.assertEqual(len(factory.last_test_result), 0)
+
+    def test_oracle_verdict_synonyms_mapping(self):
+        """Validates that DISAGREE and REJECT are normalized to 'object'."""
+        from deliberate import oracle_verdict
+        self.assertEqual(oracle_verdict("VERDICT: DISAGREE"), "object")
+        self.assertEqual(oracle_verdict("VERDICT: DISAGREE - logic flawed"), "object")
+        self.assertEqual(oracle_verdict("VERDICT: REJECT"), "object")
+        self.assertEqual(oracle_verdict("VERDICT: [REJECT] - fail"), "object")
+
+    def test_ensure_model_settings_sequential_accumulation(self):
+        """Validates that sequential calls to ensure_model_settings append models without clobbering."""
+        from env_utils import ensure_model_settings
+        import yaml
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_settings = os.path.join(tmpdir, ".aider.model.settings.yml")
+            base_settings = os.path.join(tmpdir, "base.settings.yml")
+            with open(base_settings, "w", encoding="utf-8") as bf:
+                yaml.dump([{"name": "openai/base-model", "extra_params": {"api_base": "http://127.0.0.1:8000/v1"}}], bf)
+
+            ensure_model_settings(target_settings, [{"name": "openai/model-a", "api_base": "http://127.0.0.1:8001/v1"}], base_settings_path=base_settings)
+            ensure_model_settings(target_settings, [{"name": "openai/model-b", "api_base": "http://127.0.0.1:8002/v1"}], base_settings_path=base_settings)
+
+            with open(target_settings, "r", encoding="utf-8") as tf:
+                configured = [e["name"] for e in yaml.safe_load(tf)]
+            self.assertIn("openai/model-a", configured)
+            self.assertIn("openai/model-b", configured)
+            self.assertIn("openai/base-model", configured)
+
+    def test_swap_out_state_preserves_vault_when_active_missing(self):
+        """Validates that _swap_out_state preserves vaulted files when active files do not exist."""
+        from orchestrate import AiderFactory
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            factory = AiderFactory(tmpdir, session_name="test_vault_retention")
+            vault_dir = Path(factory.session_dir) / "chat_history"
+            vault_dir.mkdir(parents=True)
+
+            vaulted_hist = vault_dir / ".aider.chat.history_my_stem.md"
+            vaulted_hist.write_text("# Persisted Chat History\n", encoding="utf-8")
+
+            active_hist = Path(factory.session_dir) / ".aider.chat.history.md"
+            self.assertFalse(active_hist.exists())
+
+            factory._swap_out_state("my_stem", purge_missing=False)
+            self.assertTrue(vaulted_hist.exists())
+
+            factory._swap_out_state("my_stem", purge_missing=True)
+            self.assertFalse(vaulted_hist.exists())
 
 
 if __name__ == "__main__":

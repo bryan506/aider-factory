@@ -185,28 +185,37 @@ class TestOracleKVPersistence(unittest.TestCase):
         """Verify changing target files invalidates stale debate session to prevent cross-file cache pollution."""
         debate_session_file = os.path.join(self.temp_dir, ".aider_factory", ".oracle_debate_session.json")
         os.makedirs(os.path.dirname(debate_session_file), exist_ok=True)
+        open(os.path.join(self.temp_dir, "file_A.py"), "w").close()
+        open(os.path.join(self.temp_dir, "file_B.py"), "w").close()
 
-        old_hash = hashlib.sha256(b"file_A.py").hexdigest()
-        old_messages = [{"role": "system", "content": "test"}, {"role": "user", "content": "old context"}]
+        cfg_path = os.path.join(self.temp_dir, ".env.yml")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write("phases:\n  - enabled: true\n    files:\n      target_files: ['file_A.py']\n")
+        os.environ["ORACLE_CONFIG_FILE"] = cfg_path
 
-        with open(debate_session_file, "w", encoding="utf-8") as f:
-            json.dump({"files_hash": old_hash, "messages": old_messages}, f)
-
-        # Case 1: Matching file hash -> reloads session
         with patch("deliberate.consensus_state", return_value="agreed"):
             with patch("litellm.completion", return_value=FakeResponse("VERDICT: AGREE")):
-                with patch("yaml.safe_load", return_value={"phases": [{"enabled": True, "files": {"target_files": ["file_A.py"]}}]}):
-                    # Write dummy config
-                    cfg_path = os.path.join(self.temp_dir, ".env.yml")
-                    with open(cfg_path, "w") as f:
-                        f.write("phases:\n  - enabled: true\n    files:\n      target_files: ['file_A.py']\n")
-                    os.environ["ORACLE_CONFIG_FILE"] = cfg_path
+                # Run 1: establishes session with file_A.py
+                oracle_agent._run_cli_debate("Turn 1", mode="code", max_turns=1, rounds=1)
+                with open(debate_session_file, "r", encoding="utf-8") as sf:
+                    data1 = json.load(sf)
+                hash_a = data1["files_hash"]
+                self.assertTrue(bool(hash_a))
 
-                    oracle_agent._run_cli_debate("Follow up", mode="code", max_turns=1, rounds=1)
-                    # Verify session was reused
-                    with open(debate_session_file, "r", encoding="utf-8") as sf:
-                        data = json.load(sf)
-                    self.assertEqual(data["files_hash"], old_hash)
+                # Run 2: same file_A.py -> reuses session and preserves hash
+                oracle_agent._run_cli_debate("Turn 2", mode="code", max_turns=1, rounds=1)
+                with open(debate_session_file, "r", encoding="utf-8") as sf:
+                    data2 = json.load(sf)
+                self.assertEqual(data2["files_hash"], hash_a)
+
+                # Run 3: change target files to file_B.py -> invalidates hash
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    f.write("phases:\n  - enabled: true\n    files:\n      target_files: ['file_B.py']\n")
+
+                oracle_agent._run_cli_debate("Turn 3", mode="code", max_turns=1, rounds=1)
+                with open(debate_session_file, "r", encoding="utf-8") as sf:
+                    data3 = json.load(sf)
+                self.assertNotEqual(data3["files_hash"], hash_a)
 
 
 if __name__ == "__main__":

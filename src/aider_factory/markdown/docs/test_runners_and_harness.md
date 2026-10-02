@@ -274,3 +274,53 @@ quit(status = 0)
 1. **Warning Suppression (`options(warn = -1)`):** Blocks non-fatal package warnings (e.g., `bit64` integer conversions) from cluttering LLM context windows.
 2. **Precision Filter Extraction:** Strips path prefixes and `.R` extensions to convert file paths into exact `testthat` filter regexes (`^stem$`).
 3. **Uncapped Failure Capture (`TESTTHAT_MAX_FAILS = Inf`):** Prevents `testthat` from aborting early so the LLM receives the full set of failures across the test suite.
+
+---
+
+## 7. The Orthogonal Equivalence Matrix & Test Suite Architecture
+
+### The Core Problem: The Combinatorial Explosion Trap
+In complex autonomous agent systems and multi-phase DAG pipelines, features span multiple orthogonal dimensions:
+- $N$ Execution Phases (Planning, Grounding, Implementation, Audit, Test Iteration)
+- $M$ Ingestion & Manifest Formats (YAML blocks, Markdown headers, Raw file lists, Glob patterns)
+- $D$ Deliberation Configurations (Pre-edit, Pre-test, Escalation debates, Multi-round loops)
+- $T$ Failure / Gate Outcomes (Clean exit, Soft failure, Hard failure, Recovery)
+- $K$ Target Topologies (Single-file, Symmetric multi-file, Asymmetric fan-in/fan-out)
+
+Attempting exhaustive combinatorial testing ($N \times M \times D \times T \times K$) leads to exponential state explosion ($O(k^n)$), slow CI runtime, and high test suite fragility without improving fault detection. Conversely, informal smoke testing leaves subtle edge cases undetected—such as when a multi-round debate skips second-round ledger persistence due to false assumptions about prior-round agreement.
+
+### The Methodology: Orthogonal Equivalence Partitioning
+The **Orthogonal Equivalence Matrix** reduces the testing surface from exponential combinations to linear, representative partitions:
+1. **Isolate Orthogonal Axes**: Identify independent vectors of variation across pipeline stages.
+2. **Define Equivalence Partitions**: Split each axis into mutually exclusive behavioral categories (standard path, fallback path, fault/edge boundary).
+3. **Select Boundary Representatives**: Test exactly one minimal, fully representative test case per structural boundary and failure mode.
+4. **Assert Physical Invariants**: Verify each case against deterministic OS invariants (real process exit codes, physical files written to disk, exact JSON schemas, exact CLI argument isolation) rather than non-deterministic model text.
+
+### The 5 Structural Dimensions of the Matrix
+
+| Test Dimension | Partition 1 (Primary / Fast Path) | Partition 2 (Fallback / Adaptive Path) | Partition 3 (Fault / Edge Boundary) |
+| :--- | :--- | :--- | :--- |
+| **1. Phase Handoff** | **Code $\to$ Code**<br>Standard sequential task dependency. | **Plan $\to$ Code (`sticky_phases`)**<br>Dynamic file discovery where Phase 0 defines the targets for Phase 1. | **Grounding $\to$ Code**<br>Hybrid cross-mode barrier where Code Job 1 must wait for Grounding Finalize. |
+| **2. Plan Manifest** | **Fenced YAML Block**<br>Standard ` ```yaml files: ... ``` ` block inside the markdown spec. | **Raw Markdown Headers**<br>Fallback parsing via `### Target Files:` and bullet lists when no YAML block is present. | **Missing / Non-Existent Manifest**<br>Plan file is missing or contains no targets; pipeline traps cleanly with exit code `1`. |
+| **3. Debate Injection** | **Pre-Edit Debate (`[1, 0, 0]`)**<br>Debate runs before edits; passes `.job1_verdict.md` into Job 1 as its instruction prompt. | **Pre-Test Debate (`[0, 0, 1]`)**<br>Debate runs before Job 3; passes AST and test matrix consensus to author tests. | **Multi-Round Escalation (`rounds: 2`)**<br>Debate triggers upon test failure; re-fails; triggers Round 2 with prior ledger context. |
+| **4. Execution Outcome** | **Clean Success (`exit 0`)**<br>All tasks and gates pass on first attempt. | **Soft Failure $\to$ Debate Recovery**<br>Gated tests fail $\to$ debate generates fix $\to$ re-apply succeeds $\to$ exit `0`. | **Hard Failure $\to$ Barrier Halt**<br>A task in Phase 0 fails permanently $\to$ Phase 1 is immediately suppressed $\to$ exit `1`. |
+| **5. Target Topology** | **Single Target**<br>Direct 1:1 mapping between source file and test harness. | **Multi-Target Symmetry**<br>Index-matched test files (`a.py` $\to$ `test_a.py`, `b.py` $\to$ `test_b.py`). | **Dynamic Glob Expansion**<br>Wildcards (`src/*.py`) resolved dynamically against project filesystem without pruning. |
+
+### Concrete Implementation Mapping (`test_e2e_sticky_phases.py`)
+
+Each partition in the matrix is mapped to a dedicated, zero-mock end-to-end test case in the test suite:
+
+- **`test_e2e_live_plan_do_mutation`** *(Phase Handoff Partition 2 + Target Topology Partition 1)*:  
+  Verifies that Phase 0 can dynamically generate `strategy_template.md` at runtime and Phase 1 will discover, extract, and edit those targets without pre-baked static configuration.
+- **`test_e2e_markdown_header_fallback_extraction`** *(Plan Manifest Partition 2)*:  
+  Verifies the regex fallback parser (`_parse_section`) when the architect outputs plain Markdown headers (`### Target Files:`) instead of a structured YAML code block.
+- **`test_e2e_pre_edit_debate_verdict_handoff`** *(Debate Injection Partition 1)*:  
+  Verifies that when `insert_debate: [1, 0, 0]` is configured, the deliberation turn executes, writes `.job1_verdict.md`, and supplies that physical verdict file to Job 1 via `--message` / `--read`.
+- **`test_e2e_escalation_multi_round_recovery`** *(Debate Injection Partition 3 + Execution Outcome Partition 2)*:  
+  Verifies the multi-round escalation loop: Test attempt 1 fails $\to$ Round 1 debate creates `esc_calc_r1.verdict.md` & `esc_calc_r1.debate.json` $\to$ fix re-fails $\to$ Round 2 debate reads Round 1's ledger, deliberates, creates `esc_calc_r2.verdict.md` & `esc_calc_r2.debate.json` $\to$ fix passes $\to$ exit `0`.
+- **`test_e2e_hybrid_grounding_to_code_barrier`** *(Phase Handoff Partition 3)*:  
+  Verifies that a review/grounding phase (Autofix $\to$ Deliberate $\to$ Apply $\to$ Finalize) acts as a strict dependency barrier for a subsequent code phase.
+- **`test_e2e_live_fail_fast_halt` & `test_e2e_multi_target_partial_failure_halt`** *(Execution Outcome Partition 3)*:  
+  Verifies the fail-fast invariant: when any task fails in an earlier phase, all subsequent phases are suppressed, preventing cascade errors or polluted repository state.
+- **`test_e2e_5field_role_segregation_telemetry`** *(State Isolation & Role Segregation)*:  
+  Verifies physical argument segregation: Job 1 (Implementation) receives only `target_files` and `extra_editable_files`; Job 3 (Testing) receives `test_files` and `context_files_test`, preventing agents from modifying tests during feature implementation.

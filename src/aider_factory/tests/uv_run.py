@@ -23,17 +23,28 @@ def main():
     # Filter out tests ignored in CI to save time/money
     ignored_tests = {
         "test_e2e_docling_pipeline.py",
+        "test_e2e_docling_grounding.py",
         "test_e2e_max_chat_history_tokens.py",
         "test_e2e_architect_summarization.py",
         "test_persistent_aider_e2e.py",
         "test_e2e_workflow_smoke.py",
         "test_e2e_real_session_lifecycle.py",
         "test_e2e_local_persistent_pipeline.py",
+        "test_e2e_local_oracle_persistence.py",
+        "test_e2e_local_helper_persistence.py",
         "test_e2e_shared_history_live.py",
         "test_e2e_shared_history_and_prompt_isolation.py",
         "test_e2e_oracle_reranker_live.py",
+        "test_e2e_apply_agent_live.py",
+        "test_e2e_minicheck_live.py",
+        "test_e2e_router_smoke.py",
         "test_e2e_cloud_embed_roundtrip.py",
-        "test_e2e_pipeline.py"
+        "test_e2e_embed_query_roundtrip.py",
+        "test_e2e_pipeline.py",
+        "test_e2e_4job_pipeline.py",
+        "test_e2e_research_web_rag.py",
+        "test_research_web_rag.py",
+        "test_e2e_rag_research_demo.py",
     }
 
     test_files = [f for f in all_files if Path(f).name not in ignored_tests]

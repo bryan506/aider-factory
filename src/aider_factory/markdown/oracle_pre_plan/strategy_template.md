@@ -1,5 +1,15 @@
 # Strategy Template (Source of Truth)
 
+## Scope Analysis
+```yaml
+files:
+  target_files: []
+  extra_editable_files: []
+  test_files: []
+  context_files_job: []
+  context_files_test: []
+```
+
 ## 1. Scope
 - [Define implementation/refactoring scope and objectives]
 

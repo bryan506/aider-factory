@@ -86,6 +86,17 @@ def test_e2e_matrix_1_cli_aider_factory():
             assert sub_dir.is_dir(), f"Markdown subdirectory {sub} must exist"
             assert len(list(sub_dir.glob("*.md"))) > 0, f"Markdown subdirectory {sub} must contain files"
 
+        # 4b. Assert sample_yaml_config directory provisioning
+        sample_yaml_dir = factory_dir / "sample_yaml_config"
+        assert sample_yaml_dir.is_dir(), ".aider_factory/sample_yaml_config must be created"
+        assert (sample_yaml_dir / "env_plan_do.yml").is_file(), "env_plan_do.yml must exist in sample_yaml_config"
+        assert (sample_yaml_dir / "complete_env.yml").is_file(), "complete_env.yml must exist in sample_yaml_config"
+
+        # Mutate a sample YAML file to verify non-destructive re-initialization
+        custom_sample_file = sample_yaml_dir / "env_plan_do.yml"
+        with open(custom_sample_file, "w", encoding="utf-8") as f:
+            f.write("CUSTOM_SAMPLE_CONTENT_PRESERVE: true\n")
+
         # 5. Assert non-destructive re-initialization (custom file & existing template modification)
         custom_file = markdown_dir / "templates" / "custom_user_template.md"
         with open(custom_file, "w", encoding="utf-8") as f:
@@ -109,6 +120,8 @@ def test_e2e_matrix_1_cli_aider_factory():
             assert f.read() == "CUSTOM_USER_CONTENT_PRESERVE", "Re-init must not overwrite custom markdown files"
         with open(existing_template, "r", encoding="utf-8") as f:
             assert f.read() == "MUTATED_ANALYZE_BUGS_PRESERVE", "Re-init must not overwrite modified bundled templates"
+        with open(custom_sample_file, "r", encoding="utf-8") as f:
+            assert f.read() == "CUSTOM_SAMPLE_CONTENT_PRESERVE: true\n", "Re-init must not overwrite modified sample yaml"
 
     print("  ✅ Matrix Row 1 (aider-factory) PASS")
 
@@ -142,6 +155,10 @@ def test_e2e_matrix_2_helper_bootstrap():
             sub_dir = markdown_dir / sub
             assert sub_dir.is_dir(), f"Bootstrap must create markdown/{sub}"
             assert len(list(sub_dir.glob("*.md"))) > 0, f"markdown/{sub} must contain template markdown files"
+
+        sample_yaml_dir = tmp_path / ".aider_factory" / "sample_yaml_config"
+        assert sample_yaml_dir.is_dir(), "Bootstrap must provision .aider_factory/sample_yaml_config directory"
+        assert (sample_yaml_dir / "env_plan_do.yml").is_file(), "env_plan_do.yml must exist in bootstrap sample_yaml_config"
 
     print("  ✅ Matrix Row 2 (aider-helper bootstrap) PASS")
 

@@ -151,6 +151,48 @@ def test_init_markdown_does_not_overwrite_existing(mock_sub, mock_bash, mock_sea
     print("✅ Markdown Non-Destructive Copy PASS")
 
 
+@patch("cli.ensure_searxng_service")
+@patch("cli.ensure_bash_wrappers")
+@patch("subprocess.run")
+def test_init_sample_yaml_config_provisioned(mock_sub, mock_bash, mock_searxng):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        original_cwd = os.getcwd()
+        os.chdir(tmp_dir)
+        try:
+            cli.init_user_project(tmp_dir)
+            sample_dir = os.path.join(tmp_dir, ".aider_factory", "sample_yaml_config")
+            assert os.path.isdir(sample_dir), ".aider_factory/sample_yaml_config must be created"
+            assert os.path.isfile(os.path.join(sample_dir, "env_plan_do.yml")), "env_plan_do.yml must exist"
+            assert os.path.isfile(os.path.join(sample_dir, "complete_env.yml")), "complete_env.yml must exist"
+            assert os.path.isfile(os.path.join(sample_dir, "minimal_env.yml")), "minimal_env.yml must exist"
+        finally:
+            os.chdir(original_cwd)
+    print("✅ Sample YAML Config Provisioning PASS")
+
+
+@patch("cli.ensure_searxng_service")
+@patch("cli.ensure_bash_wrappers")
+@patch("subprocess.run")
+def test_init_sample_yaml_config_does_not_overwrite_existing(mock_sub, mock_bash, mock_searxng):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        original_cwd = os.getcwd()
+        os.chdir(tmp_dir)
+        try:
+            custom_dir = os.path.join(tmp_dir, ".aider_factory", "sample_yaml_config")
+            os.makedirs(custom_dir, exist_ok=True)
+            custom_yaml = os.path.join(custom_dir, "env_plan_do.yml")
+            with open(custom_yaml, "w", encoding="utf-8") as f:
+                f.write("CUSTOM_CONFIG_PRESERVE: true\n")
+
+            cli.init_user_project(tmp_dir)
+
+            with open(custom_yaml, "r", encoding="utf-8") as f:
+                assert f.read() == "CUSTOM_CONFIG_PRESERVE: true\n", "Existing sample yaml must not be overwritten"
+        finally:
+            os.chdir(original_cwd)
+    print("✅ Sample YAML Config Non-Destructive Copy PASS")
+
+
 def test_cli_flags_in_uninitialized_directory_creates_zero_artifacts():
     """Verify management and help flags do not scaffold .git or .aider_factory in arbitrary uninitialized directories."""
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -322,6 +364,8 @@ if __name__ == "__main__":
     test_ensure_bash_wrappers_provisions_all_launchers()
     test_init_markdown_tree_provisioned()
     test_init_markdown_does_not_overwrite_existing()
+    test_init_sample_yaml_config_provisioned()
+    test_init_sample_yaml_config_does_not_overwrite_existing()
     test_cli_flags_in_uninitialized_directory_creates_zero_artifacts()
     test_all_cli_tools_help_flags()
     test_init_embed_defaults_are_local()

@@ -62,12 +62,62 @@ SYSTEM_PROMPT = (
 
 
 try:
-    from aider_factory.python.env_utils import load_env_files, resolve_api_key
+    from aider_factory.python.env_utils import load_env_files, resolve_api_key, get_model_settings
 except ImportError:
-    from env_utils import load_env_files, resolve_api_key
+    try:
+        from env_utils import load_env_files, resolve_api_key, get_model_settings
+    except ImportError:
+        from env_utils import load_env_files, resolve_api_key
+        get_model_settings = lambda m, cwd=None: {}
 
 load_env_files()
 _resolve_api_key = resolve_api_key
+
+
+def _build_llm_kwargs(model, messages, api_base=None, api_key=None):
+    """Build kwargs for litellm.completion embodying model settings and reasoning parameters."""
+    resolved_key = _resolve_api_key(model, api_base, api_key)
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID},
+        "drop_params": True,
+    }
+    if api_base:
+        kwargs["api_base"] = api_base
+    if resolved_key:
+        kwargs["api_key"] = resolved_key
+
+    try:
+        m_settings = get_model_settings(model) if model else {}
+    except Exception:
+        m_settings = {}
+    extra = (m_settings.get("extra_params") or {}) if isinstance(m_settings, dict) else {}
+
+    model_str = str(model or "").lower()
+    effort = os.environ.get("ORACLE_REASONING_EFFORT") or extra.get("reasoning_effort")
+    if not effort and model and any(p in model_str for p in ("gemini", "o1", "o3", "deepseek")):
+        effort = "high"
+    if effort and str(effort).lower() not in ("none", "null", "false", "0", ""):
+        kwargs["reasoning_effort"] = str(effort).lower()
+
+    temp = os.environ.get("ORACLE_TEMPERATURE")
+    if temp is None:
+        temp = extra.get("temperature")
+    if temp is None and model and "gemini" in model_str:
+        temp = 0.8
+    if temp is not None:
+        try:
+            kwargs["temperature"] = float(temp)
+        except (ValueError, TypeError):
+            pass
+
+    if isinstance(extra.get("extra_body"), dict):
+        kwargs["extra_body"] = extra["extra_body"]
+    if extra.get("think") is not None:
+        kwargs["think"] = extra["think"]
+
+    return kwargs
 
 
 def _load_session():
@@ -523,19 +573,19 @@ def _validate_oracle_response(answer_text):
     if not a.no_print:
         print(f"\n[oracle-validate] Verifying claims in response...", file=sys.stderr)
         
-    rc = validator._run_claims_only(a)
-
-    if rc == 0:
-        if not a.no_print:
-            print(f"[oracle-validate] ✅ All claims grounded.", file=sys.stderr)
-    else:
-        if not a.no_print:
-            print(f"[oracle-validate] ⚠️  Unsupported claims detected!", file=sys.stderr)
-
     try:
-        os.remove(tmp_file)
-    except OSError:
-        pass
+        rc = validator._run_claims_only(a)
+        if rc == 0:
+            if not a.no_print:
+                print(f"[oracle-validate] ✅ All claims grounded.", file=sys.stderr)
+        else:
+            if not a.no_print:
+                print(f"[oracle-validate] ⚠️  Unsupported claims detected!", file=sys.stderr)
+    finally:
+        try:
+            os.remove(tmp_file)
+        except OSError:
+            pass
 
 
 def _full_document(db_dir, collection):
@@ -647,20 +697,20 @@ def _run_auto():
         ]
         try:
             import litellm
+            import time
 
-            resolved_key = _resolve_api_key(model, api_base, api_key)
-            kwargs = {
-                "model": model,
-                "messages": messages,
-                "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID}
-            }
-            if api_base:
-                kwargs["api_base"] = api_base
-            if resolved_key:
-                kwargs["api_key"] = resolved_key
+            kwargs = _build_llm_kwargs(model, messages, api_base, api_key)
+            effort_tag = f", effort={kwargs.get('reasoning_effort')}" if kwargs.get("reasoning_effort") else ""
+            print(f"[oracle] Thinking ({model}{effort_tag})...", file=sys.stderr, flush=True)
+
+            t0 = time.time()
             resp = litellm.completion(**kwargs)
+            elapsed = time.time() - t0
+
             answer = _response_content(resp)
             cost_line = _litellm_cost_line(resp, persist_session=False)
+            if cost_line:
+                cost_line += f" · thinking_time={elapsed:.2f}s"
         except Exception as e:
             print(f"[oracle-job] model call failed: {e}", file=sys.stderr)
             return 1
@@ -729,7 +779,7 @@ def _build_question(argv):
     if not os.path.isfile(resolved):
         print(f"[oracle] --file not found: {resolved}", file=sys.stderr)
         return None, None
-    with open(resolved, "r", encoding="utf-8") as f:
+    with open(resolved, "r", encoding="utf-8", errors="replace") as f:
         file_text = f.read()
     question = f"{inline}\n\n{file_text}" if inline else file_text
     display = (
@@ -763,6 +813,12 @@ def _extract_overrides(argv):
         "ORACLE_NO_RERANK",
         "ORACLE_RECALL_K",
         "ORACLE_WEB_WORKERS",
+        "ORACLE_PERSONA_FILE",
+        "ARCHITECT_PERSONA_FILE",
+        "ORACLE_DEBATE_PERSIST",
+        "ORACLE_DEBATE_NO_PASS_HISTORY",
+        "ORACLE_REASONING_EFFORT",
+        "ORACLE_TEMPERATURE",
     ]
     for k in transient_keys:
         os.environ.pop(k, None)
@@ -830,6 +886,32 @@ def _extract_overrides(argv):
                 continue
             print("[oracle] --type must be code|docs", file=sys.stderr)
             return out, do_list, did_clear, None, None
+        if a == "--persist":
+            os.environ["ORACLE_DEBATE_PERSIST"] = "1"
+            i += 1
+            continue
+        if a in ("--no-pass-history", "--no-pass-round-history"):
+            os.environ["ORACLE_DEBATE_NO_PASS_HISTORY"] = "1"
+            i += 1
+            continue
+        if a in ("--pass-history", "--pass-round-history"):
+            os.environ["ORACLE_DEBATE_NO_PASS_HISTORY"] = "0"
+            i += 1
+            continue
+        if a in ("--oracle-persona", "--oracle-personas"):
+            if i + 1 < len(args):
+                os.environ["ORACLE_PERSONA_FILE"] = args[i + 1].strip()
+                i += 2
+                continue
+            print("[oracle] --oracle-persona requires a file path or comma-separated list", file=sys.stderr)
+            return out, do_list, did_clear, None, None
+        if a in ("--architect-persona", "--architect-personas"):
+            if i + 1 < len(args):
+                os.environ["ARCHITECT_PERSONA_FILE"] = args[i + 1].strip()
+                i += 2
+                continue
+            print("[oracle] --architect-persona requires a file path or comma-separated list", file=sys.stderr)
+            return out, do_list, did_clear, None, None
         if a == "--loops":
             if i + 1 < len(args):
                 os.environ["ORACLE_DEBATE_LOOPS"] = args[i + 1].strip()
@@ -844,6 +926,20 @@ def _extract_overrides(argv):
             else:
                 i += 1
             continue
+        if a in ("--reasoning-effort", "--reasoning", "-r"):
+            if i + 1 < len(args):
+                os.environ["ORACLE_REASONING_EFFORT"] = args[i + 1].strip().lower()
+                i += 2
+                continue
+            print("[oracle] --reasoning-effort requires low|medium|high", file=sys.stderr)
+            return out, do_list, did_clear, None, None
+        if a in ("--temperature", "-temp"):
+            if i + 1 < len(args):
+                os.environ["ORACLE_TEMPERATURE"] = args[i + 1].strip()
+                i += 2
+                continue
+            print("[oracle] --temperature requires a float value", file=sys.stderr)
+            return out, do_list, did_clear, None, None
         if a == "--collection":
             if i + 1 < len(args):
                 os.environ["ORACLE_COLLECTION"] = args[i + 1]
@@ -1652,7 +1748,7 @@ def _add_web_maintenance(urls):
         return 1
 
 
-def _run_cli_debate(question, mode, max_turns, rounds=1):
+def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
     """Executes a unified, Aider-driven pair-programming debate with perfect persistence.
 
     Supports multiple rounds (outer loop) and loops (inner turns per round).
@@ -1704,10 +1800,11 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
                 if active_idx is not None and str(idx) != active_idx:
                     continue
                 elif active_idx is None and target_coll:
-                    phase_coll = (phase.get("vector_store") or {}).get("collection_name")
+                    phase_coll = (phase.get("rag") or {}).get("collection_name") or (phase.get("vector_store") or {}).get("collection_name")
                     if phase_coll and phase_coll != target_coll:
                         continue
                 files = phase.get("files", {})
+                raw_patterns = []
                 for k in [
                     "target_files",
                     "extra_editable_files",
@@ -1716,13 +1813,108 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
                     "context_files_test",
                 ]:
                     for f_pat in files.get(k, []) or []:
-                        if f_pat and f_pat not in _reads:
-                            _reads.append(f_pat)
+                        if f_pat and f_pat not in raw_patterns:
+                            raw_patterns.append(f_pat)
+
+                # If target_files is empty, attempt sticky discovery from strategy_template.md
+                if not files.get("target_files"):
+                    try:
+                        try:
+                            from run_workflow import _extract_files_from_plan, resolve_template_path
+                        except ImportError:
+                            from aider_factory.python.run_workflow import _extract_files_from_plan, resolve_template_path
+                        plan_cand = resolve_template_path("markdown/oracle_pre_plan/strategy_template.md", project_directory=project_dir)
+                        if plan_cand and os.path.isfile(plan_cand):
+                            extracted = _extract_files_from_plan(plan_cand, project_dir)
+                            for k, p_list in extracted.items():
+                                for p in p_list:
+                                    if p and p not in raw_patterns:
+                                        raw_patterns.append(p)
+                    except Exception:
+                        pass
+
+                import glob
+                for pat in raw_patterns:
+                    if glob.has_magic(pat):
+                        abs_pat = pat if os.path.isabs(pat) else os.path.join(project_dir, pat)
+                        for m in sorted(glob.glob(abs_pat)):
+                            if os.path.isfile(m):
+                                rel_p = os.path.relpath(m, project_dir).replace("\\", "/")
+                                if rel_p not in _reads:
+                                    _reads.append(rel_p)
+                    else:
+                        clean_p = pat.replace("\\", "/")
+                        if clean_p not in _reads:
+                            _reads.append(clean_p)
+
                 _ot = phase.get("escalation_debate", {}) or {}
                 _pass_history = bool(_ot.get("pass_history", True))
+                target_coll = target_coll or (phase.get("rag") or {}).get("collection_name") or ""
                 break
         except Exception:
             pass
+
+    if os.environ.get("ORACLE_DEBATE_NO_PASS_HISTORY") == "1":
+        _pass_history = False
+    elif os.environ.get("ORACLE_DEBATE_NO_PASS_HISTORY") == "0":
+        _pass_history = True
+
+    # Resolve weak model routing for debate task
+    resolved_weak_model = os.environ.get("AIDER_WEAK_MODEL") or os.environ.get("WEAK_MODEL")
+    raw_weak_api = os.environ.get("WEAK_MODEL_API_BASE") or os.environ.get("AIDER_WEAK_MODEL_API_BASE")
+    if os.path.exists(yaml_path):
+        try:
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                _cfg = yaml.safe_load(f) or {}
+            _phases = _cfg.get("phases", []) or []
+            _p = _phases[int(active_idx)] if active_idx is not None and int(active_idx) < len(_phases) else (_phases[0] if _phases else {})
+            resolved_weak_model = (_p.get("models", {}) or {}).get("weak_model") or (_cfg.get("models", {}) or {}).get("weak_model") or resolved_weak_model
+            raw_weak_api = (_p.get("endpoints", {}) or {}).get("weak_model_api_base") or (_cfg.get("endpoints", {}) or {}).get("weak_model_api_base") or raw_weak_api
+        except Exception:
+            pass
+
+    from env_utils import is_local_model, is_valid_endpoint, ensure_model_settings, is_dummy_key
+    resolved_weak_api = raw_weak_api if is_valid_endpoint(raw_weak_api) else None
+    if resolved_weak_model and not is_local_model(resolved_weak_model):
+        resolved_weak_api = None
+
+    task.weak_model = resolved_weak_model
+    task.weak_model_api_base = resolved_weak_api
+    if resolved_weak_model and resolved_weak_api:
+        _router_k = os.environ.get("LITELLM_API_KEY", "")
+        _router_k = _router_k if _router_k and not is_dummy_key(_router_k) else "sk-dummy"
+        base_settings_cands = [
+            os.path.join(project_dir, ".aider_factory", ".aider.model.settings.yml"),
+            os.path.join(project_dir, ".aider.model.settings.yml"),
+        ]
+        base_settings_path = next((c for c in base_settings_cands if os.path.isfile(c)), None)
+        ensure_model_settings(
+            target_path=os.path.join(str(factory.session_dir), ".aider.model.settings.yml"),
+            models_to_configure=[{"name": resolved_weak_model, "api_base": resolved_weak_api, "api_key": _router_k}],
+            base_settings_path=base_settings_path,
+        )
+
+    oracle_persona_contents = []
+    raw_orc_persona = os.environ.get("ORACLE_PERSONA_FILE")
+    if raw_orc_persona:
+        for p_entry in [p.strip() for p in raw_orc_persona.split(",") if p.strip()]:
+            resolved_orc = _resolve_file_path(p_entry, project_dir)
+            if not resolved_orc or not os.path.isfile(resolved_orc):
+                print(f"[oracle] Error: Oracle persona file not found: {p_entry}", file=sys.stderr)
+                return 1
+            with open(resolved_orc, "r", encoding="utf-8", errors="replace") as f:
+                oracle_persona_contents.append(f.read().strip())
+
+    arch_persona_contents = []
+    raw_arch_persona = os.environ.get("ARCHITECT_PERSONA_FILE")
+    if raw_arch_persona:
+        for p_entry in [p.strip() for p in raw_arch_persona.split(",") if p.strip()]:
+            resolved_arch = _resolve_file_path(p_entry, project_dir)
+            if not resolved_arch or not os.path.isfile(resolved_arch):
+                print(f"[oracle] Error: Architect persona file not found: {p_entry}", file=sys.stderr)
+                return 1
+            with open(resolved_arch, "r", encoding="utf-8", errors="replace") as f:
+                arch_persona_contents.append(f.read().strip())
 
     # 3. Session state: Aider history file (architect) + persistent oracle session
     debate_aider_history = os.environ.get(
@@ -1734,30 +1926,91 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
         os.path.join(project_dir, ".aider_factory", ".oracle_debate_session.json")
     )
 
-    # 4. Determine oracle system prompt (stable across all turns)
-    if mode == "code":
-        oracle_sys = (
-            "You are the Knowledge Oracle advising a software Architect. "
-            "Judge the Architect's PROPOSAL against the context. Cite exact evidence. "
-            "End with EXACTLY one line: 'VERDICT: AGREE' if sound, or "
-            "'VERDICT: OBJECT - <reason>' if not."
-        )
-    else:
-        oracle_sys = (
-            "You are the Knowledge Oracle reviewing the Architect's PROPOSAL "
-            "against the knowledge base. Cite verbatim source quotes. "
-            "End with EXACTLY one line: 'VERDICT: AGREE' or "
-            "'VERDICT: OBJECT - <reason>'."
-        )
+    base_oracle_sys = (
+        "You are the Knowledge Oracle advising a software Architect. "
+        "Judge the Architect's PROPOSAL against the context. Cite exact evidence."
+        if mode == "code"
+        else "You are the Knowledge Oracle reviewing the Architect's PROPOSAL "
+        "against the knowledge base. Cite verbatim source quotes."
+    )
 
-    # 5. File-list-gated session reuse.  Reload the prior debate session ONLY
-    #    when the target file list is unchanged (same working context).
-    #    Different files = different context = fresh start.
-    #    Same files + different question = continuation (follow-up).
-    #    --clear = always fresh start.
+    conventions_path = None
+    for cand in [
+        os.path.join(project_dir, ".aider_factory", "CONVENTIONS.md"),
+        os.path.join(project_dir, "CONVENTIONS.md"),
+        os.path.join(project_dir, ".aider_factory", "markdown", "CONVENTIONS.md"),
+    ]:
+        if os.path.isfile(cand):
+            conventions_path = cand
+            break
+
+    if not conventions_path:
+        try:
+            try:
+                from run_workflow import resolve_template_path
+            except ImportError:
+                from aider_factory.python.run_workflow import resolve_template_path
+            cand = resolve_template_path("CONVENTIONS.md", project_directory=project_dir)
+            if cand and os.path.isfile(cand):
+                conventions_path = cand
+        except Exception:
+            pass
+
+    conventions_content = ""
+    if conventions_path and os.path.isfile(conventions_path):
+        try:
+            with open(conventions_path, "r", encoding="utf-8") as f:
+                conventions_content = f.read().strip()
+            rel_conv = os.path.relpath(conventions_path, project_dir).replace("\\", "/")
+            if rel_conv not in _reads and conventions_path not in _reads:
+                _reads.append(rel_conv)
+        except Exception:
+            pass
+
+    def _get_round_oracle_sys(r_idx: int) -> str:
+        parts = [base_oracle_sys]
+        if conventions_content:
+            parts.append(f"## Project Foundational Invariants & Conventions\n{conventions_content}")
+        if oracle_persona_contents:
+            p_content = oracle_persona_contents[min(r_idx - 1, len(oracle_persona_contents) - 1)]
+            parts.append(f"## Custom Persona Directives\n{p_content}")
+        return "\n\n".join(parts)
+
+    terminal_contract = (
+        "\n\n<evaluation_contract>\n"
+        "Critically evaluate the Architect's proposal in accordance with your persona guidelines. "
+        "Structure your response exactly as follows:\n"
+        "<critique>\n"
+        "[Step-by-step analysis of edge cases, logic flaws, and RAG grounding]\n"
+        "</critique>\n"
+        "VERDICT: [AGREE | REVISE | OBJECT - <reason>]\n"
+        "</evaluation_contract>"
+    )
+
+    def _format_arch_prompt(prompt_text: str, r_idx: int) -> str:
+        if arch_persona_contents:
+            p_content = arch_persona_contents[min(r_idx - 1, len(arch_persona_contents) - 1)]
+            return f"## Architect Persona Directives\n{p_content}\n\n{prompt_text}"
+        return prompt_text
+
+    # 5. File-list-gated session reuse. Includes mode and collection.
     import hashlib
 
-    _files_hash = hashlib.sha256("\n".join(sorted(_reads)).encode("utf-8")).hexdigest()
+    reads_with_mtime = []
+    for rf in sorted(_reads):
+        full_rf = os.path.join(project_dir, rf) if not os.path.isabs(rf) else rf
+        mtime = os.path.getmtime(full_rf) if os.path.isfile(full_rf) else 0.0
+        reads_with_mtime.append(f"{rf}:{mtime}")
+
+    hash_basis = (
+        "\n".join(reads_with_mtime)
+        + f"\nmode:{mode}\ncoll:{target_coll or ''}\npersist:{1 if persist else 0}\n"
+        + (f"conventions:{conventions_content}\n" if conventions_content else "")
+        + "\n---\n".join(oracle_persona_contents)
+        + "\n---\n"
+        + "\n---\n".join(arch_persona_contents)
+    )
+    _files_hash = hashlib.sha256(hash_basis.encode("utf-8")).hexdigest()
 
     _session_loaded = False
     if os.path.exists(_debate_session_file):
@@ -1769,16 +2022,16 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
                 _session_loaded = len(oracle_messages) > 1
             else:
                 # File list changed or old format — fresh start.
-                oracle_messages = [{"role": "system", "content": oracle_sys}]
+                oracle_messages = [{"role": "system", "content": _get_round_oracle_sys(1)}]
                 if os.path.exists(debate_aider_history):
                     try:
                         os.remove(debate_aider_history)
                     except OSError:
                         pass
         except Exception:
-            oracle_messages = [{"role": "system", "content": oracle_sys}]
+            oracle_messages = [{"role": "system", "content": _get_round_oracle_sys(1)}]
     else:
-        oracle_messages = [{"role": "system", "content": oracle_sys}]
+        oracle_messages = [{"role": "system", "content": _get_round_oracle_sys(1)}]
 
     # 6. Retrieve database context unconditionally on every debate query.
     #    This ensures fresh, relevant chunks are loaded for follow-up questions.
@@ -1817,9 +2070,11 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
     last_oracle = ""
 
     for round_idx in range(1, rounds + 1):
-        _clear = not _pass_history and round_idx > 1
+        round_oracle_sys = _get_round_oracle_sys(round_idx)
+        has_multi_persona = len(oracle_persona_contents) > 1 or len(arch_persona_contents) > 1
+        _clear = (not _pass_history and round_idx > 1) or (has_multi_persona and round_idx > 1)
         if _clear:
-            oracle_messages = [{"role": "system", "content": oracle_sys}]
+            oracle_messages = [{"role": "system", "content": round_oracle_sys}]
             _session_loaded = False  # Force turn 0 + retrieval on next round
             # Re-run retrieval since context was cleared
             if not context:
@@ -1864,6 +2119,8 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
         if not _session_loaded:
             _file_ctx = []
             for _rf in _reads:
+                if os.path.basename(_rf).lower() == "conventions.md":
+                    continue
                 _full = os.path.join(project_dir, _rf)
                 if os.path.isfile(_full):
                     try:
@@ -1889,20 +2146,20 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
 
         try:
             import litellm
+            import time
 
-            t0_key = _resolve_api_key(oracle_model, oracle_api)
-            _t0_kwargs = {
-                "model": oracle_model,
-                "messages": oracle_messages,
-                "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID}
-            }
-            if oracle_api:
-                _t0_kwargs["api_base"] = oracle_api
-            if t0_key:
-                _t0_kwargs["api_key"] = t0_key
+            _t0_kwargs = _build_llm_kwargs(oracle_model, oracle_messages, oracle_api)
+            effort_tag = f", effort={_t0_kwargs.get('reasoning_effort')}" if _t0_kwargs.get("reasoning_effort") else ""
+            print(f"[oracle] Thinking ({oracle_model}{effort_tag})...", file=sys.stderr, flush=True)
+
+            t0 = time.time()
             resp = litellm.completion(**_t0_kwargs)
+            elapsed = time.time() - t0
+
             initial_oracle = _response_content(resp)
             oracle_cost_line_0 = _litellm_cost_line(resp, persist_session=False)
+            if oracle_cost_line_0:
+                oracle_cost_line_0 += f" · thinking_time={elapsed:.2f}s"
         except Exception as e:
             print(f"Oracle API Error (turn 0): {e}", file=sys.stderr)
             return 1
@@ -1936,12 +2193,16 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
         
         _validate_oracle_response(initial_oracle)
 
+        provisional_agreed = False
+
         for turn in range(max_turns):
             turn_label = f"r{round_idx} turn {turn + 1}/{max_turns}"
+            turn_banner = f"[DEBATE STATUS: Turn {turn + 1} of {max_turns} (Round {round_idx} of {rounds})]\n\n"
 
             # --- ARCHITECT TURN ---
             if turn == 0 and round_idx == 1:
                 arch_prompt = (
+                    f"{turn_banner}"
                     "You are the software Architect. The Oracle has provided "
                     "an initial assessment based on the knowledge base. "
                     "Review it and address the user's issue.\n\n"
@@ -1953,6 +2214,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
             elif turn == 0:
                 # First turn of a new round: re-seed with the question + prior state
                 arch_prompt = (
+                    f"{turn_banner}"
                     "You are the software Architect. The previous debate round "
                     "ended without full resolution. Continue working on the issue "
                     "using all prior context.\n\n"
@@ -1963,12 +2225,25 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
                 )
             else:
                 arch_prompt = (
+                    f"{turn_banner}"
                     "The Oracle reviewed your proposal and responded:\n\n"
                     f"{last_oracle}\n\n"
-                    "Please address the Oracle's objections and refine your fix. "
+                    "Critically evaluate the Oracle's feedback. If valid, refine your fix. If incorrect, defend your logic. "
                     "End with EXACTLY one line:\n"
                     "PROPOSAL: <one-line concrete resolution>"
                 )
+
+            if persist and provisional_agreed:
+                arch_prompt = (
+                    f"{turn_banner}"
+                    "The Oracle provisionally agreed with your prior fix. "
+                    "As this debate is in persistent exploration mode (--persist), rotate your focus "
+                    "to the next layer of the audit: boundary conditions, unhandled exceptions, concurrency, or test coverage. "
+                    "Propose your concrete findings and fixes for the next area.\n\n"
+                    "End with EXACTLY one line:\n"
+                    "PROPOSAL: <one-line concrete resolution>"
+                )
+            arch_prompt = _format_arch_prompt(arch_prompt, round_idx)
 
             arch_text = factory._aider_ask_turn(
                 task,
@@ -2009,37 +2284,41 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
                     )
 
             if turn == 0:
-                orc_msg = ""
+                orc_msg = turn_banner
                 if loop_context:
                     orc_msg += f"<additional_knowledge_base>\n{loop_context}\n</additional_knowledge_base>\n\n"
                 orc_msg += (
                     "Review the Architect's proposal against the context and "
                     "files provided above.\n\n"
                     f"<architect_proposal>\n{arch_text}\n</architect_proposal>"
+                    f"{terminal_contract}"
                 )
             else:
-                orc_msg = ""
+                orc_msg = turn_banner
                 if loop_context:
                     orc_msg += f"<additional_knowledge_base>\n{loop_context}\n</additional_knowledge_base>\n\n"
-                orc_msg += f"<revised_architect_proposal>\n{arch_text}\n</revised_architect_proposal>"
+                orc_msg += (
+                    f"<revised_architect_proposal>\n{arch_text}\n</revised_architect_proposal>"
+                    f"{terminal_contract}"
+                )
             oracle_messages.append({"role": "user", "content": orc_msg})
 
             try:
                 import litellm
+                import time
 
-                turn_key = _resolve_api_key(oracle_model, oracle_api)
-                kwargs = {
-                    "model": oracle_model,
-                    "messages": oracle_messages,
-                    "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID}
-                }
-                if oracle_api:
-                    kwargs["api_base"] = oracle_api
-                if turn_key:
-                    kwargs["api_key"] = turn_key
+                kwargs = _build_llm_kwargs(oracle_model, oracle_messages, oracle_api)
+                effort_tag = f", effort={kwargs.get('reasoning_effort')}" if kwargs.get("reasoning_effort") else ""
+                print(f"[oracle] Thinking ({oracle_model}{effort_tag})...", file=sys.stderr, flush=True)
+
+                t0 = time.time()
                 resp = litellm.completion(**kwargs)
+                elapsed = time.time() - t0
+
                 last_oracle = _response_content(resp)
                 oracle_cost_line = _litellm_cost_line(resp, persist_session=False)
+                if oracle_cost_line:
+                    oracle_cost_line += f" · thinking_time={elapsed:.2f}s"
             except Exception as e:
                 print(f"Oracle API Error: {e}", file=sys.stderr)
                 return 1
@@ -2069,13 +2348,22 @@ def _run_cli_debate(question, mode, max_turns, rounds=1):
             # --- ARBITRATION ---
             state = deliberate.consensus_state(ledger)
             if state != "continue":
-                break
+                if persist and state == "agreed" and (turn + 1 < max_turns):
+                    state = "continue"
+                    provisional_agreed = True
+                else:
+                    break
+            elif persist and verdict in ("object", "revise"):
+                provisional_agreed = False
 
         if state == "continue":
             state = "exhausted"
 
-        # Early exit on agreement (no need for more rounds)
-        if state == "agreed":
+        # Early exit on agreement only if not in persist mode and no distinct personas remain
+        has_remaining_personas = (
+            round_idx < len(oracle_persona_contents) or round_idx < len(arch_persona_contents)
+        )
+        if state == "agreed" and not persist and not has_remaining_personas:
             break
 
     # Final Output to stdout (Aider reads this)
@@ -2154,6 +2442,37 @@ def _ensure_oracle_config():
         ranking_agent = phase_models.get("ranking_agent") or config.get("models", {}).get("ranking_agent", "")
         ranking_api_base = endpoints.get("ranking_api_base", "")
 
+        try:
+            rag_settings = get_model_settings(rag_agent, project_dir)
+            rag_extra = (rag_settings.get("extra_params") or {}) if isinstance(rag_settings, dict) else {}
+        except Exception:
+            rag_extra = {}
+
+        rag_str = str(rag_agent or "").lower()
+        phase_toggles = (active_phase.get("toggles") or {}) if active_phase else {}
+        reasoning_effort = (
+            phase_models.get("reasoning_effort")
+            or phase_toggles.get("reasoning_effort")
+            or config.get("models", {}).get("reasoning_effort")
+            or rag_extra.get("reasoning_effort")
+        )
+        if not reasoning_effort and rag_agent and any(p in rag_str for p in ("gemini", "o1", "o3", "deepseek")):
+            reasoning_effort = "high"
+        if reasoning_effort and "ORACLE_REASONING_EFFORT" not in os.environ:
+            os.environ["ORACLE_REASONING_EFFORT"] = str(reasoning_effort)
+
+        temp_candidates = [
+            phase_models.get("temperature"),
+            phase_toggles.get("temperature"),
+            config.get("models", {}).get("temperature"),
+            rag_extra.get("temperature"),
+        ]
+        temp_val = next((t for t in temp_candidates if t is not None), None)
+        if temp_val is None and rag_agent and "gemini" in rag_str:
+            temp_val = 0.8
+        if temp_val is not None and "ORACLE_TEMPERATURE" not in os.environ:
+            os.environ["ORACLE_TEMPERATURE"] = str(temp_val)
+
         os.environ.setdefault("ORACLE_RANKING_MODEL", ranking_agent)
         if ranking_api_base:
             os.environ.setdefault("ORACLE_RANKING_API_BASE", ranking_api_base)
@@ -2226,11 +2545,18 @@ RAG Retrieval & Ranking:
   --no-rerank               Bypass cross-encoder reranking stage
   --recall-k <N>            Candidate retrieval depth before reranking (default: 75+)
   --claims-only             Validate claims against knowledge base
+  --reasoning-effort <low|medium|high> Reasoning effort for thinking models
+  --temperature <float>     Sampling temperature for Oracle responses
 
 Debate & Verification:
   --debate [code|review]    Run multi-turn Architect-Oracle deliberation (default: code)
   --loops <N>               Max turn loops per debate round (default: 3)
   --rounds <N>              Max debate rounds (default: 1)
+  --persist                 Continue exploring subsequent audit layers after provisional agreement
+  --oracle-persona <path>   Inject markdown persona into Oracle system prompt & critique contract
+  --oracle-personas <paths> Comma-separated persona file paths cycled across debate rounds
+  --architect-persona <path> Inject markdown persona into Architect ask prompt via message-file
+  --architect-personas <paths> Comma-separated persona file paths cycled across debate rounds
   --no-print                Suppress stdout claims validation report
 
 Knowledge Base Maintenance:
@@ -2288,7 +2614,7 @@ Knowledge Base Maintenance:
         print(
             'usage: oracle "<question>" | oracle --file <path> ["note"] '
             '| oracle --collection <table> [--db <dir>] "<q>" '
-            '| oracle --no-rag "<q>" | oracle --debate [code|review] [--loops N] [--rounds N] "<q>" '
+            '| oracle --no-rag "<q>" | oracle --debate [code|review] [--loops N] [--rounds N] [--oracle-persona <p>] [--architect-persona <p>] "<q>" '
             '| oracle --type [code|docs] "<q>" (fuse-only; excludes per-doc literature tables) '
             "| oracle --clear [oracle] | oracle --list\n"
             "       oracle --list-files\n"
@@ -2308,7 +2634,8 @@ Knowledge Base Maintenance:
             rounds = int(os.environ.get("ORACLE_DEBATE_ROUNDS", "1"))
         except ValueError:
             rounds = 1
-        return _run_cli_debate(question, debate_mode, loops, rounds)
+        persist = os.environ.get("ORACLE_DEBATE_PERSIST") == "1"
+        return _run_cli_debate(question, debate_mode, loops, rounds, persist=persist)
 
     model = os.environ.get("ORACLE_AGENT_MODEL")
     if not model:
@@ -2393,20 +2720,20 @@ Knowledge Base Maintenance:
         messages.append({"role": "user", "content": prompt})
         try:
             import litellm
+            import time
 
-            resolved_key = _resolve_api_key(model, api_base, api_key)
-            kwargs = {
-                "model": model,
-                "messages": messages,
-                "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID}
-            }
-            if api_base:
-                kwargs["api_base"] = api_base
-            if resolved_key:
-                kwargs["api_key"] = resolved_key
+            kwargs = _build_llm_kwargs(model, messages, api_base, api_key)
+            effort_tag = f", effort={kwargs.get('reasoning_effort')}" if kwargs.get("reasoning_effort") else ""
+            print(f"[oracle] Thinking ({model}{effort_tag})...", file=sys.stderr, flush=True)
+
+            t0 = time.time()
             resp = litellm.completion(**kwargs)
+            elapsed = time.time() - t0
+
             answer = _response_content(resp)
             cost_line = _litellm_cost_line(resp, persist_session=use_session)
+            if cost_line:
+                cost_line += f" · thinking_time={elapsed:.2f}s"
         except Exception as e:
             print(f"[oracle] model call failed: {e}", file=sys.stderr)
             return 0

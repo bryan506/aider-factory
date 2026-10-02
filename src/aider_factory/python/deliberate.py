@@ -27,20 +27,47 @@ _GATE = "GATE:"
 
 def proposal_hash(text):
     """Hash the architect's PROPOSAL line(s); fall back to the whole turn."""
-    props = re.findall(r"(?im)^\s*PROPOSAL:\s*(.+)$", text or "")
+    props = re.findall(
+        r"(?im)^[\s*>#*_`\-]*PROPOSAL[\s*_`]*[:\-]?[\s*_`]*(.+)$", text or ""
+    )
     basis = " ".join(props) if props else (text or "")
     return hashlib.sha1(_normalize(basis).encode("utf-8")).hexdigest()[:12]
 
 
 def oracle_verdict(text):
-    """'agree' | 'object' | None from the oracle's 'VERDICT: AGREE|OBJECT' line."""
-    m = re.search(r"(?im)^\s*VERDICT:\s*(AGREE|OBJECT)\b", text or "")
-    return m.group(1).lower() if m else None
+    """'agree' | 'object' | 'revise' | None from the oracle's 'VERDICT: AGREE|OBJECT|REVISE' line."""
+    clean = text or ""
+    clean = re.sub(r"(?m)^```[a-zA-Z0-9_-]*\s*$", "", clean)
+    clean = re.sub(r"(?is)<critique>.*?</critique>", "", clean)
+    if re.search(r"(?i)<critique>", clean) and not re.search(r"(?i)</critique>", clean):
+        clean = re.sub(
+            r"(?ism)<critique>.*?(?=(?:^[\s*>#*_`\-]*VERDICT[\s*_`]*[:\-]?[\s*_`\[]*(?:AGREE|OBJECT|REVISE|DISAGREE|REJECT)\b)|\Z)",
+            "",
+            clean,
+        )
+    clean = re.sub(r"(?i)</?evaluation_contract>", "", clean)
+    filtered_lines = [
+        line for line in clean.splitlines()
+        if not re.search(r"(?i)VERDICT.*?(?:AGREE|OBJECT|REVISE|DISAGREE|REJECT)\s*\|", line)
+    ]
+    clean = "\n".join(filtered_lines)
+    m = re.findall(
+        r"(?im)^[\s*>#*_`\-]*VERDICT[\s*_`]*[:\-]?[\s*_`\[]*(AGREE|OBJECT|REVISE|DISAGREE|REJECT)\b",
+        clean,
+    )
+    if not m:
+        return None
+    raw_verdict = m[-1].lower()
+    if raw_verdict in ("disagree", "reject"):
+        return "object"
+    return raw_verdict
 
 
 def proposal_line(text):
     """The architect's last PROPOSAL: line (for clean ledger excerpts + live logs)."""
-    m = re.findall(r"(?im)^\s*PROPOSAL:\s*(.+)$", text or "")
+    m = re.findall(
+        r"(?im)^[\s*>#*_`\-]*PROPOSAL[\s*_`]*[:\-]?[\s*_`]*(.+)$", text or ""
+    )
     return m[-1].strip() if m else ""
 
 
@@ -61,13 +88,20 @@ def consensus_state(ledger):
     orc = [t for t in turns if t["role"] == "oracle"]
     if not orc:
         return "continue"
-    last = orc[-1].get("verdict")
+    last = (orc[-1].get("verdict") or "").lower()
     if last == "agree":
         return "agreed"
-    stable = len(arch) >= 2 and arch[-1].get("proposal_hash") == arch[-2].get(
-        "proposal_hash"
+    empty_hash = proposal_hash("")
+    last_hash = arch[-1].get("proposal_hash") if arch else None
+    stable = (
+        len(arch) >= 2
+        and bool(last_hash)
+        and last_hash != empty_hash
+        and last_hash == arch[-2].get("proposal_hash")
     )
-    if last == "object" and stable:
+    orc_verdicts = [(t.get("verdict") or "").lower() for t in orc if t.get("verdict")]
+    prior_objected = len(orc_verdicts) >= 2 and orc_verdicts[-2] in ("object", "revise")
+    if last in ("object", "revise") and stable and prior_objected:
         return "deadlock"
     return "continue"
 
@@ -86,36 +120,54 @@ def write_verdict(
     to the verdict file so downstream consumers see both sides of the debate.
     """
     actionable = (state == "agreed" and gate_present) or draft_mode
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(
-            f"{_STATUS} {state}\n{_GATE} {'present' if gate_present else 'none'}\n\n"
-        )
-        if state == "clean":
-            f.write("> Already grounded; nothing to apply.\n\n")
-        elif not actionable:
+    if not path:
+        return actionable
+    import tempfile
+    target_dir = os.path.dirname(os.path.abspath(path))
+    os.makedirs(target_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=target_dir, suffix=".tmp")
+    os.close(fd)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(
-                "> HELD FOR HUMAN REVIEW — no agreement reached (deadlock/exhausted). "
-                "Leave quotes as [evidence]; do NOT delete, re-tag, or fabricate.\n\n"
+                f"{_STATUS} {state}\n{_GATE} {'present' if gate_present else 'none'}\n\n"
             )
-        f.write("# Resolution\n\n" + (proposal or "").strip() + "\n")
-        if oracle_response:
-            f.write("\n---\n\n# Oracle Assessment\n\n" + oracle_response.strip() + "\n")
+            if state == "clean":
+                f.write("> Already grounded; nothing to apply.\n\n")
+            elif not actionable:
+                f.write(
+                    "> HELD FOR HUMAN REVIEW — no agreement reached (deadlock/exhausted). "
+                    "Leave quotes as [evidence]; do NOT delete, re-tag, or fabricate.\n\n"
+                )
+            f.write("# Resolution\n\n" + (proposal or "").strip() + "\n")
+            if oracle_response:
+                f.write("\n---\n\n# Oracle Assessment\n\n" + oracle_response.strip() + "\n")
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
     return actionable
 
 
 def _read_header(path):
     status = gate = None
-    if not os.path.isfile(path):
+    if not path or not os.path.isfile(path):
         return status, gate
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            if line.startswith(_STATUS):
-                status = line[len(_STATUS) :].strip()
-            elif line.startswith(_GATE):
-                gate = line[len(_GATE) :].strip()
-            if status is not None and gate is not None:
-                break
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith(_STATUS):
+                    status = line[len(_STATUS) :].strip()
+                elif line.startswith(_GATE):
+                    gate = line[len(_GATE) :].strip()
+                if status is not None and gate is not None:
+                    break
+    except OSError:
+        return None, None
     return status, gate
 
 
@@ -130,4 +182,7 @@ def verdict_is_actionable(path):
     return status == "agreed" and gate == "present"
 
 
-save_ledger = _ledger_save
+def save_ledger(path, data):
+    if not path:
+        return
+    _ledger_save(path, data)

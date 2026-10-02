@@ -431,6 +431,72 @@ def test_yaml_dag_routing():
             sys.argv = old_argv
             os.chdir(orig_cwd)
 
+        # 8. Per-Phase Test Naming and Runner Overrides
+        config_8 = {
+            "working_directory": base_dir,
+            "test_naming_and_path": "tests/global_{stem}.R",
+            "test_runner": "Rscript global_runner.R {file}",
+            "test_command_prefix": "",
+            "phases": [
+                {
+                    "name": "PhaseInherit",
+                    "enabled": True,
+                    "rag": {"collection_name": "", "batch": True, "run_ocr_rag": False},
+                    "toggles": {"run_job_one": False, "run_job_three": True, "iterate_test": True},
+                    "models": {"architect_agent": "mock", "editor_agent": "mock", "editor_agent_test": "mock"},
+                    "files": {"target_files": ["R/a.R"]},
+                },
+                {
+                    "name": "PhaseOverride",
+                    "enabled": True,
+                    "test_naming_and_path": "tests/unit/test_{stem}.R",
+                    "test_runner": "pytest {file}",
+                    "test_command_prefix": "env VAR=1",
+                    "rag": {"collection_name": "", "batch": True, "run_ocr_rag": False},
+                    "toggles": {"run_job_one": False, "run_job_three": True, "iterate_test": True},
+                    "models": {"architect_agent": "mock", "editor_agent": "mock", "editor_agent_test": "mock"},
+                    "files": {"target_files": ["R/b.R"]},
+                },
+            ],
+        }
+
+        yaml_path_8 = os.path.join(base_dir, "test8.yml")
+        with open(yaml_path_8, "w") as f:
+            yaml.dump(config_8, f)
+
+        old_argv = sys.argv
+        os.chdir(base_dir)
+        sys.argv = ["run_workflow.py", "mock_routing_session_8", yaml_path_8]
+        namespace_8 = {
+            "__name__": "__test__",
+            "__file__": run_workflow_path,
+        }
+        with open(run_workflow_path, "r") as f:
+            code_8 = f.read()
+        try:
+            for k in list(sys.modules.keys()):
+                if "orchestrate" in k:
+                    del sys.modules[k]
+            exec(code_8, namespace_8)
+            tasks_8 = namespace_8["factory"].tasks
+
+            job3_inherit = tasks_8["p0_job3_a"]
+            verify_inherit = tasks_8["p0_verify_a"]
+            job3_override = tasks_8["p1_job3_b"]
+            verify_override = tasks_8["p1_verify_b"]
+
+            assert job3_inherit.files[0] == "tests/global_a.R"
+            assert verify_inherit.test_cmd == "Rscript global_runner.R tests/global_a.R"
+
+            assert job3_override.files[0] == "tests/unit/test_b.R"
+            assert verify_override.test_cmd == "env VAR=1 pytest tests/unit/test_b.R"
+            print(
+                "Test 8: Per-Phase Test Naming and Runner Overrides:\n  ✅ Phase inheritance and per-phase overrides matched\n  🎉 PASS\n"
+            )
+        finally:
+            sys.argv = old_argv
+            os.chdir(orig_cwd)
+
     finally:
         os.chdir(orig_cwd)
         _safe_rmtree(base_dir)

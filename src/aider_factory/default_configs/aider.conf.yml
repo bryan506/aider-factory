@@ -34,6 +34,9 @@ map-multiplier-no-files: 0
 
 editor-edit-format: editor-diff
 weak-model: "gemini/gemini-3.5-flash-lite"
+# For local or custom weak models (e.g. openai/qwen3.8-27b, lm_studio/qwen3.6-27b),
+# define endpoints.weak_model_api_base and models.weak_model in .env.yml, or set
+# WEAK_MODEL_API_BASE in the environment. .env.yml overrides this default.
 
 # Global Automation & Silence Settings
 dark-mode: false

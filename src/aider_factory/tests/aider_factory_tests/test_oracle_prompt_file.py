@@ -168,7 +168,7 @@ def test_orchestrate_uses_file_arg():
     assert "prompt_file.name" in method_body, "temp file path not passed"
 
     # Verify cleanup
-    assert "os.unlink(prompt_file.name)" in method_body, "temp file cleanup missing"
+    assert "os.unlink(prompt_file.name)" in method_body or "os.unlink(prompt_file_path)" in method_body, "temp file cleanup missing"
 
     # Verify the old pattern (prompt as positional arg) is removed
     assert "args.append(prompt)" not in method_body, (

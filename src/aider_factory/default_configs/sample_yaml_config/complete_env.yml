@@ -7,7 +7,7 @@ colors:
     oracle_debate: "#d3869b" # gruvbox pink — oracle turns in debates
 
 test_command_prefix: ""
-test_runner: "uv run --with pytest pytest"
+test_runner: "uv run --with pytest pytest {file}"
 test_naming_and_path: "src/aider_factory/tests/aider_factory_tests/end-to-end/test_e2e_{stem}.py"
 lint_cmd: null
 auto_lint: true
@@ -20,6 +20,7 @@ endpoints: # set multiple local endpoints, ignored when cloud model chosen
     architect_api_base: "http://192.168.100.2:8080/v1"
     editor_api: "http://192.168.100.1:8080/v1"
     editor_api_fallback: "http://192.168.100.1:8080/v1"
+    weak_model_api_base: "http://192.168.100.2:8080/v1"
     rag_agent_api: "http://192.168.100.1:8080/v1"
     grounding_agent_api: "http://192.168.100.1:8090/v1"
     ranking_api_base: null
@@ -35,6 +36,7 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         editor_agent: "gemini/gemini-3.6-flash"
         editor_agent_test: "gemini/gemini-3.6-flash"
         editor_agent_test_fallback: "gemini/gemini-3.6-flash"
+        weak_model: "gemini/gemini-3.5-flash-lite"
         rag_agent: "gemini/gemini-3.6-flash"
         ranking_agent: "jinaai/jina-reranker-v3.5"
         ocr_agent: "gemini/gemini-3.6-flash"

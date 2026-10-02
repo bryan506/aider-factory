@@ -18,7 +18,7 @@ _python_dir = os.path.dirname(os.path.abspath(__file__))
 if _python_dir not in sys.path:
     sys.path.insert(0, _python_dir)
 
-from env_utils import is_dummy_key
+from env_utils import is_dummy_key, is_local_model, ensure_model_settings, is_valid_endpoint, kill_proc_tree
 
 import yaml
 
@@ -53,6 +53,8 @@ class Task:
     model: str = "gemini/gemini-3.6-flash"
     editor_model: str = "gemini/gemini-2.5-flash"
     fallback_editor_model: Optional[str] = None  # Escalation model for attempt > 0
+    weak_model: Optional[str] = None
+    weak_model_api_base: Optional[str] = None
     architect_api_base: Optional[str] = None
     editor_api_base: Optional[str] = None
 
@@ -108,7 +110,7 @@ class AiderFactory:
         session_dir: Optional[str] = None,
     ):
         self.project_dir = Path(project_dir)
-        self.session_name = session_name or "default"
+        self.session_name = session_name or os.environ.get("AI_FACTORY_SESSION") or "default"
         self.session_dir = (
             Path(session_dir)
             if session_dir
@@ -164,7 +166,7 @@ class AiderFactory:
                 except OSError:
                     pass
 
-    def _swap_out_state(self, stem: str):
+    def _swap_out_state(self, stem: str, purge_missing: bool = False):
         vault_dir = os.path.join(str(self.session_dir), "chat_history")
         os.makedirs(vault_dir, exist_ok=True)
         active_files = self._get_state_files()
@@ -175,8 +177,8 @@ class AiderFactory:
                     shutil.copy2(active_path, vault_path)
                 except OSError:
                     pass
-            else:
-                # Sync deletions from Active Stage to Vault
+            elif purge_missing:
+                # Sync deletions from Active Stage to Vault only when explicitly requested
                 if os.path.exists(vault_path):
                     try:
                         os.remove(vault_path)
@@ -246,7 +248,10 @@ class AiderFactory:
             f"'{env.get('ORACLE_COLLECTION')}' -> {job.get('out')}"
         )
         try:
-            proc = subprocess.run(cmd, env=env, cwd=self.project_dir)
+            proc = subprocess.run(cmd, env=env, cwd=self.project_dir, timeout=300)
+        except subprocess.TimeoutExpired:
+            log.error(f"❌ ORACLE JOB TIMEOUT [{task.id}]: Subprocess exceeded 300s.")
+            return False
         except Exception as e:
             log.error(f"❌ ORACLE JOB EXCEPTION [{task.id}]: {e} (continuing)")
             return False
@@ -324,8 +329,10 @@ class AiderFactory:
         )
         log.info(f"{_label} [{task.id}] -> {_dest}")
         try:
-            subprocess.run(cmd, env=env, cwd=self.project_dir)
+            subprocess.run(cmd, env=env, cwd=self.project_dir, timeout=300)
             log.info(f"✅ TASK SUCCESS [{task.id}] (evidence audit)")
+        except subprocess.TimeoutExpired:
+            log.error(f"❌ EVIDENCE AUDIT TIMEOUT [{task.id}]: Subprocess exceeded 300s.")
         except Exception as e:
             # The auditor couldn't run (missing/non-exec wrapper, etc.). Still
             # non-fatal for the DAG, but don't claim SUCCESS — log it honestly.
@@ -369,30 +376,9 @@ class AiderFactory:
         return "\n".join(keep).strip()
 
     def _strip_thinking(self, text: str) -> str:
-        """Remove the model's reasoning/thinking block from CAPTURED text (so the oracle
-        and the transcript don't pay for it). Live streaming still shows it on-screen.
-
-        aider's reasoning tag is the fixed string thinking-content-<hash>; its close is
-        usually RENDERED as the '► **ANSWER**' marker rather than a literal tag, so we cut
-        on that marker (everything after it is the answer, which carries the PROPOSAL).
-        Safe: if there's no reasoning marker, the text is returned unchanged."""
-        if not text:
-            return text
-        try:
-            from aider.reasoning_tags import REASONING_TAG, remove_reasoning_content
-
-            text = remove_reasoning_content(
-                text, REASONING_TAG
-            )  # literal <tag>...</tag> cases
-        except Exception:
-            pass
-        # Rendered boundary: keep everything AFTER the ANSWER marker (the answer + PROPOSAL).
-        m = re.search(r"►\s*\*{0,2}ANSWER\*{0,2}", text)
-        if m:
-            text = text[m.end() :]
-        # Drop any leftover opening reasoning-tag line.
-        text = re.sub(r"(?m)^.*<thinking-content-[0-9a-fA-F]+>.*$", "", text)
-        return text.strip()
+        """Pass through text directly, delegating thinking visibility and suppression
+        strictly to Aider's native model settings (e.g. remove_reasoning: true/false)."""
+        return text
 
     def _aider_ask_turn(
         self,
@@ -409,171 +395,251 @@ class AiderFactory:
         Streaming is stdout-only (observability); it is NOT added to any model context."""
         root = str(self.project_dir)
 
-        # Resolve config paths: prioritize .aider_factory/ then fall back to root
-        local_aider_factory_conf = os.path.join(
-            root, ".aider_factory", ".aider.conf.yml"
+        temp_dir = os.path.join(root, ".aider_factory", "temp")
+        os.makedirs(temp_dir, exist_ok=True)
+        import tempfile
+        prompt_file = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".txt",
+            dir=temp_dir,
+            prefix=".aider_ask_prompt_",
+            delete=False,
+            encoding="utf-8",
         )
-        root_aider_conf = os.path.join(root, ".aider.conf.yml")
-        aider_conf = (
-            local_aider_factory_conf
-            if os.path.exists(local_aider_factory_conf)
-            else (root_aider_conf if os.path.exists(root_aider_conf) else None)
-        )
-
-        local_aider_factory_settings = os.path.join(
-            root, ".aider_factory", ".aider.model.settings.yml"
-        )
-        root_aider_settings = os.path.join(root, ".aider.model.settings.yml")
-        aider_settings = (
-            local_aider_factory_settings
-            if os.path.exists(local_aider_factory_settings)
-            else (root_aider_settings if os.path.exists(root_aider_settings) else None)
-        )
-
-        chat_hist = os.path.join(str(self.session_dir), ".aider.chat.history.md")
-        input_hist = os.path.join(str(self.session_dir), ".aider.input.history")
-        llm_hist = os.path.join(str(self.session_dir), ".aider.llm.history")
-
-        cmd = [
-            "aider",
-            "--no-check-model-accepts-settings",
-            "--no-show-model-warnings",
-            "--no-check-update",
-            "--no-show-release-notes",
-            "--no-notifications",
-            "--no-analytics",
-            "--model",
-            task.model,
-            "--edit-format",
-            "ask",  # ask coder: cannot edit or run shell
-            "--no-auto-commits",
-            "--no-pretty",
-            "--no-suggest-shell-commands",
-            "--no-detect-urls",
-            "--yes-always",
-            "--auto-accept-architect",
-            "--map-tokens",
-            "0",
-            "--map-refresh",
-            "manual",
-            "--map-multiplier-no-files",
-            "0",
-            "--max-chat-history-tokens",
-            "1000000",
-            "--restore-chat-history",
-            "--chat-history-file",
-            chat_hist,
-            "--input-history-file",
-            input_hist,
-            "--llm-history-file",
-            llm_hist,
-            "--message",
-            message,
-        ]
-        if aider_conf:
-            cmd.extend(["--config", aider_conf])
-        if aider_settings:
-            cmd.extend(["--model-settings-file", aider_settings])
-        if history_file:
-            cmd.extend(["--restore-chat-history", "--chat-history-file", history_file])
-
-        for rf in read_files or []:
-            if not rf:
-                continue
-            full = rf if os.path.isabs(rf) else os.path.join(self.project_dir, rf)
-            if os.path.exists(full):
-                cmd.extend(["--read", rf])
-        env = os.environ.copy()
-        env["AIDER_ARCHITECT"] = "false"  # override config architect:true for this turn
-        env["PYTHONHASHSEED"] = (
-            "0"  # Ensure deterministic set iteration for perfect prefix caching
-        )
-        # Resolve real key for LiteLLM routers (Lemonade, OpenRouter, etc.);
-        # fall back to "sk-dummy" for local llama.cpp / LM Studio.
-        _router_key = os.environ.get("LITELLM_API_KEY", "")
-        _router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
-        if task.architect_api_base:
-            env["OPENAI_API_BASE"] = task.architect_api_base
-            env["OPENAI_API_KEY"] = _router_key
-        if task.editor_api_base:
-            env["OLLAMA_API_BASE"] = task.editor_api_base
-            env["LM_STUDIO_API_BASE"] = task.editor_api_base
-            env["LM_STUDIO_API_KEY"] = _router_key
-        print(f"\n{_ARCH_COLOR}┌── architect {label} ──", flush=True)
-        if sys.platform == "win32":
-            try:
-                aider_bin = shutil.which("aider") or "aider"
-            except Exception:
-                aider_bin = "aider"
-            cmd[0] = aider_bin
-            if aider_bin.lower().endswith((".cmd", ".bat")):
-                cmd = ["cmd.exe", "/c"] + cmd
+        prompt_file_path = prompt_file.name
         try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=self.project_dir,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
+            prompt_file.write(message)
+            prompt_file.close()
+
+            # Resolve config paths: prioritize .aider_factory/ then fall back to root
+            local_aider_factory_conf = os.path.join(
+                root, ".aider_factory", ".aider.conf.yml"
             )
-        except Exception as e:
-            print(f"└──{_RESET}", flush=True)
-            return f"PROPOSAL: (architect turn failed: {e})"
-        # NOTE: Pipeline mode streams to sys.stdout because there is NO outer
-        # aider capturing our output (orchestrate.py IS the top-level process).
-        # Contrast with apply_agent.py which uses /dev/tty because it is invoked
-        # via aider's /run, where the outer aider captures sys.stdout as
-        # "command output" tokens. See apply_agent.py run_apply() for the /dev/tty
-        # pattern.
-        chars = []
-        try:
-            if proc.stdout:
-                while True:
-                    ch = proc.stdout.read(1)
-                    if not ch and proc.poll() is not None:
-                        break
-                    if ch:
-                        # Color escapes are print-only; never appended to `chars`, so the
-                        # captured value (parsing/_strip_thinking) stays byte-identical.
-                        print(ch, end="", flush=True)
-                        chars.append(ch)
-                proc.stdout.close()
-            proc.wait()
-            print(f"\n└──{_RESET}", flush=True)
+            root_aider_conf = os.path.join(root, ".aider.conf.yml")
+            aider_conf = (
+                local_aider_factory_conf
+                if os.path.exists(local_aider_factory_conf)
+                else (root_aider_conf if os.path.exists(root_aider_conf) else None)
+            )
+
+            session_aider_settings = os.path.join(
+                str(self.session_dir), ".aider.model.settings.yml"
+            )
+            local_aider_factory_settings = os.path.join(
+                root, ".aider_factory", ".aider.model.settings.yml"
+            )
+            root_aider_settings = os.path.join(root, ".aider.model.settings.yml")
+            aider_settings = (
+                session_aider_settings
+                if os.path.exists(session_aider_settings)
+                else (
+                    local_aider_factory_settings
+                    if os.path.exists(local_aider_factory_settings)
+                    else (root_aider_settings if os.path.exists(root_aider_settings) else None)
+                )
+            )
+
+            chat_hist = os.path.join(str(self.session_dir), ".aider.chat.history.md")
+            input_hist = os.path.join(str(self.session_dir), ".aider.input.history")
+            llm_hist = os.path.join(str(self.session_dir), ".aider.llm.history")
+
+            resolved_chat_hist = history_file or chat_hist
+            cmd = [
+                "aider",
+                "--no-check-model-accepts-settings",
+                "--no-show-model-warnings",
+                "--no-check-update",
+                "--no-show-release-notes",
+                "--no-notifications",
+                "--no-analytics",
+                "--model",
+                task.model,
+                "--edit-format",
+                "ask",  # ask coder: cannot edit or run shell
+                "--exit",
+                "--no-auto-commits",
+                "--no-pretty",
+                "--no-suggest-shell-commands",
+                "--no-detect-urls",
+                "--yes-always",
+                "--auto-accept-architect",
+                "--map-tokens",
+                "0",
+                "--map-refresh",
+                "manual",
+                "--map-multiplier-no-files",
+                "0",
+                "--max-chat-history-tokens",
+                "1000000",
+                "--restore-chat-history",
+                "--chat-history-file",
+                resolved_chat_hist,
+                "--input-history-file",
+                input_hist,
+                "--llm-history-file",
+                llm_hist,
+                "--message-file",
+                prompt_file.name,
+            ]
+
+            if aider_conf:
+                cmd.extend(["--config", aider_conf])
+            if task.weak_model:
+                cmd.extend(["--weak-model", task.weak_model])
+            if aider_settings:
+                cmd.extend(["--model-settings-file", aider_settings])
+
+            # Auto-discover CONVENTIONS.md if not explicitly passed
+            conventions_cand = [
+                os.path.join(root, ".aider_factory", "CONVENTIONS.md"),
+                os.path.join(root, "CONVENTIONS.md"),
+                os.path.join(root, ".aider_factory", "markdown", "CONVENTIONS.md"),
+            ]
+            conventions_path = next((c for c in conventions_cand if os.path.isfile(c)), None)
+            reads_to_use = list(read_files or [])
+            if conventions_path and conventions_path not in reads_to_use and os.path.relpath(conventions_path, root).replace("\\", "/") not in reads_to_use:
+                reads_to_use.append(conventions_path)
+
+            for rf in reads_to_use:
+                if not rf:
+                    continue
+                full = rf if os.path.isabs(rf) else os.path.join(self.project_dir, rf)
+                if os.path.exists(full):
+                    cmd.extend(["--read", rf])
+            env = os.environ.copy()
+            env["AIDER_ARCHITECT"] = "false"  # override config architect:true for this turn
+            env["PYTHONHASHSEED"] = (
+                "0"  # Ensure deterministic set iteration for perfect prefix caching
+            )
+            # Resolve real key for LiteLLM routers (Lemonade, OpenRouter, etc.);
+            # fall back to "sk-dummy" for local llama.cpp / LM Studio.
+            _router_key = os.environ.get("LITELLM_API_KEY", "")
+            _router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
+            if task.architect_api_base:
+                env["OPENAI_API_BASE"] = task.architect_api_base
+                if _router_key and not is_dummy_key(_router_key):
+                    env["OPENAI_API_KEY"] = _router_key
+                elif "OPENAI_API_KEY" not in env:
+                    env["OPENAI_API_KEY"] = "sk-dummy"
+            if task.editor_api_base:
+                env["OLLAMA_API_BASE"] = task.editor_api_base
+                env["LM_STUDIO_API_BASE"] = task.editor_api_base
+                if _router_key and not is_dummy_key(_router_key):
+                    env["LM_STUDIO_API_KEY"] = _router_key
+                elif "LM_STUDIO_API_KEY" not in env:
+                    env["LM_STUDIO_API_KEY"] = "sk-dummy"
+            if task.weak_model and is_local_model(task.weak_model) and task.weak_model_api_base and is_valid_endpoint(task.weak_model_api_base):
+                env["WEAK_MODEL_API_BASE"] = task.weak_model_api_base
+                env["AIDER_WEAK_MODEL_API_BASE"] = task.weak_model_api_base
+            print(f"\n{_ARCH_COLOR}┌── architect {label} ──", flush=True)
+            if sys.platform == "win32":
+                try:
+                    aider_bin = shutil.which("aider") or "aider"
+                except Exception:
+                    aider_bin = "aider"
+                cmd[0] = aider_bin
+                if aider_bin.lower().endswith((".cmd", ".bat")):
+                    comspec = os.environ.get("COMSPEC", "cmd.exe")
+                    cmd = [comspec, "/c"] + cmd
+            popen_kwargs = {"start_new_session": True} if sys.platform != "win32" else {}
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=self.project_dir,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    **popen_kwargs,
+                )
+            except Exception as e:
+                print(f"└──{_RESET}", flush=True)
+                return f"PROPOSAL: (architect turn failed: {e})"
+
+            import threading
+            try:
+                timeout_secs = float(os.environ.get("AIDER_STREAM_TIMEOUT", "300"))
+                if timeout_secs <= 0.0:
+                    timeout_secs = 300.0
+            except (ValueError, TypeError):
+                timeout_secs = 300.0
+
+            timed_out = threading.Event()
+            def _on_timeout():
+                timed_out.set()
+                kill_proc_tree(proc)
+
+            watchdog = threading.Timer(timeout_secs, _on_timeout)
+            watchdog.daemon = True
+            watchdog.start()
+            chars = []
+            try:
+                if proc.stdout:
+                    while True:
+                        try:
+                            ch = proc.stdout.read(1)
+                        except (ValueError, OSError):
+                            break
+                        if not ch and proc.poll() is not None:
+                            break
+                        if ch:
+                            print(ch, end="", flush=True)
+                            chars.append(ch)
+                    try:
+                        proc.stdout.close()
+                    except Exception:
+                        pass
+                proc.wait()
+                print(f"\n└──{_RESET}", flush=True)
+            except KeyboardInterrupt:
+                kill_proc_tree(proc)
+                raise
+            finally:
+                watchdog.cancel()
+                print(_RESET, end="", flush=True)
+
+            if timed_out.is_set():
+                print(f"\n⚠️  Architect turn timed out after {timeout_secs}s. Terminating process.└──{_RESET}", flush=True)
+                return "PROPOSAL: (architect turn timed out)"
+            if proc.returncode != 0 and not chars:
+                return "PROPOSAL: (architect turn failed)"
+            return self._extract_assistant_text(self._strip_thinking("".join(chars)))
         finally:
-            # Belt-and-suspenders: never leave the terminal stuck in the architect color.
-            print(_RESET, end="", flush=True)
-        # Live stream showed the raw turn; the CAPTURED value drops the reasoning block
-        # (saves oracle tokens + keeps the transcript clean) while preserving the PROPOSAL.
-        return self._extract_assistant_text(self._strip_thinking("".join(chars)))
+            try:
+                if os.path.exists(prompt_file.name):
+                    os.unlink(prompt_file.name)
+            except OSError:
+                pass
 
     def _gate_run(self, task: "Task", gate_cmd):
-        """Run the deterministic gate; return (passed, combined_output).
-
-        gate_cmd may be a list (shell=False, used for internally-constructed
-        commands like the grounding gate) or a string (shell=True, used for
-        user-configured test_cmd which may contain shell syntax like '&&').
-        """
+        """Run the deterministic gate with process-tree timeout protection."""
         env = {**os.environ, **(task.rag_env or {})}
         use_shell = isinstance(gate_cmd, str)
         cache_key = gate_cmd if use_shell else tuple(gate_cmd)
+        popen_kwargs = {"start_new_session": True} if sys.platform != "win32" else {}
+        proc = subprocess.Popen(
+            gate_cmd,
+            shell=use_shell,
+            cwd=self.project_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            **popen_kwargs,
+        )
         try:
-            p = subprocess.run(
-                gate_cmd,
-                shell=use_shell,
-                cwd=self.project_dir,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            passed = p.returncode == 0
+            stdout, _ = proc.communicate(timeout=300)
+            passed = proc.returncode == 0
             self.last_test_result[cache_key] = passed
-            return passed, p.stdout or ""
+            return passed, stdout or ""
+        except subprocess.TimeoutExpired:
+            kill_proc_tree(proc)
+            self.last_test_result[cache_key] = False
+            return False, "(gate timed out after 300s)"
         except Exception as e:
+            kill_proc_tree(proc)
             self.last_test_result[cache_key] = False
             return False, f"(gate error: {e})"
 
@@ -588,9 +654,16 @@ class AiderFactory:
     ) -> str:
         """One oracle turn via the existing client. Ends with a VERDICT line. The reply is
         printed live to the terminal (observability only; not added to any model context)."""
-        oracle = os.path.join(self.project_dir, ".aider_factory", "bash", "oracle")
-        if not os.path.exists(oracle):
-            oracle = "aider-oracle"
+        pkg_python_dir = os.path.dirname(os.path.abspath(__file__))
+        oracle_script = os.path.join(pkg_python_dir, "oracle_agent.py")
+        if os.path.exists(oracle_script):
+            cmd_base = [sys.executable, oracle_script]
+        else:
+            oracle_bin = os.path.join(self.project_dir, ".aider_factory", "bash", "oracle")
+            if sys.platform != "win32" and os.path.exists(oracle_bin):
+                cmd_base = [oracle_bin]
+            else:
+                cmd_base = ["aider-oracle"]
         env = {**os.environ, **(task.rag_env or {})}
         # Route the oracle to a debate-specific session file (survives apply-phase cleanup).
         _sf = d.get("oracle_session_file")
@@ -715,23 +788,27 @@ class AiderFactory:
         # E2BIG (Argument list too long) when code files are large.
         import tempfile
 
+        temp_dir = os.path.join(str(self.project_dir), ".aider_factory", "temp")
+        os.makedirs(temp_dir, exist_ok=True)
         prompt_file = tempfile.NamedTemporaryFile(
             mode="w",
             suffix=".txt",
-            dir=os.path.join(self.project_dir, ".aider_factory"),
+            dir=temp_dir,
             prefix=".oracle_prompt_",
             delete=False,
+            encoding="utf-8",
         )
-        prompt_file.write(prompt)
-        prompt_file.close()
-
-        args = [oracle, "--mode", mode]
-        coll = (task.rag_env or {}).get("ORACLE_COLLECTION")
-        if coll and mode != "no_retrieve":
-            args += ["--collection", coll]
-        args.extend(["--file", prompt_file.name])
-
+        prompt_file_path = prompt_file.name
         try:
+            prompt_file.write(prompt)
+            prompt_file.close()
+
+            args = cmd_base + ["--mode", mode]
+            coll = (task.rag_env or {}).get("ORACLE_COLLECTION")
+            if coll and mode != "no_retrieve":
+                args += ["--collection", coll]
+            args.extend(["--file", prompt_file_path])
+
             p = subprocess.run(
                 args,
                 cwd=self.project_dir,
@@ -739,14 +816,18 @@ class AiderFactory:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                timeout=300,
             )
+        except subprocess.TimeoutExpired:
+            log.warning(f"⚠️  oracle call timed out after 300s [{task.id}]")
+            return "VERDICT: OBJECT - oracle execution timed out after 300s"
         except Exception as e:
             log.warning(f"⚠️  oracle call failed [{task.id}]: {e}")
             return f"VERDICT: OBJECT - oracle error: {e}"
         finally:
-            # Clean up the temp file after the oracle has read it
             try:
-                os.unlink(prompt_file.name)
+                if os.path.exists(prompt_file.name):
+                    os.unlink(prompt_file.name)
             except OSError:
                 pass
         out = re.sub(r"\033\[[0-9;]*m", "", (p.stdout or "")).strip()
@@ -780,33 +861,40 @@ class AiderFactory:
         import deliberate
 
         d = task.deliberate or {}
-        # Ensure the Oracle model is explicitly set in the environment for the sub-agent
-        if task.rag_env and "ORACLE_AGENT_MODEL" in task.rag_env:
-            os.environ["ORACLE_AGENT_MODEL"] = task.rag_env["ORACLE_AGENT_MODEL"]
-
-        # Early exit: if the previous round already reached agreement, skip this round.
-        # The DAG statically pre-builds all rounds at parse time; this runtime check
-        # prevents wasted rounds after consensus (mirrors the CLI debate's early exit).
-        prior_verdict_path = d.get("prior_verdict")
-        if prior_verdict_path and os.path.isfile(prior_verdict_path):
-            prior_state = deliberate.verdict_status(prior_verdict_path)
-            if prior_state in ("agreed", "clean"):
-                # Copy the prior verdict to this round's path so the downstream
-                # task (which references this round's verdict) finds the content.
-                verdict_path = d.get("verdict")
-                if verdict_path:
-                    os.makedirs(
-                        os.path.dirname(os.path.abspath(verdict_path)), exist_ok=True
-                    )
-                    shutil.copy(prior_verdict_path, verdict_path)
-                log.info(
-                    f"⏩ DELIBERATION [{task.id}] skipped — prior round already agreed or clean."
-                )
-                return True
+        # Ensure the Oracle model and reasoning parameters are explicitly set in the environment for the sub-agent
+        if task.rag_env:
+            for k in ("ORACLE_AGENT_MODEL", "ORACLE_REASONING_EFFORT", "ORACLE_TEMPERATURE"):
+                if k in task.rag_env:
+                    os.environ[k] = str(task.rag_env[k])
 
         template, issue = d.get("template"), d.get("issue")
         verdict_path, ledger_path = d.get("verdict"), d.get("ledger")
         gate_cmd, max_turns = d.get("gate_cmd"), int(d.get("loops", 3))
+        gate_present = bool(gate_cmd)
+        prior_verdict_path = d.get("prior_verdict")
+        prior_ledger_path = d.get("prior_ledger")
+
+        # Early exit: when no gate is present and the previous round already reached
+        # agreement or was clean, skip this round. When a gate IS present, do not
+        # skip here — the gate check below determines whether the prior round's fix
+        # actually passed the test suite.
+        if not gate_present and prior_verdict_path and os.path.isfile(prior_verdict_path):
+            prior_state = deliberate.verdict_status(prior_verdict_path)
+            if prior_state in ("agreed", "clean"):
+                if verdict_path and os.path.abspath(prior_verdict_path) != os.path.abspath(verdict_path):
+                    os.makedirs(
+                        os.path.dirname(os.path.abspath(verdict_path)), exist_ok=True
+                    )
+                    shutil.copy(prior_verdict_path, verdict_path)
+                if ledger_path and prior_ledger_path and os.path.isfile(prior_ledger_path) and os.path.abspath(prior_ledger_path) != os.path.abspath(ledger_path):
+                    os.makedirs(
+                        os.path.dirname(os.path.abspath(ledger_path)), exist_ok=True
+                    )
+                    shutil.copy(prior_ledger_path, ledger_path)
+                log.info(
+                    f"⏩ DELIBERATION [{task.id}] skipped — prior round already agreed or clean."
+                )
+                return True
         review_path, source_path, tag = (
             d.get("review"),
             d.get("source"),
@@ -830,10 +918,14 @@ class AiderFactory:
                     _pl = json.load(pf)
                     _pturns = _pl.get("turns", [])
                     if _pturns and _pl.get("state") == "agreed":
-                        # The architect's proposal that triggered the 'AGREE' is the second to last turn
-                        if len(_pturns) >= 2 and _pturns[-2]["role"] == "architect":
-                            _prior_fix = _pturns[-2].get("excerpt", "")
-                            seed += f"## Context: The PREVIOUS escalation round agreed to attempt this fix:\n{_prior_fix}\n\n"
+                        arch_turn = next(
+                            (t for t in reversed(_pturns) if t.get("role") == "architect"),
+                            None,
+                        )
+                        if arch_turn:
+                            _prior_fix = arch_turn.get("excerpt", "").strip()
+                            if _prior_fix and _prior_fix != "(no PROPOSAL line)":
+                                seed += f"## Context: The PREVIOUS escalation round agreed to attempt this fix:\n{_prior_fix}\n\n"
             except Exception as e:
                 log.warning(f"⚠️  Could not parse prior ledger {prior_ledger_path}: {e}")
 
@@ -843,11 +935,13 @@ class AiderFactory:
 
         quote_baseline, ungrounded = [], []
         if review_path and os.path.isfile(review_path):
-            _rl = open(review_path, encoding="utf-8").read().splitlines()
+            with open(review_path, "r", encoding="utf-8", errors="replace") as rf:
+                _rl = rf.read().splitlines()
             _items = validator._extract(_rl, tag)
             quote_baseline = sorted(validator._qhash(it["quote"]) for it in _items)
             if source_path and os.path.isfile(source_path):
-                _sn = validator._normalize(open(source_path, encoding="utf-8").read())
+                with open(source_path, "r", encoding="utf-8", errors="replace") as sf:
+                    _sn = validator._normalize(sf.read())
                 ungrounded = [
                     it["quote"]
                     for it in _items
@@ -875,7 +969,7 @@ class AiderFactory:
         gate_present = bool(gate_cmd)
 
         # Ensure a stale ledger from a previous run doesn't poison the gate's deletion guard
-        if os.path.exists(ledger_path):
+        if ledger_path and os.path.exists(ledger_path):
             try:
                 os.remove(ledger_path)
             except OSError:
@@ -893,13 +987,15 @@ class AiderFactory:
                 led = deliberate.new_ledger(issue_id)
                 led["state"] = "clean"
                 led["quote_baseline"] = quote_baseline
-                deliberate.save_ledger(ledger_path, led)
-                deliberate.write_verdict(
-                    verdict_path,
-                    "clean",
-                    True,
-                    "Gate already passes; no change required.",
-                )
+                if ledger_path:
+                    deliberate.save_ledger(ledger_path, led)
+                if verdict_path:
+                    deliberate.write_verdict(
+                        verdict_path,
+                        "clean",
+                        True,
+                        "Gate already passes; no change required.",
+                    )
                 log.info(
                     f"🗣️  DELIBERATION [{task.id}] -> gate already green; nothing to do."
                 )
@@ -967,6 +1063,13 @@ class AiderFactory:
                         os.remove(_f)
                     except OSError:
                         pass
+                if task.history_stem:
+                    _vf = self._get_vault_path(_f, task.history_stem)
+                    if os.path.exists(_vf):
+                        try:
+                            os.remove(_vf)
+                        except OSError:
+                            pass
 
         log.info(f"🗣️  DELIBERATION [{task.id}] -> up to {max_turns} turn(s)")
         _reads = d.get("read_files") or ([issue] if issue else [])
@@ -1061,7 +1164,8 @@ class AiderFactory:
             state = "exhausted"
         ledger["state"] = state
         ledger["quote_baseline"] = quote_baseline
-        deliberate.save_ledger(ledger_path, ledger)
+        if ledger_path:
+            deliberate.save_ledger(ledger_path, ledger)
         actionable = deliberate.write_verdict(
             verdict_path,
             state,
@@ -1073,15 +1177,16 @@ class AiderFactory:
 
         # Human-readable transcript of the full back-and-forth (observability only;
         # never fed into any aider session context).
-        transcript_path = os.path.splitext(ledger_path)[0] + ".md"  # <stem>.debate.md
-        try:
-            os.makedirs(
-                os.path.dirname(os.path.abspath(transcript_path)), exist_ok=True
-            )
-            with open(transcript_path, "w", encoding="utf-8") as tf:
-                tf.write("\n".join(transcript))
-        except Exception:
-            pass
+        if ledger_path:
+            transcript_path = os.path.splitext(ledger_path)[0] + ".md"  # <stem>.debate.md
+            try:
+                os.makedirs(
+                    os.path.dirname(os.path.abspath(transcript_path)), exist_ok=True
+                )
+                with open(transcript_path, "w", encoding="utf-8") as tf:
+                    tf.write("\n".join(transcript))
+            except Exception:
+                pass
 
         # Archive the oracle transcript before the next aider task deletes it.
         # The aider session setup (line 780) removes .oracle_chat.history.md, so
@@ -1114,6 +1219,13 @@ class AiderFactory:
                         os.remove(_df)
                     except OSError:
                         pass
+                if task.history_stem:
+                    _vdf = self._get_vault_path(_df, task.history_stem)
+                    if os.path.exists(_vdf):
+                        try:
+                            os.remove(_vdf)
+                        except OSError:
+                            pass
 
         log.info(
             f"🗣️  DELIBERATION [{task.id}] -> {state} "
@@ -1129,7 +1241,7 @@ class AiderFactory:
             return self._execute_task_node(task)
         finally:
             if task.history_stem:
-                self._swap_out_state(task.history_stem)
+                self._swap_out_state(task.history_stem, purge_missing=False)
 
     def _execute_task_node(self, task: Task) -> bool:
         # Edit-node self-gate: a task that applies a deliberation verdict runs only when
@@ -1149,6 +1261,15 @@ class AiderFactory:
                         f"(not auto-applied; quotes left as [evidence])."
                     )
                 return True
+
+        # Invalidate cached gate evaluations when mutating tasks run
+        is_mutating_aider = bool(task.files and not task.skip_aider and not task.deliberate and not task.validate)
+        is_mutating_oracle = bool(task.oracle and task.oracle.get("out"))
+        is_mutating_validate = bool(task.validate and task.validate.get("autofix"))
+
+        if is_mutating_aider or is_mutating_oracle or is_mutating_validate:
+            self.last_test_result.clear()
+
         # Per-phase RAG/OCR ingestion (movable DAG node). Runs once, in DAG order,
         # before this task's session. Non-fatal: a missing job folder just skips.
         if task.ocr_ingest:
@@ -1174,6 +1295,65 @@ class AiderFactory:
         if task.validate:
             return self._run_validate(task)
 
+        # Pre-synthesize session model settings so deliberation ask-turns inherit weak model endpoints
+        local_aider_factory_settings = os.path.join(
+            str(self.project_dir), ".aider_factory", ".aider.model.settings.yml"
+        )
+        root_aider_settings = os.path.join(str(self.project_dir), ".aider.model.settings.yml")
+        base_aider_settings = (
+            local_aider_factory_settings
+            if os.path.exists(local_aider_factory_settings)
+            else (
+                root_aider_settings if os.path.exists(root_aider_settings) else None
+            )
+        )
+        session_aider_settings = os.path.join(
+            str(self.session_dir), ".aider.model.settings.yml"
+        )
+        _router_key = os.environ.get("LITELLM_API_KEY", "")
+        _router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
+
+        resolved_weak_model = (
+            task.weak_model
+            or os.environ.get("AIDER_WEAK_MODEL")
+            or os.environ.get("WEAK_MODEL")
+        )
+        raw_weak_api_base = (
+            task.weak_model_api_base
+            or os.environ.get("WEAK_MODEL_API_BASE")
+            or os.environ.get("AIDER_WEAK_MODEL_API_BASE")
+        )
+        if resolved_weak_model and not is_local_model(resolved_weak_model):
+            resolved_weak_api_base = None
+        elif is_valid_endpoint(raw_weak_api_base):
+            resolved_weak_api_base = raw_weak_api_base
+        elif resolved_weak_model and is_local_model(resolved_weak_model):
+            candidate_fallback = task.editor_api_base or task.architect_api_base
+            resolved_weak_api_base = candidate_fallback if is_valid_endpoint(candidate_fallback) else None
+        else:
+            resolved_weak_api_base = None
+
+        if resolved_weak_model and resolved_weak_api_base:
+            ensure_model_settings(
+                target_path=session_aider_settings,
+                models_to_configure=[
+                    {
+                        "name": resolved_weak_model,
+                        "api_base": resolved_weak_api_base,
+                        "api_key": _router_key,
+                    }
+                ],
+                base_settings_path=base_aider_settings,
+            )
+            aider_settings = session_aider_settings
+        else:
+            if os.path.exists(session_aider_settings):
+                try:
+                    os.remove(session_aider_settings)
+                except OSError:
+                    pass
+            aider_settings = base_aider_settings
+
         # Two-party deliberation (no Aider edits): ask-mode architect turns + oracle
         # turns, refereed by the ledger; writes a verdict for a downstream edit node.
         if task.deliberate:
@@ -1189,6 +1369,7 @@ class AiderFactory:
             max_outer_loops = 1
 
         for attempt in range(max_outer_loops):
+            repair_prompt_path = None
             chat_hist = os.path.join(str(self.session_dir), ".aider.chat.history.md")
             input_hist = os.path.join(str(self.session_dir), ".aider.input.history")
             llm_hist = os.path.join(str(self.session_dir), ".aider.llm.history")
@@ -1261,6 +1442,8 @@ class AiderFactory:
                 conf_data["map-multiplier-no-files"] = task.map_multiplier_no_files
             if task.max_chat_history_tokens is not None:
                 conf_data["max-chat-history-tokens"] = str(task.max_chat_history_tokens)
+            if task.weak_model is not None:
+                conf_data["weak-model"] = task.weak_model
 
             if task.yes_always is not None:
                 conf_data["yes-always"] = bool(task.yes_always)
@@ -1289,17 +1472,66 @@ class AiderFactory:
                 )
                 aider_conf = base_aider_conf
 
+            resolved_weak_model = (
+                task.weak_model
+                or conf_data.get("weak-model")
+                or os.environ.get("AIDER_WEAK_MODEL")
+                or os.environ.get("WEAK_MODEL")
+            )
+            raw_weak_api_base = (
+                task.weak_model_api_base
+                or os.environ.get("WEAK_MODEL_API_BASE")
+                or os.environ.get("AIDER_WEAK_MODEL_API_BASE")
+            )
+
+            # Strict isolation: cloud weak models must NEVER receive a local endpoint
+            if resolved_weak_model and not is_local_model(resolved_weak_model):
+                resolved_weak_api_base = None
+            elif is_valid_endpoint(raw_weak_api_base):
+                resolved_weak_api_base = raw_weak_api_base
+            elif resolved_weak_model and is_local_model(resolved_weak_model):
+                candidate_fallback = task.editor_api_base or task.architect_api_base
+                resolved_weak_api_base = candidate_fallback if is_valid_endpoint(candidate_fallback) else None
+            else:
+                resolved_weak_api_base = None
+
             local_aider_factory_settings = os.path.join(
                 root, ".aider_factory", ".aider.model.settings.yml"
             )
             root_aider_settings = os.path.join(root, ".aider.model.settings.yml")
-            aider_settings = (
+            base_aider_settings = (
                 local_aider_factory_settings
                 if os.path.exists(local_aider_factory_settings)
                 else (
                     root_aider_settings if os.path.exists(root_aider_settings) else None
                 )
             )
+            session_aider_settings = os.path.join(
+                str(self.session_dir), ".aider.model.settings.yml"
+            )
+            _router_key = os.environ.get("LITELLM_API_KEY", "")
+            _router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
+
+            if resolved_weak_model and resolved_weak_api_base:
+                ensure_model_settings(
+                    target_path=session_aider_settings,
+                    models_to_configure=[
+                        {
+                            "name": resolved_weak_model,
+                            "api_base": resolved_weak_api_base,
+                            "api_key": _router_key,
+                        }
+                    ],
+                    base_settings_path=base_aider_settings,
+                )
+                aider_settings = session_aider_settings
+            else:
+                if os.path.exists(session_aider_settings):
+                    try:
+                        os.remove(session_aider_settings)
+                    except OSError:
+                        pass
+                aider_settings = base_aider_settings
 
             cmd = [
                 "aider",
@@ -1324,6 +1556,8 @@ class AiderFactory:
                 "--llm-history-file",
                 llm_hist,
             ]
+            if resolved_weak_model:
+                cmd.extend(["--weak-model", resolved_weak_model])
             if aider_conf:
                 cmd.extend(["--config", aider_conf])
             if aider_settings:
@@ -1391,7 +1625,7 @@ class AiderFactory:
                     f"⚙️ Running initial test suite to check baseline for [{task.id}] (Loop {attempt + 1}/{max_outer_loops})..."
                 )
 
-                # Stream output to console while capturing it
+                popen_kwargs = {"start_new_session": True} if sys.platform != "win32" else {}
                 test_proc = subprocess.Popen(
                     task.test_cmd,
                     shell=True,
@@ -1401,31 +1635,62 @@ class AiderFactory:
                     text=True,
                     bufsize=1,  # Line-buffered
                     cwd=self.project_dir,
-                    # Side-agent (ORACLE_*) + per-doc validation vars, so a test
-                    # command that shells out to the oracle/validator is configured.
-                    # VALIDATION_ATTEMPT lets the contextual validator reset its
-                    # per-run ledger (no-progress guard) on the first attempt.
                     env={
                         **os.environ,
                         **(task.rag_env or {}),
                         "VALIDATION_ATTEMPT": str(attempt),
                     },
+                    **popen_kwargs,
                 )
 
-                output_lines = []
-                if test_proc.stdout:
-                    while True:
-                        char = test_proc.stdout.read(1)
-                        if not char and test_proc.poll() is not None:
-                            break
-                        if char:
-                            print(char, end="", flush=True)
-                            output_lines.append(char)
-                    test_proc.stdout.close()
+                import threading
+                try:
+                    timeout_secs = float(os.environ.get("AIDER_STREAM_TIMEOUT", "300"))
+                    if timeout_secs <= 0.0:
+                        timeout_secs = 300.0
+                except (ValueError, TypeError):
+                    timeout_secs = 300.0
 
-                test_proc.wait()  # Wait for the process to finish
-                out = "".join(output_lines)
-                self.last_test_result[task.test_cmd] = test_proc.returncode == 0
+                test_timed_out = threading.Event()
+                def _on_test_timeout():
+                    test_timed_out.set()
+                    kill_proc_tree(test_proc)
+
+                test_watchdog = threading.Timer(timeout_secs, _on_test_timeout)
+                test_watchdog.daemon = True
+                test_watchdog.start()
+
+                output_lines = []
+                try:
+                    if test_proc.stdout:
+                        while True:
+                            try:
+                                char = test_proc.stdout.read(1)
+                            except (ValueError, OSError):
+                                break
+                            if not char and test_proc.poll() is not None:
+                                break
+                            if char:
+                                print(char, end="", flush=True)
+                                output_lines.append(char)
+                        try:
+                            test_proc.stdout.close()
+                        except Exception:
+                            pass
+                    test_proc.wait()
+                except KeyboardInterrupt:
+                    kill_proc_tree(test_proc)
+                    raise
+                finally:
+                    test_watchdog.cancel()
+
+                if test_timed_out.is_set():
+                    log.error(f"❌ Test baseline timed out after {timeout_secs}s for [{task.id}].")
+                    self.last_test_result[task.test_cmd] = False
+                    out = f"(initial test suite execution timed out after {timeout_secs}s)"
+                else:
+                    out = "".join(output_lines)
+                    self.last_test_result[task.test_cmd] = (test_proc.returncode == 0)
 
                 if test_proc.returncode == 0:
                     log.info(
@@ -1459,7 +1724,21 @@ class AiderFactory:
                     + out
                     + "\n```"
                 )
-                cmd.extend(["--message", msg])
+                temp_dir = os.path.join(str(self.project_dir), ".aider_factory", "temp")
+                os.makedirs(temp_dir, exist_ok=True)
+                import tempfile
+                msg_file = tempfile.NamedTemporaryFile(
+                    mode="w",
+                    suffix=".txt",
+                    dir=temp_dir,
+                    prefix=".aider_repair_prompt_",
+                    delete=False,
+                    encoding="utf-8",
+                )
+                msg_file.write(msg)
+                msg_file.close()
+                repair_prompt_path = msg_file.name
+                cmd.extend(["--message-file", repair_prompt_path])
 
             elif task.message_file and os.path.isfile(task.message_file):
                 if task.pair_programming:
@@ -1485,10 +1764,20 @@ class AiderFactory:
                             task.message_file,
                         ]
                     )
+            norm_editable = {
+                os.path.normpath(f).replace("\\", "/") for f in task.files if f
+            }
+            seen_reads = set()
             unique_read_files = []
             for f in task.read_files:
-                if f not in task.files and f not in unique_read_files:
-                    unique_read_files.append(f)
+                if not f:
+                    continue
+                clean_f = os.path.normpath(f).replace("\\", "/")
+                if clean_f not in norm_editable and clean_f not in seen_reads:
+                    seen_reads.add(clean_f)
+                    full = f if os.path.isabs(f) else os.path.join(self.project_dir, f)
+                    if os.path.exists(full):
+                        unique_read_files.append(f)
 
             for file in unique_read_files:
                 cmd.extend(["--read", file])
@@ -1547,11 +1836,26 @@ class AiderFactory:
             _router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
             if task.architect_api_base:
                 env["OPENAI_API_BASE"] = task.architect_api_base
-                env["OPENAI_API_KEY"] = _router_key
+                if _router_key and not is_dummy_key(_router_key):
+                    env["OPENAI_API_KEY"] = _router_key
+                elif "OPENAI_API_KEY" not in env:
+                    env["OPENAI_API_KEY"] = "sk-dummy"
             if task.editor_api_base:
                 env["OLLAMA_API_BASE"] = task.editor_api_base
                 env["LM_STUDIO_API_BASE"] = task.editor_api_base
-                env["LM_STUDIO_API_KEY"] = _router_key
+                if _router_key and not is_dummy_key(_router_key):
+                    env["LM_STUDIO_API_KEY"] = _router_key
+                elif "LM_STUDIO_API_KEY" not in env:
+                    env["LM_STUDIO_API_KEY"] = "sk-dummy"
+            if resolved_weak_api_base and is_valid_endpoint(resolved_weak_api_base):
+                env["WEAK_MODEL_API_BASE"] = resolved_weak_api_base
+                env["AIDER_WEAK_MODEL_API_BASE"] = resolved_weak_api_base
+                if is_local_model(task.model) and not task.architect_api_base and "OPENAI_API_BASE" not in env:
+                    env["OPENAI_API_BASE"] = resolved_weak_api_base
+                    if _router_key and not is_dummy_key(_router_key):
+                        env["OPENAI_API_KEY"] = _router_key
+                    elif "OPENAI_API_KEY" not in env:
+                        env["OPENAI_API_KEY"] = "sk-dummy"
             # Side-agent (ORACLE_*) config, visible to /run child processes
             if task.rag_env:
                 env.update(task.rag_env)
@@ -1565,7 +1869,8 @@ class AiderFactory:
                         aider_bin = "aider"
                     cmd[0] = aider_bin
                     if aider_bin.lower().endswith((".cmd", ".bat")):
-                        cmd = ["cmd.exe", "/c"] + cmd
+                        comspec = os.environ.get("COMSPEC", "cmd.exe")
+                        cmd = [comspec, "/c"] + cmd
 
                 if task.pair_programming:
                     log.info(
@@ -1626,27 +1931,38 @@ class AiderFactory:
                             continue
                     return process.returncode == 0
 
-                # Start Aider, streaming to terminal
+                popen_kwargs = {"start_new_session": True} if sys.platform != "win32" else {}
                 process = subprocess.Popen(
                     cmd,
                     cwd=self.project_dir,
                     env=env,
                     stdin=subprocess.PIPE,
+                    **popen_kwargs,
                 )
 
                 try:
-                    # Send repeated 'n\n' (No) to gracefully reject all out-of-scope mid-run
-                    # prompts ("Add file to the chat?", "Create new file?"). With --exit enabled,
-                    # Aider terminates immediately upon completing --message, discarding any
-                    # unused buffer entries without polling them as trailing chat turns.
                     process.stdin.write(b"n\n" * 50)
                     process.stdin.flush()
                     process.stdin.close()
                 except Exception:
                     pass
 
-                # Wait for Aider to finish
-                process.wait()
+                try:
+                    process.wait(timeout=600)
+                except subprocess.TimeoutExpired:
+                    log.error(
+                        f"❌ TASK TIMEOUT [{task.id}]: Aider execution exceeded 600s. Terminating process tree."
+                    )
+                    kill_proc_tree(process)
+                    return False
+                except KeyboardInterrupt:
+                    log.warning(f"⏸️  TASK CANCELLED BY USER [{task.id}]")
+                    kill_proc_tree(process)
+                    return False
+                except Exception as e:
+                    log.error(f"❌ TASK EXCEPTION [{task.id}]: {str(e)}", exc_info=True)
+                    kill_proc_tree(process)
+                    return False
 
                 if process.returncode != 0:
                     if not task.iterate_test:
@@ -1673,26 +1989,32 @@ class AiderFactory:
                 return False
             finally:
                 # Archive chat history before cleanup
-                if os.path.exists(chat_hist):
-                    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    history_dir = os.path.join(
-                        self.project_dir, ".aider_factory", "logs", "chat_history"
-                    )
-                    os.makedirs(history_dir, exist_ok=True)
+                try:
+                    if os.path.exists(chat_hist):
+                        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        history_dir = os.path.join(
+                            self.project_dir, ".aider_factory", "logs", "chat_history"
+                        )
+                        os.makedirs(history_dir, exist_ok=True)
 
-                    archive_name = f"{stamp}_{task.id}.md"
-                    shutil.copy(chat_hist, os.path.join(history_dir, archive_name))
+                        archive_name = f"{stamp}_{task.id}.md"
+                        shutil.copy(chat_hist, os.path.join(history_dir, archive_name))
+                except Exception:
+                    pass
 
                 # Archive raw LLM history before cleanup
-                if os.path.exists(llm_hist):
-                    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    llm_hist_dir = os.path.join(
-                        self.project_dir, ".aider_factory", "logs", "llm_history"
-                    )
-                    os.makedirs(llm_hist_dir, exist_ok=True)
+                try:
+                    if os.path.exists(llm_hist):
+                        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        llm_hist_dir = os.path.join(
+                            self.project_dir, ".aider_factory", "logs", "llm_history"
+                        )
+                        os.makedirs(llm_hist_dir, exist_ok=True)
 
-                    archive_name = f"{stamp}_{task.id}.llm.log"
-                    shutil.copy(llm_hist, os.path.join(llm_hist_dir, archive_name))
+                        archive_name = f"{stamp}_{task.id}.llm.log"
+                        shutil.copy(llm_hist, os.path.join(llm_hist_dir, archive_name))
+                except Exception:
+                    pass
 
                 # Archive the Oracle side-agent transcript before cleanup
                 if os.path.exists(oracle_transcript):
@@ -1719,6 +2041,12 @@ class AiderFactory:
                     if os.path.exists(f):
                         os.remove(f)
 
+                if repair_prompt_path and os.path.exists(repair_prompt_path):
+                    try:
+                        os.unlink(repair_prompt_path)
+                    except OSError:
+                        pass
+
         # The iterate loop verifies edit N via the test-check at the START of attempt N+1,
         # so the FINAL attempt's edit is never re-tested -> exhaustion can't tell "still
         # broken" from "the last edit just fixed it." Code mode has no finalize authority,
@@ -1729,23 +2057,52 @@ class AiderFactory:
                 f"🔁 FINAL CHECK [{task.id}]: re-running the test suite once to verify the "
                 "last edit (loop never re-tests its own final edit)..."
             )
+            popen_kwargs = {"start_new_session": True} if sys.platform != "win32" else {}
+            proc = subprocess.Popen(
+                task.test_cmd,
+                shell=True,
+                cwd=self.project_dir,
+                env={**os.environ, **(task.rag_env or {})},
+                **popen_kwargs,
+            )
             try:
-                p = subprocess.run(
-                    task.test_cmd,
-                    shell=True,
-                    cwd=self.project_dir,
-                    env={**os.environ, **(task.rag_env or {})},
-                )
-                self.last_test_result[task.test_cmd] = p.returncode == 0
-                if p.returncode == 0:
+                proc.communicate(timeout=float(os.environ.get("AIDER_STREAM_TIMEOUT", "300")))
+                passed = proc.returncode == 0
+                self.last_test_result[task.test_cmd] = passed
+                if passed:
                     log.info(f"✅ TASK SUCCESS [{task.id}]: final test check passed.")
+                    return True
+                if task.soft_fail:
+                    log.info(
+                        f"ℹ️  TASK SOFT-EXHAUSTED [{task.id}]: final test check still failing "
+                        f"(rc={proc.returncode}); deferring to downstream authority (soft_fail=True)."
+                    )
                     return True
                 log.error(
                     f"❌ TASK FAILED [{task.id}]: final test check still failing "
-                    f"(rc={p.returncode}) after {max_outer_loops} attempt(s)."
+                    f"(rc={proc.returncode}) after {max_outer_loops} attempt(s)."
                 )
                 return False
+            except subprocess.TimeoutExpired:
+                kill_proc_tree(proc)
+                self.last_test_result[task.test_cmd] = False
+                if task.soft_fail:
+                    log.info(
+                        f"ℹ️  TASK SOFT-EXHAUSTED [{task.id}]: final test check timed out after 300s; "
+                        "deferring to downstream authority (soft_fail=True)."
+                    )
+                    return True
+                log.error(f"❌ TASK FAILED [{task.id}]: final test check timed out after 300s.")
+                return False
             except Exception as e:
+                kill_proc_tree(proc)
+                self.last_test_result[task.test_cmd] = False
+                if task.soft_fail:
+                    log.info(
+                        f"ℹ️  TASK SOFT-EXHAUSTED [{task.id}]: final test check errored: {e}; "
+                        "deferring to downstream authority (soft_fail=True)."
+                    )
+                    return True
                 log.error(f"❌ TASK FAILED [{task.id}]: final test check errored: {e}")
                 return False
 

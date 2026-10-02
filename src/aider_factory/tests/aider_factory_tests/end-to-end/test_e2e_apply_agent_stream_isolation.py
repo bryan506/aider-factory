@@ -128,7 +128,12 @@ class _StreamIsolationBase(unittest.TestCase):
         # --- Env scrubbing ---
         self._orig_env = os.environ.copy()
         for k in list(os.environ.keys()):
-            if k.startswith("AI_FACTORY_") or k.startswith("ORACLE_") or k == "AIDER_ARCHITECT":
+            if (
+                k.startswith("AI_FACTORY_")
+                or k.startswith("ORACLE_")
+                or k == "AIDER_ARCHITECT"
+                or k in ("LITELLM_API_KEY", "OPENAI_API_KEY")
+            ):
                 os.environ.pop(k, None)
 
     def tearDown(self):
@@ -533,6 +538,8 @@ class TestS18EnvPropagation(_StreamIsolationBase):
         spec.write_text("Do something.\n", encoding="utf-8")
 
         os.environ.pop("AI_FACTORY_CONFIG", None)
+        os.environ.pop("LITELLM_API_KEY", None)
+        os.environ.pop("OPENAI_API_KEY", None)
 
         from apply_agent import run_apply
         run_apply(

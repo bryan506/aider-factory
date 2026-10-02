@@ -23,7 +23,22 @@ Consult it before asserting any formula or domain rule.
 
 Produce a single, self-contained **source-of-truth template** at
 `.aider_factory/markdown/oracle_pre_plan/strategy_template.md` that downstream implementation phases
-will read automatically (via `sticky_context`). It must contain:
+will read automatically (via `sticky_phases` and `sticky_context`).
+
+Under `## Scope Analysis`, you must define the exact file manifest block so the autonomous pipeline knows which files to edit, test, and reference:
+
+```yaml
+files:
+  target_files:
+    - "src/module.py"
+  extra_editable_files: []
+  test_files: []
+  context_files_job:
+    - "docs/spec.md"
+  context_files_test: []
+```
+
+It must also contain:
 
 1. **Scope** — what is being implemented/refactored and why.
 2. **Definitions & formulas** — exact, oracle-sourced, with the source file cited.

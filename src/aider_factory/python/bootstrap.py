@@ -188,16 +188,20 @@ def _detect_framework(cwd: str) -> tuple:
 
 
 def _select_models(available: list) -> dict:
-    """Pick architect, editor, embed, and reranker from a router model list.
+    """Pick architect, editor, weak, embed, and reranker from a router model list.
 
-    Returns dict with keys: architect, editor, embed, reranker (values may be None).
+    Returns dict with keys: architect, editor, weak, embed, reranker (values may be None).
     """
     if not available:
         return {}
     arch = next((m for m in available if "27b" in m.lower()), available[0])
+    weak = next(
+        (m for m in available if any(k in m.lower() for k in ("1.5b", "7b", "8b", "mini", "flash", "lite"))),
+        arch,
+    )
     embed = next((m for m in available if "embed" in m.lower()), None)
     rerank = next((m for m in available if "rerank" in m.lower()), None)
-    return {"architect": arch, "editor": arch, "embed": embed, "reranker": rerank}
+    return {"architect": arch, "editor": arch, "weak": weak, "embed": embed, "reranker": rerank}
 
 
 def run_bootstrap(target_dir: str) -> None:
@@ -256,8 +260,12 @@ def run_bootstrap(target_dir: str) -> None:
     # RAG, OCR, embed, ranking, grounding stay at template defaults —
     # auto-resolved locally at runtime (llama.cpp, sentence-transformers, MiniCheck).
     if router_base:
-        _ROUTER_ENDPOINTS = ("architect_api_base", "editor_api",
-                             "editor_api_fallback")
+        _ROUTER_ENDPOINTS = (
+            "architect_api_base",
+            "editor_api",
+            "editor_api_fallback",
+            "weak_model_api_base",
+        )
         for ep_key in _ROUTER_ENDPOINTS:
             content = re.sub(
                 rf'{ep_key}:\s*".*?"',
@@ -274,6 +282,9 @@ def run_bootstrap(target_dir: str) -> None:
         content = re.sub(r'editor_agent:\s*".*?"', lambda _: f'editor_agent: "{editor}"', content, count=1)
         content = re.sub(r'editor_agent_test:\s*".*?"', lambda _: f'editor_agent_test: "{editor}"', content, count=1)
         content = re.sub(r'editor_agent_test_fallback:\s*".*?"', lambda _: f'editor_agent_test_fallback: "{editor}"', content, count=1)
+    if model_choices.get("weak"):
+        weak = model_choices["weak"]
+        content = re.sub(r'weak_model:\s*".*?"', lambda _: f'weak_model: "{weak}"', content, count=1)
     if model_choices.get("embed"):
         _embed_m = model_choices["embed"]
         content = re.sub(r'embed_model:\s*".*?"', lambda _: f'embed_model: "{_embed_m}"', content, count=1)
@@ -411,7 +422,8 @@ def run_bootstrap(target_dir: str) -> None:
         print(f"   Or a cloud provider key (GEMINI_API_KEY, ANTHROPIC_API_KEY, etc.)")
 
     print(f"\n   Run:  aider-factory .aider_factory/.env_{repo_name}.yml")
-    print(f"   Edit: .aider_factory/.env_{repo_name}.yml\n")
+    print(f"   Edit: .aider_factory/.env_{repo_name}.yml")
+    print(f"   Sample workflows: .aider_factory/sample_yaml_config/\n")
 
 def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=False, master_mode=False, expert_mode=False, repo_map=False):
     """Query configuration or run general terminal assistant using direct litellm session persistence."""
@@ -597,10 +609,8 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
                     if not file_content.strip():
                         print(f"⚠️ [aider-helper] Warning: Context file is empty: {label}", file=sys.stderr)
 
-                    fence = "```"
-                    while fence in file_content:
-                        fence += "`"
-
+                    backtick_matches = re.findall(r"`{3,}", file_content)
+                    fence = "`" * (max([len(m) for m in backtick_matches], default=2) + 1)
                     content_str = file_content if file_content.endswith("\n") else file_content + "\n"
                     ctx_blocks.append(f"File: {label}\n{fence}\n{content_str}{fence}")
                 except Exception as e:

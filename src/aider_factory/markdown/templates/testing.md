@@ -73,6 +73,11 @@ Structure your planning response following this exact template. Do not add conve
 1. `<module.function_or_class_1>`
 2. `<module.function_or_class_2>`
 
+### Negative Scope Boundaries:
+- Do NOT add new production dependencies.
+- Do NOT alter existing public API contracts or type signatures.
+- Do NOT modify files outside the declared target scope.
+
 ### Predicted Risk Areas:
 | Area | Description | Mitigation |
 | :--- | :---------- | :--------- |
@@ -98,12 +103,8 @@ Structure your planning response following this exact template. Do not add conve
 - **Essential Elements**: `test_nominal_execution()`, `test_edge_case_handling()`, `test_boundary_fault()`
 - **Tight Description**: Implement test cases covering TC-001 through TC-003 from the Test Decision Matrix. Pure logic executes in-memory; mock external client at interface boundary.
 - **Syntax Example**:
-```python
-def test_nominal_execution():
-    fixture_input = {"key": "value"}
-    result = target_function(fixture_input)
-    assert result.status == "SUCCESS"
-    assert result.value == 42
+```code
+# Concrete implementation snippet matching target language idioms without placeholders
 ```
 ```
 

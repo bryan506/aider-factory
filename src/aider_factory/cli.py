@@ -847,6 +847,27 @@ def init_user_project(cwd=None):
                     if not os.path.exists(dst_file):
                         shutil.copy2(src_file, dst_file)
 
+    # 7. Copy sample yaml configs into .aider_factory/sample_yaml_config/ if missing (non-destructive)
+    pkg_sample_yaml_dir = os.path.join(default_configs_dir, "sample_yaml_config")
+    local_sample_yaml_dir = os.path.join(local_aider_factory_dir, "sample_yaml_config")
+    if os.path.isdir(pkg_sample_yaml_dir):
+        if not os.path.exists(local_sample_yaml_dir):
+            shutil.copytree(pkg_sample_yaml_dir, local_sample_yaml_dir)
+        else:
+            for root, dirs, files in os.walk(pkg_sample_yaml_dir):
+                rel_path = os.path.relpath(root, pkg_sample_yaml_dir)
+                dst_root = (
+                    local_sample_yaml_dir
+                    if rel_path == "."
+                    else os.path.join(local_sample_yaml_dir, rel_path)
+                )
+                os.makedirs(dst_root, exist_ok=True)
+                for f in files:
+                    src_file = os.path.join(root, f)
+                    dst_file = os.path.join(dst_root, f)
+                    if not os.path.exists(dst_file):
+                        shutil.copy2(src_file, dst_file)
+
 
 def ensure_aider_installed():
     """Ensure user scripts directory is in PATH and aider is installed globally."""

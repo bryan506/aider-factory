@@ -609,9 +609,8 @@ class TestExecutionGatesAndModes(unittest.TestCase):
         task_held = Task(id="test_held_gate", verdict_gate="/path/to/verdict.md")
         self.assertTrue(self.factory._execute_task_node(task_held))
 
-    @patch("subprocess.run")
     @patch("subprocess.Popen")
-    def test_final_check_gate_on_loop_exhaustion(self, mock_popen, mock_run):
+    def test_final_check_gate_on_loop_exhaustion(self, mock_popen):
         # Initial test baseline in loop fails
         mock_init_test = MagicMock()
         mock_init_test.returncode = 1
@@ -624,10 +623,12 @@ class TestExecutionGatesAndModes(unittest.TestCase):
         mock_aider.returncode = 1
         mock_aider.wait.return_value = 1
 
-        mock_popen.side_effect = [mock_init_test, mock_aider]
+        # final_check Popen process passes (returns rc 0)
+        mock_final_test = MagicMock()
+        mock_final_test.returncode = 0
+        mock_final_test.communicate.return_value = ("", "")
 
-        # final_check subprocess.run passes (returns rc 0)
-        mock_run.return_value = MagicMock(returncode=0)
+        mock_popen.side_effect = [mock_init_test, mock_aider, mock_final_test]
 
         task = Task(
             id="test_final_check",
@@ -638,7 +639,6 @@ class TestExecutionGatesAndModes(unittest.TestCase):
         )
         res = self.factory._execute_task_node(task)
         self.assertTrue(res)
-        mock_run.assert_called_once()
 
     @patch("subprocess.Popen")
     def test_soft_fail_gate_on_loop_exhaustion(self, mock_popen):

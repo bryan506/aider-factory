@@ -420,6 +420,71 @@ class TestE2EPersonaDebate(unittest.TestCase):
         self.assertTrue(tee._stopped)
         self.assertFalse(tee.running)
 
+    def test_e2e_deliberation_contract_and_prompt_rotation(self):
+        """E2E test verifying orchestrate._run_deliberation persona contracts and persist rotation."""
+        from orchestrate import AiderFactory, Task
+
+        orc_persona = os.path.join(self.test_dir, "delib_orc_persona.md")
+        arch_persona = os.path.join(self.test_dir, "delib_arch_persona.md")
+        with open(orc_persona, "w", encoding="utf-8") as f:
+            f.write("CRITICAL_AUDITOR_PERSONA")
+        with open(arch_persona, "w", encoding="utf-8") as f:
+            f.write("RESILIENT_ARCHITECT_PERSONA")
+
+        verdict_file = os.path.join(self.test_dir, "verdict.md")
+        ledger_file = os.path.join(self.test_dir, "debate.json")
+
+        factory = AiderFactory(project_dir=self.test_dir, session_name="test_delib_session")
+
+        task = Task(
+            id="delib_node",
+            model="openai/mock-architect",
+            editor_model="openai/mock-oracle",
+            architect_api_base=self.api_url,
+            editor_api_base=self.api_url,
+            rag_env={
+                "ORACLE_AGENT_MODEL": "openai/mock-oracle",
+                "ORACLE_AGENT_API_BASE": self.api_url,
+                "ORACLE_ARCHITECT_MODEL": "openai/mock-architect",
+                "ORACLE_ARCHITECT_API_BASE": self.api_url,
+            },
+            deliberate={
+                "template": None,
+                "issue": None,
+                "verdict": verdict_file,
+                "ledger": ledger_file,
+                "loops": 2,
+                "mode": "code",
+                "round_idx": 1,
+                "persist": True,
+                "oracle_persona": orc_persona,
+                "architect_persona": arch_persona,
+            },
+        )
+
+        MockDebateHTTPServer.response_verdicts = [
+            "VERDICT: AGREE",
+            "VERDICT: AGREE",
+            "VERDICT: AGREE",
+        ]
+
+        ret = factory._run_deliberation(task)
+        self.assertTrue(ret)
+        self.assertTrue(os.path.exists(verdict_file))
+
+        with open(self.log_file, "r", encoding="utf-8") as lf:
+            calls = [json.loads(line) for line in lf]
+
+        self.assertEqual(len(calls), 2, "Expected 2 turns executed under persist: true with max_turns=2")
+
+        # Verify Architect received persona directives on Turn 1
+        self.assertIn("## Architect Persona Directives", calls[0]["msg_content"])
+        self.assertIn("RESILIENT_ARCHITECT_PERSONA", calls[0]["msg_content"])
+
+        # Verify Turn 2 prompt was rotated to subsequent audit layers
+        self.assertIn("The Oracle provisionally agreed with your prior fix.", calls[1]["msg_content"])
+        self.assertIn("boundary conditions, unhandled exceptions, concurrency, or test coverage.", calls[1]["msg_content"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

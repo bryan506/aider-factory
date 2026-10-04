@@ -277,34 +277,19 @@ quit(status = 0)
 
 ---
 
-## 7. The Orthogonal Equivalence Matrix & Test Suite Architecture
+## 7. Multi-Phase DAG Test Architecture & Partition Matrix
 
-### The Core Problem: The Combinatorial Explosion Trap
-In complex autonomous agent systems and multi-phase DAG pipelines, features span multiple orthogonal dimensions:
-- $N$ Execution Phases (Planning, Grounding, Implementation, Audit, Test Iteration)
-- $M$ Ingestion & Manifest Formats (YAML blocks, Markdown headers, Raw file lists, Glob patterns)
-- $D$ Deliberation Configurations (Pre-edit, Pre-test, Escalation debates, Multi-round loops)
-- $T$ Failure / Gate Outcomes (Clean exit, Soft failure, Hard failure, Recovery)
-- $K$ Target Topologies (Single-file, Symmetric multi-file, Asymmetric fan-in/fan-out)
+To verify multi-phase pipelines reliably without slow combinatorial runs, the test suite partitions the execution space across 5 structural dimensions. Each partition represents a distinct structural boundary or failure mode tested in `test_e2e_sticky_phases.py`:
 
-Attempting exhaustive combinatorial testing ($N \times M \times D \times T \times K$) leads to exponential state explosion ($O(k^n)$), slow CI runtime, and high test suite fragility without improving fault detection. Conversely, informal smoke testing leaves subtle edge cases undetected—such as when a multi-round debate skips second-round ledger persistence due to false assumptions about prior-round agreement.
+### The 5 Structural Partitions
 
-### The Methodology: Orthogonal Equivalence Partitioning
-The **Orthogonal Equivalence Matrix** reduces the testing surface from exponential combinations to linear, representative partitions:
-1. **Isolate Orthogonal Axes**: Identify independent vectors of variation across pipeline stages.
-2. **Define Equivalence Partitions**: Split each axis into mutually exclusive behavioral categories (standard path, fallback path, fault/edge boundary).
-3. **Select Boundary Representatives**: Test exactly one minimal, fully representative test case per structural boundary and failure mode.
-4. **Assert Physical Invariants**: Verify each case against deterministic OS invariants (real process exit codes, physical files written to disk, exact JSON schemas, exact CLI argument isolation) rather than non-deterministic model text.
-
-### The 5 Structural Dimensions of the Matrix
-
-| Test Dimension | Partition 1 (Primary / Fast Path) | Partition 2 (Fallback / Adaptive Path) | Partition 3 (Fault / Edge Boundary) |
+| Test Dimension | Primary Path | Fallback / Adaptive Path | Fault Boundary |
 | :--- | :--- | :--- | :--- |
-| **1. Phase Handoff** | **Code $\to$ Code**<br>Standard sequential task dependency. | **Plan $\to$ Code (`sticky_phases`)**<br>Dynamic file discovery where Phase 0 defines the targets for Phase 1. | **Grounding $\to$ Code**<br>Hybrid cross-mode barrier where Code Job 1 must wait for Grounding Finalize. |
-| **2. Plan Manifest** | **Fenced YAML Block**<br>Standard ` ```yaml files: ... ``` ` block inside the markdown spec. | **Raw Markdown Headers**<br>Fallback parsing via `### Target Files:` and bullet lists when no YAML block is present. | **Missing / Non-Existent Manifest**<br>Plan file is missing or contains no targets; pipeline traps cleanly with exit code `1`. |
-| **3. Debate Injection** | **Pre-Edit Debate (`[1, 0, 0]`)**<br>Debate runs before edits; passes `.job1_verdict.md` into Job 1 as its instruction prompt. | **Pre-Test Debate (`[0, 0, 1]`)**<br>Debate runs before Job 3; passes AST and test matrix consensus to author tests. | **Multi-Round Escalation (`rounds: 2`)**<br>Debate triggers upon test failure; re-fails; triggers Round 2 with prior ledger context. |
-| **4. Execution Outcome** | **Clean Success (`exit 0`)**<br>All tasks and gates pass on first attempt. | **Soft Failure $\to$ Debate Recovery**<br>Gated tests fail $\to$ debate generates fix $\to$ re-apply succeeds $\to$ exit `0`. | **Hard Failure $\to$ Barrier Halt**<br>A task in Phase 0 fails permanently $\to$ Phase 1 is immediately suppressed $\to$ exit `1`. |
-| **5. Target Topology** | **Single Target**<br>Direct 1:1 mapping between source file and test harness. | **Multi-Target Symmetry**<br>Index-matched test files (`a.py` $\to$ `test_a.py`, `b.py` $\to$ `test_b.py`). | **Dynamic Glob Expansion**<br>Wildcards (`src/*.py`) resolved dynamically against project filesystem without pruning. |
+| **1. Phase Handoff** | **Code $\to$ Code**<br>Standard sequential task dependency. | **Plan $\to$ Code (`sticky_phases`)**<br>Phase 0 plan dynamically defines Phase 1 targets. | **Grounding $\to$ Code**<br>Cross-mode barrier where Code Job 1 waits for Grounding Finalize. |
+| **2. Plan Manifest** | **Fenced YAML Block**<br>Standard ` ```yaml files: ... ``` ` block inside plan. | **Raw Markdown Headers**<br>Fallback parsing via `### Target Files:` and bullet lists. | **Missing Manifest**<br>Plan file is missing or has no targets; pipeline cleanly exits with code `1`. |
+| **3. Debate Injection** | **Pre-Edit Debate (`[1, 0, 0]`)**<br>Debate runs before edits; passes `.job1_verdict.md` to Job 1. | **Pre-Test Debate (`[0, 0, 1]`)**<br>Debate runs before Job 3; passes test matrix consensus to author tests. | **Multi-Round Escalation (`rounds: 2`)**<br>Debate triggers upon test failure; passes prior ledger context to Round 2. |
+| **4. Execution Outcome** | **Clean Success (`exit 0`)**<br>All tasks pass on first attempt. | **Soft Failure $\to$ Recovery**<br>Tests fail $\to$ debate generates fix $\to$ re-apply succeeds $\to$ exit `0`. | **Hard Failure $\to$ Barrier Halt**<br>Task in Phase 0 fails $\to$ Phase 1 suppressed $\to$ exit `1`. |
+| **5. Target Topology** | **Single Target**<br>1:1 mapping between source file and test harness. | **Multi-Target Symmetry**<br>Index-matched test files (`a.py` $\to$ `test_a.py`, `b.py` $\to$ `test_b.py`). | **Dynamic Glob Expansion**<br>Wildcards (`src/*.py`) resolved dynamically against filesystem. |
 
 ### Concrete Implementation Mapping (`test_e2e_sticky_phases.py`)
 

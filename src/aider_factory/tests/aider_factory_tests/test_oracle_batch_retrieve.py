@@ -146,6 +146,10 @@ def test_no_matching_prefix_returns_empty():
     assert res == "", f"Expected empty string, got: {res!r}"
     print("  [PASS] non-matching collection name returns empty (no silent failure)")
 
+def teardown_function():
+    for k in ("ORACLE_COLLECTION", "ORACLE_TYPE_FILTER", "ORACLE_RAG_DB_DIR"):
+        os.environ.pop(k, None)
+
 
 if __name__ == "__main__":
     print("Starting Oracle Batch Retrieve Tests...")
@@ -161,5 +165,6 @@ if __name__ == "__main__":
     test_wildcard_unchanged()
     setup_function()
     test_no_matching_prefix_returns_empty()
+    teardown_function()
     print("All Oracle Batch Retrieve Tests Passed!")
     shutil.rmtree(base_dir)

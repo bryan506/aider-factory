@@ -276,17 +276,12 @@ def ensure_model_settings(
             continue
 
         names = [name]
-        if "/" not in name:
-            names.append(f"openai/{name}")
-        elif name.startswith("openai/"):
-            names.append(name[7:])
-        elif "/" in name:
+        if "/" in name:
             bare = name.split("/", 1)[1]
-            names.append(bare)
-            names.append(f"openai/{bare}")
-            leaf = name.split("/")[-1]
-            if leaf not in names:
-                names.append(leaf)
+            if bare not in names:
+                names.append(bare)
+        else:
+            names.append(f"openai/{name}")
 
         for n in dict.fromkeys(names):
             existing = next((entry for entry in settings_list if entry.get("name") == n), None)

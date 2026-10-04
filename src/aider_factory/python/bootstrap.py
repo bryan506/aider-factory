@@ -9,6 +9,10 @@ import subprocess
 import uuid
 from pathlib import Path
 
+_python_dir = os.path.dirname(os.path.abspath(__file__))
+if _python_dir not in sys.path:
+    sys.path.insert(0, _python_dir)
+
 # Generate session ID once per pipeline run for KV-cache stickiness
 _PIPELINE_SESSION_ID = os.environ.get("LITELLM_SESSION_ID") or str(uuid.uuid4())
 os.environ["LITELLM_SESSION_ID"] = _PIPELINE_SESSION_ID
@@ -737,12 +741,11 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
             reply_text = "".join(full_reply)
             
         try:
-            try:
-                from aider_factory.python.cost_tracker import fmt_token_count, fmt_cost_usd
-                import aider_factory.python.cost_tracker as ct
-            except ImportError:
-                from cost_tracker import fmt_token_count, fmt_cost_usd
-                import cost_tracker as ct
+            from aider_factory.python.cost_tracker import fmt_token_count, fmt_cost_usd
+            import aider_factory.python.cost_tracker as ct
+        except ImportError:
+            from cost_tracker import fmt_token_count, fmt_cost_usd
+            import cost_tracker as ct
             
             if final_usage:
                 sent = getattr(final_usage, "prompt_tokens", 0)

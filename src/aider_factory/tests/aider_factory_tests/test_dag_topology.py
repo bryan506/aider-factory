@@ -1449,6 +1449,158 @@ def test_sticky_phases_h2_markdown_header_fallback():
             os.chdir(orig_cwd)
 
 
+def test_pre_edit_debate_multi_round_topology():
+    """Verify pre_edit_debate with rounds: 2 chains sequential debate nodes r1 -> r2 -> job1."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.makedirs(os.path.join(tmpdir, "src"), exist_ok=True)
+        open(os.path.join(tmpdir, "src", "mock.py"), "w").close()
+        open(os.path.join(tmpdir, "plan.md"), "w").close()
+
+        config = {
+            "working_directory": tmpdir,
+            "phases": [
+                {
+                    "name": "MultiRoundPreEdit",
+                    "enabled": True,
+                    "oracle": {
+                        "start_job": False,
+                        "pre_edit_debate": {
+                            "enabled": True,
+                            "insert_debate": [1, 0, 0],
+                            "loops": 2,
+                            "rounds": 2,
+                            "pass_history": True,
+                            "persist": True,
+                        },
+                    },
+                    "toggles": {
+                        "run_job_one": True,
+                        "run_job_two": False,
+                        "run_job_three": False,
+                        "iterate_test": False,
+                    },
+                    "models": {"architect_agent": "mock", "editor_agent": "mock"},
+                    "files": {"target_files": ["src/mock.py"]},
+                    "plans": {"job_one_plan": "plan.md"},
+                }
+            ],
+        }
+
+        yaml_path = os.path.join(tmpdir, "multi_round_pre.yml")
+        with open(yaml_path, "w") as f:
+            yaml.dump(config, f)
+
+        old_argv = sys.argv
+        orig_cwd = os.getcwd()
+        os.chdir(tmpdir)
+        sys.argv = ["run_workflow.py", "mock_pre_round_session", yaml_path]
+        namespace = {
+            "__name__": "__test__",
+            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
+        }
+
+        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
+            code = f.read()
+        try:
+            for k in list(sys.modules.keys()):
+                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
+                    del sys.modules[k]
+            if python_module_dir in sys.path:
+                sys.path.remove(python_module_dir)
+            sys.path.insert(0, python_module_dir)
+            exec(code, namespace)
+            tasks = namespace["factory"].tasks
+
+            # 1. Assert both rounds exist
+            assert "p0_job1_debate_mock_r1" in tasks
+            assert "p0_job1_debate_mock_r2" in tasks
+            assert "p0_job1_mock" in tasks
+
+            # 2. Assert dependency chaining
+            assert tasks["p0_job1_debate_mock_r2"].depends_on == ["p0_job1_debate_mock_r1"]
+            assert tasks["p0_job1_mock"].depends_on == ["p0_job1_debate_mock_r2"]
+
+            # 3. Assert round parameters in deliberate dict
+            d1 = tasks["p0_job1_debate_mock_r1"].deliberate
+            d2 = tasks["p0_job1_debate_mock_r2"].deliberate
+            assert d1["round_idx"] == 1
+            assert d2["round_idx"] == 2
+            assert d1["persist"] is True
+            assert d2["persist"] is True
+            assert "prior_ledger" in d2
+            assert "prior_verdict" in d2
+
+            print("  ✅ Pre-edit debate multi-round topology and chaining PASS")
+        finally:
+            sys.argv = old_argv
+            os.chdir(orig_cwd)
+
+
+def test_rag_db_and_type_filter_dag_env_propagation():
+    """Verify rag.db, rag.type_filter, and validation.claims_only propagate into task rag_env."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.makedirs(os.path.join(tmpdir, "src"), exist_ok=True)
+        open(os.path.join(tmpdir, "src", "target.py"), "w").close()
+
+        config = {
+            "working_directory": tmpdir,
+            "phases": [
+                {
+                    "name": "RAGConfigPropagation",
+                    "enabled": True,
+                    "rag": {
+                        "collection_name": "corp_docs",
+                        "db": "shared_lancedb",
+                        "type_filter": "code",
+                    },
+                    "validation": {
+                        "claims_only": True,
+                    },
+                    "toggles": {"run_job_one": True},
+                    "models": {"architect_agent": "mock", "editor_agent": "mock"},
+                    "files": {"target_files": ["src/target.py"]},
+                }
+            ],
+        }
+
+        yaml_path = os.path.join(tmpdir, "rag_env_prop.yml")
+        with open(yaml_path, "w") as f:
+            yaml.dump(config, f)
+
+        old_argv = sys.argv
+        orig_cwd = os.getcwd()
+        os.chdir(tmpdir)
+        sys.argv = ["run_workflow.py", "mock_rag_prop_session", yaml_path]
+        namespace = {
+            "__name__": "__test__",
+            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
+        }
+
+        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
+            code = f.read()
+        try:
+            for k in list(sys.modules.keys()):
+                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
+                    del sys.modules[k]
+            if python_module_dir in sys.path:
+                sys.path.remove(python_module_dir)
+            sys.path.insert(0, python_module_dir)
+            exec(code, namespace)
+            tasks = namespace["factory"].tasks
+
+            j1_task = tasks["p0_job1_target"]
+            rag_env = j1_task.rag_env
+            assert rag_env["ORACLE_TYPE_FILTER"] == "code"
+            assert rag_env["ORACLE_CLAIMS_ONLY"] == "1"
+            assert rag_env["ORACLE_RAG_DB_DIR"].replace("\\", "/").endswith("/shared_lancedb")
+            print("  ✅ RAG db, type_filter, and claims_only propagation PASS")
+        finally:
+            sys.argv = old_argv
+            os.chdir(orig_cwd)
+
+
 if __name__ == "__main__":
     print("Starting DAG Topology Tests...\n")
     test_code_mode_topology()
@@ -1471,4 +1623,6 @@ if __name__ == "__main__":
     test_glob_expansion_in_strategy_plan()
     test_sticky_phases_h2_markdown_header_fallback()
     test_asymmetric_sticky_phases_discovery()
+    test_pre_edit_debate_multi_round_topology()
+    test_rag_db_and_type_filter_dag_env_propagation()
     print("\nAll DAG Topology tests passed.")

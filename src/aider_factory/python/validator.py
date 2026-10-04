@@ -896,8 +896,8 @@ def main():
         "--region-paragraphs", dest="region_paragraphs", type=int, default=int(os.environ.get("ORACLE_REGION_PARAGRAPHS", "0"))
     )
     ap.add_argument("--top-k", dest="top_k", type=int, default=int(os.environ.get("ORACLE_TOP_K", "5")))
-    ap.add_argument("--db", default=os.environ.get("ORACLE_RAG_DB_DIR"))
-    ap.add_argument("--collection", default=os.environ.get("ORACLE_COLLECTION"))
+    ap.add_argument("--db", default=None)
+    ap.add_argument("--collection", default=None)
     # Deletion guard + B2 tags + finalize: debate ledger holding quote_baseline + state.
     ap.add_argument("--baseline-ledger", dest="baseline_ledger", default=None)
     # Deterministic terminal step: agreed-ungrounded [tag] quotes -> [unsupported].
@@ -945,8 +945,8 @@ def main():
     )
     a = ap.parse_args()
 
-    # Auto-discover collection from YAML if missing
-    if not a.collection:
+    # Auto-discover collection, DB path, and claims-only mode from YAML if missing
+    if not a.collection or not a.db or not a.claims_only:
         import yaml
         for yaml_path in [
             os.path.join(os.getcwd(), ".aider_factory", ".env.yml"),
@@ -959,12 +959,26 @@ def main():
                     phases = cfg.get("phases", [])
                     if phases:
                         active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
-                        rag_cfg = active_phase.get("rag", {})
-                        if rag_cfg and rag_cfg.get("collection_name"):
+                        rag_cfg = active_phase.get("rag", {}) or {}
+                        val_cfg = active_phase.get("validation", {}) or {}
+                        if not a.collection and rag_cfg.get("collection_name"):
                             a.collection = rag_cfg.get("collection_name")
-                            break
+                        if not a.db and rag_cfg.get("db"):
+                            custom_db = rag_cfg["db"]
+                            a.db = custom_db if os.path.isabs(custom_db) else os.path.join(os.getcwd(), custom_db)
+                        if not a.claims_only and (val_cfg.get("claims_only") or os.environ.get("ORACLE_CLAIMS_ONLY") == "1"):
+                            a.claims_only = True
+                        break
                 except Exception:
                     pass
+
+    # Fall back to environment variables if still missing
+    if not a.collection:
+        a.collection = os.environ.get("ORACLE_COLLECTION")
+    if not a.db:
+        a.db = os.environ.get("ORACLE_RAG_DB_DIR")
+    if not a.claims_only and os.environ.get("ORACLE_CLAIMS_ONLY") == "1":
+        a.claims_only = True
 
     # Auto-discover DB path if missing but collection is known
     if not a.db and a.collection:

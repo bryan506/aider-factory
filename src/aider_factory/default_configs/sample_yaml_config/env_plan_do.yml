@@ -122,6 +122,8 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
             enabled: true
             insert_debate: [0, 0, 1]              # Pre-test debate triggered before Job 3
             loops: 3                              # 3 turns to reach consensus on test matrix
+            oracle_file: ""
+            architect_file: ""
             job_debate_template: "markdown/templates/testing_debate.md"
             job_debate_collection: ""             # Bypass RAG retrieval; Oracle audits target file AST
 
@@ -150,6 +152,10 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         loops: 4
         rounds: 2
         pass_history: true
+        oracle_persona: ""
+        architect_persona: ""
+        oracle_file: ""
+        architect_file: ""
 
     files:
         target_files: []

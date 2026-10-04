@@ -62,11 +62,16 @@ def test_type_filter():
     assert "doc.md" not in res
     print("  ✅ --type code filter successfully narrows tables.")
 
+def teardown_function():
+    for k in ("ORACLE_COLLECTION", "ORACLE_TYPE_FILTER", "ORACLE_RAG_DB_DIR"):
+        os.environ.pop(k, None)
+
 if __name__ == "__main__":
     print("Starting Phase 4 RRF Retrieve Tests...")
     setup_function()
     test_fuse_all()
     setup_function()
     test_type_filter()
+    teardown_function()
     print("🎉 All Phase 4 Retrieve Tests Passed!")
     shutil.rmtree(base_dir)

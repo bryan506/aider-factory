@@ -107,6 +107,39 @@ class TestWorkflow4JobUnits(unittest.TestCase):
         self.assertEqual(c3, "coll_mocks")
         self.assertEqual(db3.replace("\\", "/"), "/tmp/lanceDB/coll_mocks/lancedb")
 
+    def test_resolve_job_debate_collection_with_db(self):
+        """T21: Validates per-job LanceDB directory resolution via job_debate_db."""
+        root = "/tmp/lanceDB"
+        proj = "/workspace/my_project"
+
+        # 1. Fallback to default_db when job_debate_db is omitted
+        c1, db1 = _resolve_job_debate_collection(
+            {}, 1, "default_coll", root, default_db="/custom/default/db", project_directory=proj
+        )
+        self.assertEqual(c1, "default_coll")
+        self.assertEqual(db1.replace("\\", "/"), "/custom/default/db")
+
+        # 2. Single string relative path resolves against project_directory
+        cfg_str = {"job_debate_collection": "coll_a", "job_debate_db": "external/db"}
+        c, db = _resolve_job_debate_collection(
+            cfg_str, 1, "default_coll", root, default_db="", project_directory=proj
+        )
+        self.assertEqual(c, "coll_a")
+        self.assertEqual(db.replace("\\", "/"), "/workspace/my_project/external/db")
+
+        # 3. 3-element list resolves heterogeneous database paths (absolute & relative)
+        cfg_list = {
+            "job_debate_collection": ["c1", "c2", "c3"],
+            "job_debate_db": ["/abs/db1", "rel/db2", ""],
+        }
+        _, d1 = _resolve_job_debate_collection(cfg_list, 1, "def", root, default_db="/fallback", project_directory=proj)
+        _, d2 = _resolve_job_debate_collection(cfg_list, 2, "def", root, default_db="/fallback", project_directory=proj)
+        _, d3 = _resolve_job_debate_collection(cfg_list, 3, "def", root, default_db="/fallback", project_directory=proj)
+
+        self.assertEqual(d1.replace("\\", "/"), "/abs/db1")
+        self.assertEqual(d2.replace("\\", "/"), "/workspace/my_project/rel/db2")
+        self.assertEqual(d3.replace("\\", "/"), "/fallback")
+
     def test_render_validate_template_non_existent(self):
         """T01: Non-existent template path returns original path without writing."""
         res = _render_validate_template("/non/existent/path.md", "strategy", "/tmp/out.md")
@@ -835,6 +868,38 @@ class TestWorkflow4JobUnits(unittest.TestCase):
 
             factory._swap_out_state("my_stem", purge_missing=True)
             self.assertFalse(vaulted_hist.exists())
+
+
+    def test_resolve_job_debate_collection_empty_string_bypass(self):
+        """Validates that explicit empty string in job_debate_collection bypasses RAG and returns empty db."""
+        root = "/tmp/lanceDB"
+        cfg = {"job_debate_collection": ""}
+        c, db = _resolve_job_debate_collection(cfg, 1, "default_coll", root)
+        self.assertEqual(c, "")
+        self.assertEqual(db, "")
+
+        cfg_list = {"job_debate_collection": ["", "coll_b", ""]}
+        c1, db1 = _resolve_job_debate_collection(cfg_list, 1, "default_coll", root)
+        c2, db2 = _resolve_job_debate_collection(cfg_list, 2, "default_coll", root)
+        self.assertEqual(c1, "")
+        self.assertEqual(db1, "")
+        self.assertEqual(c2, "coll_b")
+
+    def test_pre_edit_debate_and_escalation_isolated_file_propagation(self):
+        """Validates that oracle_file and architect_file are parsed from YAML and populated into debate configs."""
+        pre_edit_cfg = {
+            "enabled": True,
+            "oracle_file": "markdown/templates/oracle_rubric.md",
+            "architect_file": "markdown/templates/code_quality_audit.md",
+        }
+        esc_cfg = {
+            "oracle_file": "markdown/templates/oracle_rubric.md",
+            "architect_file": "markdown/templates/code_quality_audit.md",
+        }
+        self.assertEqual(pre_edit_cfg.get("oracle_file"), "markdown/templates/oracle_rubric.md")
+        self.assertEqual(pre_edit_cfg.get("architect_file"), "markdown/templates/code_quality_audit.md")
+        self.assertEqual(esc_cfg.get("oracle_file"), "markdown/templates/oracle_rubric.md")
+        self.assertEqual(esc_cfg.get("architect_file"), "markdown/templates/code_quality_audit.md")
 
 
 if __name__ == "__main__":

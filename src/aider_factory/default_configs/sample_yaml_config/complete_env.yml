@@ -45,6 +45,8 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
 
     rag:
         collection_name: "working_repo_lib" # folder name for all rag content
+        db: "" # override lanceDB dir (empty = .aider_factory/markdown/lanceDB/<collection>/lancedb)
+        type_filter: null # null (fuse code+docs), "code" (*_code tables), or "docs" (*_docs tables)
         batch: true # a table per file/directory or all in one table
         retrieval_mode: top_k # no_retrieve, top_k, or full_document
         use_docling: true # fast-path digital document extraction
@@ -77,8 +79,16 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
             enabled: false # Hold debate before making any code edits
             insert_debate: [1, 0, 0] # [--> Job1 --> Job2 --> Job3 --> Tests]
             loops: 3 # Debate turns per job (0 = lone Oracle consultation)
+            rounds: 1 # Outer debate rounds (set to 2+ to cycle personas)
+            pass_history: true # Carry debate context to next round
+            persist: false # Continue audit across layers after agreement
+            oracle_persona: "" # Markdown persona path or list of paths
+            architect_persona: "" # Markdown persona path or list of paths
+            oracle_file: "" # Oracle template/instruction path or list of paths
+            architect_file: "" # Architect template/instruction path or list of paths
             job_debate_template: "" # Paths [/job1_tmpl,/job2_tmpl,/job3_tmpl]
             job_debate_collection: "" # Paths [/coll1, /coll2, /coll3]
+            job_debate_db: "" # Paths [/db1, /db2, /db3] for external collections
 
     toggles:
         pair_programming: true # Interactive mode with terminal chat
@@ -103,6 +113,7 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
 
     validation:
         enabled: false # Enable strict quote-checking on reviews
+        claims_only: false # Verify raw paragraphs without requiring [evidence] tags
         validation_tag: "evidence" # Tag used to identify quotes
         region_threshold: 0.60 # Cosine similarity cutoff for matches
         region_margin: 2 # Extra lines of context around matches
@@ -117,6 +128,11 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         loops: 4 # Maximum debate turns per round
         rounds: 2 # Number of debate rounds to run
         pass_history: true # Carry debate context to next round
+        persist: false # Continue audit across layers after agreement
+        oracle_persona: "" # Markdown persona path or list of paths
+        architect_persona: "" # Markdown persona path or list of paths
+        oracle_file: "" # Oracle template/instruction path or list of paths
+        architect_file: "" # Architect template/instruction path or list of paths
 
     files:
         target_files: [] # allowed to edit (e.g., ["src/main.py"])

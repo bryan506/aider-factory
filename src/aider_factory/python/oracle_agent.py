@@ -61,14 +61,14 @@ SYSTEM_PROMPT = (
 )
 
 
+_python_dir = os.path.dirname(os.path.abspath(__file__))
+if _python_dir not in sys.path:
+    sys.path.insert(0, _python_dir)
+
 try:
     from aider_factory.python.env_utils import load_env_files, resolve_api_key, get_model_settings
 except ImportError:
-    try:
-        from env_utils import load_env_files, resolve_api_key, get_model_settings
-    except ImportError:
-        from env_utils import load_env_files, resolve_api_key
-        get_model_settings = lambda m, cwd=None: {}
+    from env_utils import load_env_files, resolve_api_key, get_model_settings
 
 load_env_files()
 _resolve_api_key = resolve_api_key
@@ -815,6 +815,8 @@ def _extract_overrides(argv):
         "ORACLE_WEB_WORKERS",
         "ORACLE_PERSONA_FILE",
         "ARCHITECT_PERSONA_FILE",
+        "ORACLE_FILE_PATH",
+        "ARCHITECT_FILE_PATH",
         "ORACLE_DEBATE_PERSIST",
         "ORACLE_DEBATE_NO_PASS_HISTORY",
         "ORACLE_REASONING_EFFORT",
@@ -911,6 +913,28 @@ def _extract_overrides(argv):
                 i += 2
                 continue
             print("[oracle] --architect-persona requires a file path or comma-separated list", file=sys.stderr)
+            return out, do_list, did_clear, None, None
+        if a in ("--oracle-file", "--oracle-files"):
+            if i + 1 < len(args):
+                os.environ["ORACLE_FILE_PATH"] = args[i + 1].strip()
+                i += 2
+                continue
+            print("[oracle] --oracle-file requires a file path or comma-separated list", file=sys.stderr)
+            return out, do_list, did_clear, None, None
+        if a in ("--architect-file", "--architect-files"):
+            if i + 1 < len(args):
+                os.environ["ARCHITECT_FILE_PATH"] = args[i + 1].strip()
+                i += 2
+                continue
+            print("[oracle] --architect-file requires a file path or comma-separated list", file=sys.stderr)
+            return out, do_list, did_clear, None, None
+        if a == "--file" and ("--debate" in args or bool(os.environ.get("ORACLE_DEBATE_MODE"))):
+            if i + 1 < len(args):
+                if not os.environ.get("ORACLE_FILE_PATH"):
+                    os.environ["ORACLE_FILE_PATH"] = args[i + 1].strip()
+                i += 2
+                continue
+            print("[oracle] --file requires a path", file=sys.stderr)
             return out, do_list, did_clear, None, None
         if a == "--loops":
             if i + 1 < len(args):
@@ -1788,6 +1812,10 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
 
     _reads = []
     _pass_history = True
+    raw_orc_persona = os.environ.get("ORACLE_PERSONA_FILE")
+    raw_arch_persona = os.environ.get("ARCHITECT_PERSONA_FILE")
+    raw_orc_files = os.environ.get("ORACLE_FILE_PATH")
+    raw_arch_files = os.environ.get("ARCHITECT_FILE_PATH")
     active_idx = os.environ.get("ORACLE_PHASE_INDEX")
     target_coll = os.environ.get("ORACLE_COLLECTION")
     if os.path.exists(yaml_path):
@@ -1819,10 +1847,10 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
                 # If target_files is empty, attempt sticky discovery from strategy_template.md
                 if not files.get("target_files"):
                     try:
-                        try:
-                            from run_workflow import _extract_files_from_plan, resolve_template_path
-                        except ImportError:
-                            from aider_factory.python.run_workflow import _extract_files_from_plan, resolve_template_path
+                        from run_workflow import _extract_files_from_plan, resolve_template_path
+                    except ImportError:
+                        from aider_factory.python.run_workflow import _extract_files_from_plan, resolve_template_path
+                    try:
                         plan_cand = resolve_template_path("markdown/oracle_pre_plan/strategy_template.md", project_directory=project_dir)
                         if plan_cand and os.path.isfile(plan_cand):
                             extracted = _extract_files_from_plan(plan_cand, project_dir)
@@ -1848,7 +1876,18 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
                             _reads.append(clean_p)
 
                 _ot = phase.get("escalation_debate", {}) or {}
-                _pass_history = bool(_ot.get("pass_history", True))
+                _pre = (phase.get("oracle") or {}).get("pre_edit_debate", {}) or {}
+                _pass_history = bool(_ot.get("pass_history", _pre.get("pass_history", True)))
+                if not persist:
+                    persist = bool(_ot.get("persist", False)) or bool(_pre.get("persist", False))
+                if not raw_orc_persona:
+                    raw_orc_persona = _ot.get("oracle_persona") or _pre.get("oracle_persona")
+                if not raw_arch_persona:
+                    raw_arch_persona = _ot.get("architect_persona") or _pre.get("architect_persona")
+                if not raw_orc_files:
+                    raw_orc_files = _ot.get("oracle_file") or _pre.get("oracle_file")
+                if not raw_arch_files:
+                    raw_arch_files = _ot.get("architect_file") or _pre.get("architect_file")
                 target_coll = target_coll or (phase.get("rag") or {}).get("collection_name") or ""
                 break
         except Exception:
@@ -1894,27 +1933,43 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
             base_settings_path=base_settings_path,
         )
 
-    oracle_persona_contents = []
-    raw_orc_persona = os.environ.get("ORACLE_PERSONA_FILE")
-    if raw_orc_persona:
-        for p_entry in [p.strip() for p in raw_orc_persona.split(",") if p.strip()]:
-            resolved_orc = _resolve_file_path(p_entry, project_dir)
-            if not resolved_orc or not os.path.isfile(resolved_orc):
-                print(f"[oracle] Error: Oracle persona file not found: {p_entry}", file=sys.stderr)
-                return 1
-            with open(resolved_orc, "r", encoding="utf-8", errors="replace") as f:
-                oracle_persona_contents.append(f.read().strip())
+    def _resolve_template_or_file(path_str):
+        p = _resolve_file_path(path_str, project_dir)
+        if p and os.path.isfile(p):
+            return p
+        try:
+            from run_workflow import resolve_template_path
+        except ImportError:
+            from aider_factory.python.run_workflow import resolve_template_path
+        cand = resolve_template_path(path_str, project_directory=project_dir)
+        return cand if (cand and os.path.isfile(cand)) else p
 
-    arch_persona_contents = []
-    raw_arch_persona = os.environ.get("ARCHITECT_PERSONA_FILE")
-    if raw_arch_persona:
-        for p_entry in [p.strip() for p in raw_arch_persona.split(",") if p.strip()]:
-            resolved_arch = _resolve_file_path(p_entry, project_dir)
-            if not resolved_arch or not os.path.isfile(resolved_arch):
-                print(f"[oracle] Error: Architect persona file not found: {p_entry}", file=sys.stderr)
-                return 1
-            with open(resolved_arch, "r", encoding="utf-8", errors="replace") as f:
-                arch_persona_contents.append(f.read().strip())
+    def _load_contents(raw_val, label):
+        if not raw_val:
+            return []
+        items = raw_val if isinstance(raw_val, (list, tuple)) else str(raw_val).split(",")
+        contents = []
+        for entry in [str(f).strip() for f in items if str(f).strip()]:
+            resolved = _resolve_template_or_file(entry)
+            if not resolved or not os.path.isfile(resolved):
+                print(f"[oracle] Error: {label} file not found: {entry}", file=sys.stderr)
+                return None
+            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+                contents.append(f.read().strip())
+        return contents
+
+    oracle_persona_contents = _load_contents(raw_orc_persona, "Oracle persona")
+    if oracle_persona_contents is None:
+        return 1
+    arch_persona_contents = _load_contents(raw_arch_persona, "Architect persona")
+    if arch_persona_contents is None:
+        return 1
+    oracle_file_contents = _load_contents(raw_orc_files, "Oracle instruction")
+    if oracle_file_contents is None:
+        return 1
+    arch_file_contents = _load_contents(raw_arch_files, "Architect instruction")
+    if arch_file_contents is None:
+        return 1
 
     # 3. Session state: Aider history file (architect) + persistent oracle session
     debate_aider_history = os.environ.get(
@@ -1946,10 +2001,10 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
 
     if not conventions_path:
         try:
-            try:
-                from run_workflow import resolve_template_path
-            except ImportError:
-                from aider_factory.python.run_workflow import resolve_template_path
+            from run_workflow import resolve_template_path
+        except ImportError:
+            from aider_factory.python.run_workflow import resolve_template_path
+        try:
             cand = resolve_template_path("CONVENTIONS.md", project_directory=project_dir)
             if cand and os.path.isfile(cand):
                 conventions_path = cand
@@ -2009,6 +2064,10 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
         + "\n---\n".join(oracle_persona_contents)
         + "\n---\n"
         + "\n---\n".join(arch_persona_contents)
+        + "\n---\n"
+        + "\n---\n".join(oracle_file_contents)
+        + "\n---\n"
+        + "\n---\n".join(arch_file_contents)
     )
     _files_hash = hashlib.sha256(hash_basis.encode("utf-8")).hexdigest()
 
@@ -2116,6 +2175,14 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
         # --- ORACLE TURN 0: always runs ---
         # Fresh session: full context + files + question.
         # Loaded session: just the new question (context/files are in history).
+        orc_file_snippet = ""
+        if oracle_file_contents:
+            orc_file_snippet = (
+                "<oracle_instructions>\n"
+                + oracle_file_contents[min(round_idx - 1, len(oracle_file_contents) - 1)]
+                + "\n</oracle_instructions>\n\n"
+            )
+
         if not _session_loaded:
             _file_ctx = []
             for _rf in _reads:
@@ -2131,6 +2198,8 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
             cli_file_text = ("\n\n".join(_file_ctx)) if _file_ctx else ""
 
             orc_seed = ""
+            if orc_file_snippet:
+                orc_seed += orc_file_snippet
             if cli_file_text:
                 orc_seed += f"<project_files>\n{cli_file_text}\n</project_files>\n\n"
             if context:
@@ -2138,6 +2207,8 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
             orc_seed += f"<question>\n{question}\n</question>"
         else:
             orc_seed = ""
+            if orc_file_snippet:
+                orc_seed += orc_file_snippet
             if context:
                 orc_seed += f"<knowledge_base>\n{context}\n</knowledge_base>\n\n"
             orc_seed += f"<new_question>\n{question}\n</new_question>"
@@ -2195,6 +2266,19 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
 
         provisional_agreed = False
 
+        arch_spec_snippet = ""
+        if arch_file_contents:
+            arch_spec_snippet = (
+                "INSTRUCTIONS / SPECIFICATION:\n"
+                + arch_file_contents[min(round_idx - 1, len(arch_file_contents) - 1)]
+                + "\n\n"
+            )
+
+        terminal_anchor = (
+            "Conclude your response with EXACTLY this terminal line:\n"
+            "PROPOSAL: <one-line summary of resolution>"
+        )
+
         for turn in range(max_turns):
             turn_label = f"r{round_idx} turn {turn + 1}/{max_turns}"
             turn_banner = f"[DEBATE STATUS: Turn {turn + 1} of {max_turns} (Round {round_idx} of {rounds})]\n\n"
@@ -2206,10 +2290,10 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
                     "You are the software Architect. The Oracle has provided "
                     "an initial assessment based on the knowledge base. "
                     "Review it and address the user's issue.\n\n"
+                    f"{arch_spec_snippet}"
                     f"USER ISSUE: {question}\n\n"
                     f"ORACLE ASSESSMENT:\n{last_oracle}\n\n"
-                    "End with EXACTLY one line:\n"
-                    "PROPOSAL: <one-line concrete resolution>"
+                    f"{terminal_anchor}"
                 )
             elif turn == 0:
                 # First turn of a new round: re-seed with the question + prior state
@@ -2218,10 +2302,10 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
                     "You are the software Architect. The previous debate round "
                     "ended without full resolution. Continue working on the issue "
                     "using all prior context.\n\n"
+                    f"{arch_spec_snippet}"
                     f"USER ISSUE: {question}\n\n"
                     f"LAST ORACLE RESPONSE:\n{last_oracle}\n\n"
-                    "Refine your approach. End with EXACTLY one line:\n"
-                    "PROPOSAL: <one-line concrete resolution>"
+                    f"Refine your approach. {terminal_anchor}"
                 )
             else:
                 arch_prompt = (
@@ -2229,8 +2313,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
                     "The Oracle reviewed your proposal and responded:\n\n"
                     f"{last_oracle}\n\n"
                     "Critically evaluate the Oracle's feedback. If valid, refine your fix. If incorrect, defend your logic. "
-                    "End with EXACTLY one line:\n"
-                    "PROPOSAL: <one-line concrete resolution>"
+                    f"{terminal_anchor}"
                 )
 
             if persist and provisional_agreed:
@@ -2239,9 +2322,8 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
                     "The Oracle provisionally agreed with your prior fix. "
                     "As this debate is in persistent exploration mode (--persist), rotate your focus "
                     "to the next layer of the audit: boundary conditions, unhandled exceptions, concurrency, or test coverage. "
-                    "Propose your concrete findings and fixes for the next area.\n\n"
-                    "End with EXACTLY one line:\n"
-                    "PROPOSAL: <one-line concrete resolution>"
+                    f"Propose your concrete findings and fixes for the next area.\n\n"
+                    f"{terminal_anchor}"
                 )
             arch_prompt = _format_arch_prompt(arch_prompt, round_idx)
 
@@ -2253,7 +2335,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
                 history_file=debate_aider_history,
             )
             pline = deliberate.proposal_line(arch_text) or "(no PROPOSAL line)"
-            last_proposal = pline
+            last_proposal = arch_text or pline
 
             deliberate.record_turn(
                 ledger,
@@ -2419,14 +2501,25 @@ def _ensure_oracle_config():
         if not active_phase and phases:
             active_phase = next((p for p in phases if p.get("enabled", True)), phases[0])
 
+        yaml_db = (active_phase.get("rag") or {}).get("db") or (config.get("rag") or {}).get("db")
+        if yaml_db and "ORACLE_RAG_DB_DIR" not in os.environ:
+            os.environ["ORACLE_RAG_DB_DIR"] = (
+                yaml_db if os.path.isabs(yaml_db) else os.path.join(project_dir, yaml_db)
+            )
+
+        yaml_type = (active_phase.get("rag") or {}).get("type_filter") or (config.get("rag") or {}).get("type_filter")
+        if yaml_type and "ORACLE_TYPE_FILTER" not in os.environ:
+            os.environ["ORACLE_TYPE_FILTER"] = str(yaml_type).strip().lower()
+
         if "ORACLE_COLLECTION" not in os.environ:
             yaml_coll = (active_phase.get("rag") or {}).get("collection_name") if active_phase else None
             if yaml_coll:
                 os.environ["ORACLE_COLLECTION"] = yaml_coll
-                os.environ.setdefault(
-                    "ORACLE_RAG_DB_DIR",
-                    os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB", yaml_coll, "lancedb"),
-                )
+                if not os.environ.get("ORACLE_RAG_DB_DIR"):
+                    os.environ.setdefault(
+                        "ORACLE_RAG_DB_DIR",
+                        os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB", yaml_coll, "lancedb"),
+                    )
         elif not os.environ.get("ORACLE_RAG_DB_DIR"):
             coll = os.environ.get("ORACLE_COLLECTION")
             if coll and "/" not in coll and "\\" not in coll:
@@ -2553,6 +2646,10 @@ Debate & Verification:
   --loops <N>               Max turn loops per debate round (default: 3)
   --rounds <N>              Max debate rounds (default: 1)
   --persist                 Continue exploring subsequent audit layers after provisional agreement
+  --oracle-file <path>      Inject template/instructions specifically to the Oracle in debate mode
+  --oracle-files <paths>    Comma-separated Oracle instruction files cycled across debate rounds
+  --architect-file <path>   Inject template/instructions specifically to the Architect in debate mode
+  --architect-files <paths> Comma-separated Architect instruction files cycled across debate rounds
   --oracle-persona <path>   Inject markdown persona into Oracle system prompt & critique contract
   --oracle-personas <paths> Comma-separated persona file paths cycled across debate rounds
   --architect-persona <path> Inject markdown persona into Architect ask prompt via message-file

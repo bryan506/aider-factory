@@ -9,6 +9,10 @@ import subprocess
 import sys
 import yaml
 
+_python_dir = os.path.dirname(os.path.abspath(__file__))
+if _python_dir not in sys.path:
+    sys.path.insert(0, _python_dir)
+
 try:
     from aider_factory.python.env_utils import (
         load_env_files,
@@ -20,24 +24,15 @@ try:
         kill_proc_tree,
     )
 except ImportError:
-    try:
-        from env_utils import (
-            load_env_files,
-            is_dummy_key,
-            is_local_model,
-            ensure_model_settings,
-            is_valid_endpoint,
-            is_test_path,
-            kill_proc_tree,
-        )
-    except ImportError:
-        load_env_files = None
-        is_dummy_key = lambda k: not k
-        is_local_model = lambda m: True
-        ensure_model_settings = lambda p, m, b=None: p
-        is_valid_endpoint = lambda u: bool(u and u.startswith(("http://", "https://")))
-        is_test_path = lambda p: any(x in (p or "").lower() for x in ("test", "spec"))
-        kill_proc_tree = lambda p: getattr(p, "kill", lambda: None)()
+    from env_utils import (
+        load_env_files,
+        is_dummy_key,
+        is_local_model,
+        ensure_model_settings,
+        is_valid_endpoint,
+        is_test_path,
+        kill_proc_tree,
+    )
 
 if load_env_files:
     load_env_files()
@@ -458,56 +453,63 @@ def run_apply(
         except (ValueError, TypeError):
             timeout_secs = 300.0
 
-        timed_out = threading.Event()
-        def _on_timeout():
-            timed_out.set()
-            kill_proc_tree(proc)
-
-        watchdog = threading.Timer(timeout_secs, _on_timeout)
-        watchdog.daemon = True
-        watchdog.start()
+        timed_out = False
         try:
             if stream:
-                try:
-                    if proc.stdin:
-                        proc.stdin.write("n\n" * 50)
-                        proc.stdin.flush()
-                        proc.stdin.close()
-                except Exception:
-                    pass
+                stream_timed_out = threading.Event()
+                def _on_timeout():
+                    stream_timed_out.set()
+                    kill_proc_tree(proc)
 
-                tty_fh = None
+                watchdog = threading.Timer(timeout_secs, _on_timeout)
+                watchdog.daemon = True
+                watchdog.start()
                 try:
-                    tty_path = "CONOUT$" if sys.platform == "win32" else "/dev/tty"
-                    tty_fh = open(tty_path, "w", encoding="utf-8", errors="replace")
-                except OSError:
-                    pass
+                    try:
+                        if proc.stdin:
+                            proc.stdin.write("n\n" * 50)
+                            proc.stdin.flush()
+                            proc.stdin.close()
+                    except Exception:
+                        pass
 
-                try:
-                    if proc.stdout:
-                        while True:
+                    tty_fh = None
+                    try:
+                        tty_path = "CONOUT$" if sys.platform == "win32" else "/dev/tty"
+                        tty_fh = open(tty_path, "w", encoding="utf-8", errors="replace")
+                    except OSError:
+                        pass
+
+                    try:
+                        if proc.stdout:
+                            while True:
+                                try:
+                                    line = proc.stdout.readline()
+                                except (ValueError, OSError):
+                                    break
+                                if not line and proc.poll() is not None:
+                                    break
+                                if line and tty_fh:
+                                    tty_fh.write(line)
+                                    tty_fh.flush()
                             try:
-                                line = proc.stdout.readline()
-                            except (ValueError, OSError):
-                                break
-                            if not line and proc.poll() is not None:
-                                break
-                            if line and tty_fh:
-                                tty_fh.write(line)
-                                tty_fh.flush()
-                        try:
-                            proc.stdout.close()
-                        except Exception:
-                            pass
-                    proc.wait()
+                                proc.stdout.close()
+                            except Exception:
+                                pass
+                        proc.wait()
+                    finally:
+                        if tty_fh:
+                            tty_fh.close()
                 finally:
-                    if tty_fh:
-                        tty_fh.close()
+                    watchdog.cancel()
+
+                if stream_timed_out.is_set():
+                    timed_out = True
             else:
                 try:
                     proc.communicate(input="n\n" * 50, timeout=timeout_secs)
                 except subprocess.TimeoutExpired:
-                    timed_out.set()
+                    timed_out = True
                     kill_proc_tree(proc)
                 except Exception as e:
                     print(f"❌ Error: Aider apply execution failed with unexpected exception: {e}", file=sys.stderr)
@@ -516,10 +518,8 @@ def run_apply(
         except KeyboardInterrupt:
             kill_proc_tree(proc)
             raise
-        finally:
-            watchdog.cancel()
 
-        if timed_out.is_set():
+        if timed_out:
             print(f"❌ Error: Aider apply execution timed out after {timeout_secs}s. Terminating process tree.", file=sys.stderr)
             return False
 

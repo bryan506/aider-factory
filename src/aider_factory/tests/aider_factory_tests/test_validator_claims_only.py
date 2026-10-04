@@ -140,6 +140,44 @@ class TestValidatorClaimsOnly(unittest.TestCase):
         kwargs = mock_completion.call_args[1]
         self.assertNotEqual(kwargs.get("api_key"), "sk-dummy", "Dummy grounding key 'sk-dummy' must not be forwarded to cloud models!")
 
+    @patch("validator._run_claims_only")
+    def test_validator_yaml_auto_discovery(self, mock_run_claims):
+        """Verify validator.main auto-discovers claims_only: true and custom db from .env.yml."""
+        import yaml
+        mock_run_claims.return_value = 0
+
+        cfg = {
+            "phases": [
+                {
+                    "enabled": True,
+                    "rag": {
+                        "collection_name": "auto_collection",
+                        "db": "custom_rag_db",
+                    },
+                    "validation": {
+                        "claims_only": True,
+                    },
+                }
+            ]
+        }
+        env_yml_path = os.path.join(self.temp_dir, ".env.yml")
+        with open(env_yml_path, "w", encoding="utf-8") as f:
+            yaml.dump(cfg, f)
+
+        orig_cwd = os.getcwd()
+        os.chdir(self.temp_dir)
+        try:
+            with patch("sys.argv", ["validator.py", "--file", self.file_path, "--no-print"]):
+                validator.main()
+
+            mock_run_claims.assert_called_once()
+            args = mock_run_claims.call_args[0][0]
+            self.assertTrue(args.claims_only, "claims_only should be True when configured in YAML")
+            self.assertEqual(args.collection, "auto_collection")
+            self.assertTrue(args.db.replace("\\", "/").endswith("/custom_rag_db"))
+        finally:
+            os.chdir(orig_cwd)
+
 
 if __name__ == "__main__":
     unittest.main()

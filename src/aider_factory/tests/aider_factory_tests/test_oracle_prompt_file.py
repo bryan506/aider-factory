@@ -199,4 +199,17 @@ if __name__ == "__main__":
     test_context_on_all_turns()
     test_orchestrate_uses_file_arg()
     test_positional_args_still_work()
+
+    # ---- Test 9: debate mode --file interception ----
+    print("test_debate_mode_file_interception...")
+    from oracle_agent import _extract_overrides
+    args = ["--file", "template.txt", "--debate", "code", "Test message"]
+    rem_args, _, _, _, _ = _extract_overrides(args)
+    assert "--file" not in rem_args
+    assert rem_args == ["Test message"]
+    q, d = _build_question(rem_args)
+    assert q == "Test message"
+    assert "template.txt" not in q
+    print("  OK: debate mode intercepts --file and protects question from bleed")
+
     print("\nAll oracle prompt-file tests passed.")

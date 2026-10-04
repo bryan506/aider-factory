@@ -665,6 +665,15 @@ class AiderFactory:
             else:
                 cmd_base = ["aider-oracle"]
         env = {**os.environ, **(task.rag_env or {})}
+        if task.editor_model and "ORACLE_AGENT_MODEL" not in env:
+            env["ORACLE_AGENT_MODEL"] = task.editor_model
+        if task.editor_api_base and "ORACLE_AGENT_API_BASE" not in env:
+            env["ORACLE_AGENT_API_BASE"] = task.editor_api_base
+        if task.model and "ORACLE_ARCHITECT_MODEL" not in env:
+            env["ORACLE_ARCHITECT_MODEL"] = task.model
+        if task.architect_api_base and "ORACLE_ARCHITECT_API_BASE" not in env:
+            env["ORACLE_ARCHITECT_API_BASE"] = task.architect_api_base
+
         # Route the oracle to a debate-specific session file (survives apply-phase cleanup).
         _sf = d.get("oracle_session_file")
         if _sf:
@@ -675,6 +684,18 @@ class AiderFactory:
 
         # The oracle's judging role differs by debate mode: grounding cites verbatim source
         # for quotes; code cites reference code/patterns for a fix. Both end with a VERDICT line.
+        custom_persona = d.get("custom_persona_prompt")
+        terminal_contract = (
+            "\n\n<evaluation_contract>\n"
+            "Critically evaluate the Architect's proposal in accordance with your persona guidelines. "
+            "Structure your response exactly as follows:\n"
+            "<critique>\n"
+            "[Step-by-step analysis of edge cases, logic flaws, and RAG grounding]\n"
+            "</critique>\n"
+            "VERDICT: [AGREE | REVISE | OBJECT - <reason>]\n"
+            "</evaluation_contract>"
+        )
+
         if pre_assess_prompt:
             prompt = pre_assess_prompt
             # Code mode: append the full file contents to the pre-assessment
@@ -700,6 +721,8 @@ class AiderFactory:
                         + "\n\n".join(_files)
                         + "\n</project_files>"
                     )
+            if custom_persona:
+                prompt = f"## Custom Persona Directives\n{custom_persona}\n\n{prompt}"
         elif d.get("mode") == "code":
             # Build code context block: failure log + full file contents.
             _ctx = []
@@ -732,20 +755,26 @@ class AiderFactory:
                     )
             _ctx_block = ("\n\n" + "\n\n".join(_ctx)) if _ctx else ""
 
-            prompt = (
+            base_prompt = (
                 "You are the Knowledge Oracle advising the Architect agent. "
                 "Judge the Architect's PROPOSAL against the provided context "
                 "and files below. Cite exact evidence (file + snippet) that "
                 "supports or refutes the proposal; do not endorse APIs or "
                 "patterns absent from the provided code or references. "
-                "End with EXACTLY one line: 'VERDICT: AGREE' if the proposal "
-                "is sound and grounded, or 'VERDICT: OBJECT - <specific reason>' "
-                "if not."
-                + _ctx_block
-                + "\n\n<architect_proposal>\n"
-                + (arch_text or "")
-                + "\n</architect_proposal>"
             )
+            if custom_persona:
+                prompt = f"## Custom Persona Directives\n{custom_persona}\n\n{base_prompt}{_ctx_block}\n\n<architect_proposal>\n{(arch_text or '')}\n</architect_proposal>{terminal_contract}"
+            else:
+                prompt = (
+                    base_prompt
+                    + "End with EXACTLY one line: 'VERDICT: AGREE' if the proposal "
+                    "is sound and grounded, or 'VERDICT: OBJECT - <specific reason>' "
+                    "if not."
+                    + _ctx_block
+                    + "\n\n<architect_proposal>\n"
+                    + (arch_text or "")
+                    + "\n</architect_proposal>"
+                )
         else:
             _file_ctx = []
             if not turn:
@@ -771,18 +800,24 @@ class AiderFactory:
                 else ""
             )
 
-            prompt = (
+            base_prompt = (
                 "You are the Knowledge Oracle reviewing the Architect's analysis "
                 "and PROPOSAL below. Judge it against the knowledge base and "
                 "provided context. Cite exact evidence from the source material "
                 "to support or refute the proposal. "
-                "End with EXACTLY one line: 'VERDICT: AGREE' if you concur, "
-                "or 'VERDICT: OBJECT - <specific reason>' if not."
-                + _file_block
-                + "\n\n<architect_proposal>\n"
-                + (arch_text or "")
-                + "\n</architect_proposal>"
             )
+            if custom_persona:
+                prompt = f"## Custom Persona Directives\n{custom_persona}\n\n{base_prompt}{_file_block}\n\n<architect_proposal>\n{(arch_text or '')}\n</architect_proposal>{terminal_contract}"
+            else:
+                prompt = (
+                    base_prompt
+                    + "End with EXACTLY one line: 'VERDICT: AGREE' if you concur, "
+                    "or 'VERDICT: OBJECT - <specific reason>' if not."
+                    + _file_block
+                    + "\n\n<architect_proposal>\n"
+                    + (arch_text or "")
+                    + "\n</architect_proposal>"
+                )
 
         # Write prompt to a temp file instead of passing as a CLI arg to avoid
         # E2BIG (Argument list too long) when code files are large.
@@ -866,6 +901,14 @@ class AiderFactory:
             for k in ("ORACLE_AGENT_MODEL", "ORACLE_REASONING_EFFORT", "ORACLE_TEMPERATURE"):
                 if k in task.rag_env:
                     os.environ[k] = str(task.rag_env[k])
+        if task.editor_model and "ORACLE_AGENT_MODEL" not in os.environ:
+            os.environ["ORACLE_AGENT_MODEL"] = task.editor_model
+        if task.editor_api_base and "ORACLE_AGENT_API_BASE" not in os.environ:
+            os.environ["ORACLE_AGENT_API_BASE"] = task.editor_api_base
+        if task.model and "ORACLE_ARCHITECT_MODEL" not in os.environ:
+            os.environ["ORACLE_ARCHITECT_MODEL"] = task.model
+        if task.architect_api_base and "ORACLE_ARCHITECT_API_BASE" not in os.environ:
+            os.environ["ORACLE_ARCHITECT_API_BASE"] = task.architect_api_base
 
         template, issue = d.get("template"), d.get("issue")
         verdict_path, ledger_path = d.get("verdict"), d.get("ledger")
@@ -1071,15 +1114,62 @@ class AiderFactory:
                         except OSError:
                             pass
 
+        persist = bool(d.get("persist", False))
+        provisional_agreed = False
+        round_idx = int(d.get("round_idx", 1))
+
+        def _resolve_persona_files(raw_val) -> list[str]:
+            if not raw_val:
+                return []
+            items = raw_val if isinstance(raw_val, (list, tuple)) else [p.strip() for p in str(raw_val).split(",") if p.strip()]
+            try:
+                from run_workflow import resolve_template_path
+            except ImportError:
+                from aider_factory.python.run_workflow import resolve_template_path
+            contents = []
+            for item in items:
+                cand = resolve_template_path(item, project_directory=str(self.project_dir))
+                if cand and os.path.isfile(cand):
+                    try:
+                        with open(cand, "r", encoding="utf-8", errors="replace") as pf:
+                            contents.append(pf.read().strip())
+                    except Exception:
+                        pass
+            return contents
+
+        oracle_persona_contents = _resolve_persona_files(d.get("oracle_persona"))
+        arch_persona_contents = _resolve_persona_files(d.get("architect_persona"))
+        oracle_file_contents = _resolve_persona_files(d.get("oracle_file"))
+        arch_file_contents = _resolve_persona_files(d.get("architect_file"))
+
+        if oracle_persona_contents:
+            p_text = oracle_persona_contents[min(round_idx - 1, len(oracle_persona_contents) - 1)]
+            d["custom_persona_prompt"] = p_text
+
+        def _format_arch_prompt(prompt_text: str) -> str:
+            if arch_persona_contents:
+                p_text = arch_persona_contents[min(round_idx - 1, len(arch_persona_contents) - 1)]
+                return f"## Architect Persona Directives\n{p_text}\n\n{prompt_text}"
+            return prompt_text
+
         log.info(f"🗣️  DELIBERATION [{task.id}] -> up to {max_turns} turn(s)")
         _reads = d.get("read_files") or ([issue] if issue else [])
 
         # --- Oracle turn 0: pre-assessment before the architect speaks ---
+        orc_file_snippet = ""
+        if oracle_file_contents:
+            orc_file_snippet = (
+                "<oracle_instructions>\n"
+                + oracle_file_contents[min(round_idx - 1, len(oracle_file_contents) - 1)]
+                + "\n</oracle_instructions>\n\n"
+            )
+
         _orc0_prompt = (
             "You are the Knowledge Oracle. Assess the following using the "
             "provided context, evidence, and any retrieved reference material. "
-            "Provide your expert analysis before the Architect responds."
-            "\n\n" + seed
+            "Provide your expert analysis before the Architect responds.\n\n"
+            + orc_file_snippet
+            + seed
         )
         last_oracle = self._oracle_turn(
             task,
@@ -1094,24 +1184,46 @@ class AiderFactory:
             f"\n## Turn 0 — Oracle (pre-assessment)\n\n{(last_oracle or '').strip()}\n"
         )
 
+        arch_spec_snippet = ""
+        if arch_file_contents:
+            arch_spec_snippet = (
+                "INSTRUCTIONS / SPECIFICATION:\n"
+                + arch_file_contents[min(round_idx - 1, len(arch_file_contents) - 1)]
+                + "\n\n"
+            )
+
+        terminal_anchor = (
+            "Conclude your response with EXACTLY this terminal line:\n"
+            "PROPOSAL: <one-line summary of resolution>"
+        )
+
         for turn in range(max_turns):
             if turn == 0:
                 arch_msg = (
                     seed + f"\n\n## Oracle Pre-Assessment\n{last_oracle}\n\n"
                     "Address the issue above. The Oracle has provided an initial "
-                    "assessment — build on it or counter it with evidence. "
-                    "End with EXACTLY one line:\n"
-                    "PROPOSAL: <one-line concrete resolution>"
+                    "assessment — build on it or counter it with evidence.\n\n"
+                    f"{arch_spec_snippet}"
+                    f"{terminal_anchor}"
+                )
+            elif persist and provisional_agreed:
+                arch_msg = (
+                    "The Oracle provisionally agreed with your prior fix. "
+                    "As this debate is in persistent exploration mode (persist: true), rotate your focus "
+                    "to the next layer of the audit: boundary conditions, unhandled exceptions, concurrency, or test coverage. "
+                    "Propose your concrete findings and fixes for the next area.\n\n"
+                    f"{terminal_anchor}"
                 )
             else:
                 # Delta-only prompts: we only pass objections and metadata!
                 arch_msg = (
                     f"The Oracle reviewed your proposal and responded:\n\n"
                     f"{last_oracle}\n\n"
-                    f"Please address the Oracle's objections and refine your proposal. "
-                    f"End with EXACTLY one line:\n"
-                    f"PROPOSAL: <one-line concrete resolution>"
+                    "Please address the Oracle's objections and refine your proposal. "
+                    f"{terminal_anchor}"
                 )
+
+            arch_msg = _format_arch_prompt(arch_msg)
 
             # Send prompt using our robust, non-interactive Ask turn with history restoration
             arch_text = self._aider_ask_turn(
@@ -1158,7 +1270,13 @@ class AiderFactory:
             state = deliberate.consensus_state(ledger)
             log.info(f"   turn {turn + 1}/{max_turns}: {state}")
             if state != "continue":
-                break
+                if persist and state == "agreed" and (turn + 1 < max_turns):
+                    state = "continue"
+                    provisional_agreed = True
+                else:
+                    break
+            elif persist and verdict in ("object", "revise"):
+                provisional_agreed = False
 
         if state == "continue":
             state = "exhausted"

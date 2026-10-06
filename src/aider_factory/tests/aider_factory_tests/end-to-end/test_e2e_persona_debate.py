@@ -98,6 +98,7 @@ class TestE2EPersonaDebate(unittest.TestCase):
 
     def setUp(self):
         MockDebateHTTPServer.requests_log.clear()
+        MockDebateHTTPServer.response_verdicts.clear()
         MockDebateHTTPServer.response_verdict = "VERDICT: AGREE"
         self.test_dir = tempfile.mkdtemp()
         self.old_cwd = os.getcwd()
@@ -110,6 +111,7 @@ class TestE2EPersonaDebate(unittest.TestCase):
         self.bin_dir = os.path.join(self.test_dir, "bin")
         os.makedirs(self.bin_dir, exist_ok=True)
         self.log_file = os.path.join(self.test_dir, "aider_calls.log")
+        clean_log = self.log_file.replace("\\", "/")
 
         fake_aider = os.path.join(self.bin_dir, "aider")
         if sys.platform == "win32":
@@ -121,16 +123,18 @@ class TestE2EPersonaDebate(unittest.TestCase):
                         if a == "--message-file" and idx + 1 < len(sys.argv):
                             msg_file = sys.argv[idx + 1]
                     msg_content = ""
-                    if msg_file and os.path.isfile(msg_file):
-                        with open(msg_file, "r", encoding="utf-8") as mf:
-                            msg_content = mf.read()
-                    with open(r"{self.log_file}", "a", encoding="utf-8") as lf:
+                    if msg_file:
+                        msg_file = msg_file.strip().strip('"').strip("'")
+                        if os.path.isfile(msg_file):
+                            with open(msg_file, "r", encoding="utf-8") as mf:
+                                msg_content = mf.read()
+                    with open("{clean_log}", "a", encoding="utf-8") as lf:
                         lf.write(json.dumps({{"argv": sys.argv[1:], "msg_content": msg_content}}) + "\\n")
                     print("PROPOSAL: Concrete architect resolution.")
                     sys.exit(0)
                 """))
             with open(fake_aider + ".cmd", "w", encoding="utf-8") as f:
-                f.write(f'@"{sys.executable}" "%~dp0aider.py" %*\\n')
+                f.write(f'@"{sys.executable}" "%~dp0aider.py" %*\n@exit /b %errorlevel%\n')
         else:
             with open(fake_aider, "w", encoding="utf-8") as f:
                 f.write(textwrap.dedent(f"""\
@@ -170,6 +174,8 @@ class TestE2EPersonaDebate(unittest.TestCase):
         env["ORACLE_AGENT_MODEL"] = "openai/mock-oracle"
         env["ORACLE_ARCHITECT_API_BASE"] = self.api_url
         env["ORACLE_ARCHITECT_MODEL"] = "openai/mock-architect"
+        env["ORACLE_RETRIEVE_MODE"] = "no_retrieve"
+        env["ORACLE_NO_RAG_INGEST"] = "1"
         env["OPENAI_API_KEY"] = "sk-dummy"
         if extra_env:
             env.update(extra_env)
@@ -280,7 +286,7 @@ class TestE2EPersonaDebate(unittest.TestCase):
         with open(orc_persona, "w", encoding="utf-8") as f:
             f.write("Persona V2 - Updated strictly")
 
-        cmd[7] = "Query 2"
+        cmd[-1] = "Query 2"
         res2 = subprocess.run(cmd, cwd=self.test_dir, env=self._get_subprocess_env(), capture_output=True, text=True)
         self.assertEqual(res2.returncode, 0)
 

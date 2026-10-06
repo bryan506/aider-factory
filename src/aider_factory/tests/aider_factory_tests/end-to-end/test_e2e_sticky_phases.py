@@ -85,6 +85,7 @@ class TestE2EStickyPhases(unittest.TestCase):
         self.bin_dir = os.path.join(self.test_dir, "bin")
         os.makedirs(self.bin_dir, exist_ok=True)
         self.log_file = os.path.join(self.test_dir, "aider_invocations.log")
+        clean_log = self.log_file.replace("\\", "/")
 
         fake_aider_path = os.path.join(self.bin_dir, "aider")
         if sys.platform == "win32":
@@ -92,14 +93,14 @@ class TestE2EStickyPhases(unittest.TestCase):
             with open(fake_py, "w", encoding="utf-8") as f:
                 f.write(textwrap.dedent(f"""\
                     import sys, os, json
-                    with open(r"{self.log_file}", "a", encoding="utf-8") as log:
+                    with open("{clean_log}", "a", encoding="utf-8") as log:
                         log.write("AIDER_CALL: " + json.dumps({{"argv": sys.argv[1:]}}) + "\\n")
                     if os.environ.get("FAKE_AIDER_MUTATE_PLAN") and any("strategy_template.md" in a for a in sys.argv):
                         for a in sys.argv:
                             if "strategy_template.md" in a and os.path.isfile(a):
                                 with open(a, "w", encoding="utf-8") as pf:
                                     pf.write("# Mutated Plan\\n## Scope Analysis\\n```yaml\\nfiles:\\n  target_files:\\n    - \\"src/mutated_calc.py\\"\\n  extra_editable_files: []\\n  test_files:\\n    - \\"tests/test_mutated_calc.py\\"\\n  context_files_job:\\n    - \\"docs/mutated_spec.md\\"\\n  context_files_test: []\\n```\\n")
-                    if "--message" in sys.argv:
+                    if "--message" in sys.argv or "--message-file" in sys.argv:
                         print("PROPOSAL: Validated plan proposal.\\nVERDICT: AGREE")
                     fail_pat = os.environ.get("FAKE_AIDER_FAIL_PATTERN")
                     if fail_pat and fail_pat in " ".join(sys.argv):
@@ -108,18 +109,18 @@ class TestE2EStickyPhases(unittest.TestCase):
                 """))
             fake_cmd = fake_aider_path + ".cmd"
             with open(fake_cmd, "w", encoding="utf-8") as f:
-                f.write(f'@"{sys.executable}" "%~dp0aider.py" %*\n')
+                f.write(f'@"{sys.executable}" "%~dp0aider.py" %*\n@exit /b %errorlevel%\n')
         else:
             fake_script = f"""#!{sys.executable}
 import sys, os, json
-with open(r"{self.log_file}", "a", encoding="utf-8") as log:
+with open("{clean_log}", "a", encoding="utf-8") as log:
     log.write("AIDER_CALL: " + json.dumps({{"argv": sys.argv[1:]}}) + "\\n")
 if os.environ.get("FAKE_AIDER_MUTATE_PLAN") and any("strategy_template.md" in a for a in sys.argv):
     for a in sys.argv:
         if "strategy_template.md" in a and os.path.isfile(a):
             with open(a, "w", encoding="utf-8") as pf:
                 pf.write("# Mutated Plan\\n## Scope Analysis\\n```yaml\\nfiles:\\n  target_files:\\n    - \\"src/mutated_calc.py\\"\\n  extra_editable_files: []\\n  test_files:\\n    - \\"tests/test_mutated_calc.py\\"\\n  context_files_job:\\n    - \\"docs/mutated_spec.md\\"\\n  context_files_test: []\\n```\\n")
-if "--message" in sys.argv:
+if "--message" in sys.argv or "--message-file" in sys.argv:
     print("PROPOSAL: Validated plan proposal.\\nVERDICT: AGREE")
 fail_pat = os.environ.get("FAKE_AIDER_FAIL_PATTERN")
 if fail_pat and fail_pat in " ".join(sys.argv):
@@ -956,11 +957,12 @@ files:
 
         server, mock_url = self._start_mock_server()
         try:
+            py_exec = sys.executable.replace("\\", "/")
             config = {
                 "name": "Escalation Recovery Test",
                 "working_directory": self.test_dir,
                 "test_command_prefix": "",
-                "test_runner": f'"{sys.executable}" {{file}}',
+                "test_runner": f'"{py_exec}" {{file}}',
                 "test_naming_and_path": "tests/test_esc_calc.py",
                 "endpoints": {
                     "architect_api_base": mock_url,
@@ -1046,11 +1048,12 @@ files:
 
         server, mock_url = self._start_mock_server()
         try:
+            py_exec = sys.executable.replace("\\", "/")
             config = {
                 "name": "Hybrid Grounding Barrier Test",
                 "working_directory": self.test_dir,
                 "test_command_prefix": "",
-                "test_runner": f'"{sys.executable}" -c "import sys; sys.exit(0)"',
+                "test_runner": f'"{py_exec}" -c "import sys; sys.exit(0)"',
                 "endpoints": {
                     "architect_api_base": mock_url,
                     "rag_agent_api": mock_url,

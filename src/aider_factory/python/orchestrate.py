@@ -1874,6 +1874,8 @@ class AiderFactory:
                         f"All files passed via --read are IMMUTABLE context.\n\n"
                         f"Please execute the instructions found in {task.message_file}."
                     )
+                    if sys.platform == "win32":
+                        msg = msg.replace("\r\n", " ").replace("\n", " ")
                     cmd.extend(
                         [
                             "--message",

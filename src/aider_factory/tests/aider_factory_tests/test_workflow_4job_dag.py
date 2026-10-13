@@ -82,30 +82,35 @@ class TestWorkflow4JobUnits(unittest.TestCase):
         root = "/tmp/lanceDB"
 
         # 1. Default fallback when omitted
-        c1, db1 = _resolve_job_debate_collection({}, 1, "default_coll", root)
+        c1, db1, mode1 = _resolve_job_debate_collection({}, 1, "default_coll", root)
         self.assertEqual(c1, "default_coll")
         self.assertEqual(db1, "/tmp/lanceDB/default_coll/lancedb")
+        self.assertEqual(mode1, "top_k")
 
         # 2. Single string applies to all jobs
         cfg_str = {"job_debate_collection": "shared_coll"}
-        c, db = _resolve_job_debate_collection(cfg_str, 2, "default_coll", root)
+        c, db, mode = _resolve_job_debate_collection(cfg_str, 2, "default_coll", root)
         self.assertEqual(c, "shared_coll")
         self.assertEqual(db, "/tmp/lanceDB/shared_coll/lancedb")
+        self.assertEqual(mode, "top_k")
 
         # 3. 3-element list resolves heterogeneous collections
         cfg_list = {
             "job_debate_collection": ["coll_exchange", "coll_risk_math", "coll_mocks"]
         }
-        c1, db1 = _resolve_job_debate_collection(cfg_list, 1, "default_coll", root)
-        c2, db2 = _resolve_job_debate_collection(cfg_list, 2, "default_coll", root)
-        c3, db3 = _resolve_job_debate_collection(cfg_list, 3, "default_coll", root)
+        c1, db1, m1 = _resolve_job_debate_collection(cfg_list, 1, "default_coll", root)
+        c2, db2, m2 = _resolve_job_debate_collection(cfg_list, 2, "default_coll", root)
+        c3, db3, m3 = _resolve_job_debate_collection(cfg_list, 3, "default_coll", root)
 
         self.assertEqual(c1, "coll_exchange")
         self.assertEqual(db1.replace("\\", "/"), "/tmp/lanceDB/coll_exchange/lancedb")
+        self.assertEqual(m1, "top_k")
         self.assertEqual(c2, "coll_risk_math")
         self.assertEqual(db2.replace("\\", "/"), "/tmp/lanceDB/coll_risk_math/lancedb")
+        self.assertEqual(m2, "top_k")
         self.assertEqual(c3, "coll_mocks")
         self.assertEqual(db3.replace("\\", "/"), "/tmp/lanceDB/coll_mocks/lancedb")
+        self.assertEqual(m3, "top_k")
 
     def test_resolve_job_debate_collection_with_db(self):
         """T21: Validates per-job LanceDB directory resolution via job_debate_db."""
@@ -113,7 +118,7 @@ class TestWorkflow4JobUnits(unittest.TestCase):
         proj = "/workspace/my_project"
 
         # 1. Fallback to default_db when job_debate_db is omitted
-        c1, db1 = _resolve_job_debate_collection(
+        c1, db1, _ = _resolve_job_debate_collection(
             {}, 1, "default_coll", root, default_db="/custom/default/db", project_directory=proj
         )
         self.assertEqual(c1, "default_coll")
@@ -121,7 +126,7 @@ class TestWorkflow4JobUnits(unittest.TestCase):
 
         # 2. Single string relative path resolves against project_directory
         cfg_str = {"job_debate_collection": "coll_a", "job_debate_db": "external/db"}
-        c, db = _resolve_job_debate_collection(
+        c, db, _ = _resolve_job_debate_collection(
             cfg_str, 1, "default_coll", root, default_db="", project_directory=proj
         )
         self.assertEqual(c, "coll_a")
@@ -132,9 +137,9 @@ class TestWorkflow4JobUnits(unittest.TestCase):
             "job_debate_collection": ["c1", "c2", "c3"],
             "job_debate_db": ["/abs/db1", "rel/db2", ""],
         }
-        _, d1 = _resolve_job_debate_collection(cfg_list, 1, "def", root, default_db="/fallback", project_directory=proj)
-        _, d2 = _resolve_job_debate_collection(cfg_list, 2, "def", root, default_db="/fallback", project_directory=proj)
-        _, d3 = _resolve_job_debate_collection(cfg_list, 3, "def", root, default_db="/fallback", project_directory=proj)
+        _, d1, _ = _resolve_job_debate_collection(cfg_list, 1, "def", root, default_db="/fallback", project_directory=proj)
+        _, d2, _ = _resolve_job_debate_collection(cfg_list, 2, "def", root, default_db="/fallback", project_directory=proj)
+        _, d3, _ = _resolve_job_debate_collection(cfg_list, 3, "def", root, default_db="/fallback", project_directory=proj)
 
         self.assertEqual(d1.replace("\\", "/"), "/abs/db1")
         self.assertEqual(d2.replace("\\", "/"), "/workspace/my_project/rel/db2")
@@ -871,19 +876,220 @@ class TestWorkflow4JobUnits(unittest.TestCase):
 
 
     def test_resolve_job_debate_collection_empty_string_bypass(self):
-        """Validates that explicit empty string in job_debate_collection bypasses RAG and returns empty db."""
+        """Validates that explicit empty string in job_debate_collection bypasses RAG and returns empty db with no_retrieve."""
         root = "/tmp/lanceDB"
         cfg = {"job_debate_collection": ""}
-        c, db = _resolve_job_debate_collection(cfg, 1, "default_coll", root)
+        c, db, mode = _resolve_job_debate_collection(cfg, 1, "default_coll", root)
         self.assertEqual(c, "")
         self.assertEqual(db, "")
+        self.assertEqual(mode, "no_retrieve")
 
         cfg_list = {"job_debate_collection": ["", "coll_b", ""]}
-        c1, db1 = _resolve_job_debate_collection(cfg_list, 1, "default_coll", root)
-        c2, db2 = _resolve_job_debate_collection(cfg_list, 2, "default_coll", root)
+        c1, db1, mode1 = _resolve_job_debate_collection(cfg_list, 1, "default_coll", root)
+        c2, db2, mode2 = _resolve_job_debate_collection(cfg_list, 2, "default_coll", root)
         self.assertEqual(c1, "")
         self.assertEqual(db1, "")
+        self.assertEqual(mode1, "no_retrieve")
         self.assertEqual(c2, "coll_b")
+        self.assertEqual(mode2, "top_k")
+
+    def test_resolve_job_debate_collection_flow_sublists(self):
+        """Validates _resolve_job_debate_collection parses flow sequences and handles no_retrieve per round."""
+        root = "/tmp/lanceDB"
+        cfg = {
+            "job_debate_collection": [
+                "",
+                ["api_specs", ""],
+                "tests_lib",
+            ]
+        }
+        # Job 1 Round 1 -> no_retrieve
+        coll1, db1, mode1 = _resolve_job_debate_collection(cfg, job_num=1, default_collection="default", rag_context_root=root, round_num=1)
+        self.assertEqual(coll1, "")
+        self.assertEqual(mode1, "no_retrieve")
+
+        # Job 2 Round 1 -> 'api_specs', top_k
+        coll2_r1, db2_r1, mode2_r1 = _resolve_job_debate_collection(cfg, job_num=2, default_collection="default", rag_context_root=root, round_num=1)
+        self.assertEqual(coll2_r1, "api_specs")
+        self.assertEqual(mode2_r1, "top_k")
+
+        # Job 2 Round 2 -> '', no_retrieve
+        coll2_r2, db2_r2, mode2_r2 = _resolve_job_debate_collection(cfg, job_num=2, default_collection="default", rag_context_root=root, round_num=2)
+        self.assertEqual(coll2_r2, "")
+        self.assertEqual(mode2_r2, "no_retrieve")
+
+        # Job 3 Round 1 & Round 2 (flat scalar) -> 'tests_lib', top_k
+        coll3_r1, db3_r1, mode3_r1 = _resolve_job_debate_collection(cfg, job_num=3, default_collection="default", rag_context_root=root, round_num=1)
+        coll3_r2, db3_r2, mode3_r2 = _resolve_job_debate_collection(cfg, job_num=3, default_collection="default", rag_context_root=root, round_num=2)
+        self.assertEqual(coll3_r1, "tests_lib")
+        self.assertEqual(coll3_r2, "tests_lib")
+        self.assertEqual(mode3_r1, "top_k")
+
+    def test_sanitize_proposal_text_header_anchor(self):
+        """Validates Tier 1 header anchoring strips startup noise and starts from earliest recognized header."""
+        import deliberate
+        raw_output = """Aider v0.86.2
+Main model: gemini/gemini-3.8-flash with diff-fenced edit format
+Weak model: gemini/gemini-3.5-flash-lite
+Git repo: .git with 138 files
+Repo-map: using 4096 tokens, auto refresh
+Added src/aider_factory/python/orchestrate.py to the chat (read-only)
+Restored previous conversation history
+► thinking
+Some extraneous thinking trace here...
+## Scope Analysis
+
+### Target Files:
+1. `src/aider_factory/python/run_workflow.py`
+
+### [Task ID: 001] - Test Task
+Implement the fix.
+"""
+        cleaned = deliberate.sanitize_proposal_text(raw_output)
+        self.assertTrue(cleaned.startswith("## Scope Analysis"))
+        self.assertNotIn("Aider v0.86.2", cleaned)
+        self.assertNotIn("to the chat (read-only)", cleaned)
+        self.assertIn("### [Task ID: 001]", cleaned)
+
+    def test_sanitize_proposal_text_line_by_line_and_fallback(self):
+        """Validates Tier 2 line-by-line chrome stripping and Tier 3 non-empty fallback."""
+        import deliberate
+        noise_text = """Aider v0.86.2
+Added CONVENTIONS.md to the chat (read-only)
+Tokens: 100 Cost: $0.00
+This is a plain proposal without standard headers.
+PROPOSAL: fix all bugs immediately.
+"""
+        cleaned = deliberate.sanitize_proposal_text(noise_text)
+        self.assertTrue(cleaned.startswith("This is a plain proposal without standard headers."))
+        self.assertNotIn("Aider v0.86.2", cleaned)
+        self.assertIn("PROPOSAL: fix all bugs immediately.", cleaned)
+
+        # Fallback when raw text has only whitespace or unmatchable content
+        self.assertEqual(deliberate.sanitize_proposal_text(""), "")
+        self.assertEqual(deliberate.sanitize_proposal_text("   "), "")
+
+        pure_noise = (
+            "Aider v0.86.2\n"
+            "Main model: gemini/gemini-3.8-flash\n"
+            "Added file to the chat (read-only)\n"
+            "Tokens: 100 Cost: $0.00\n"
+        )
+        self.assertEqual(deliberate.sanitize_proposal_text(pure_noise), "")
+
+    def test_draft_gate_actionability_and_fail_safe(self):
+        """Validates write_verdict and verdict_is_actionable behavior for draft_mode."""
+        import deliberate
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 1. Agreed draft -> GATE: draft, actionable=True
+            agreed_path = os.path.join(tmpdir, "agreed_verdict.md")
+            act_agreed = deliberate.write_verdict(
+                agreed_path,
+                state="agreed",
+                gate_present=False,
+                proposal="PROPOSAL: implement feature",
+                draft_mode=True,
+            )
+            self.assertTrue(act_agreed)
+            self.assertTrue(deliberate.verdict_is_actionable(agreed_path))
+            with open(agreed_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("GATE: draft", content)
+            self.assertIn("STATUS: agreed", content)
+
+            # 2. Deadlock draft -> GATE: draft, actionable=False
+            deadlock_path = os.path.join(tmpdir, "deadlock_verdict.md")
+            act_deadlock = deliberate.write_verdict(
+                deadlock_path,
+                state="deadlock",
+                gate_present=False,
+                proposal="PROPOSAL: contested feature",
+                draft_mode=True,
+            )
+            self.assertFalse(act_deadlock)
+            self.assertFalse(deliberate.verdict_is_actionable(deadlock_path))
+            with open(deadlock_path, "r", encoding="utf-8") as f:
+                content_deadlock = f.read()
+            self.assertIn("GATE: draft", content_deadlock)
+            self.assertIn("STATUS: deadlock", content_deadlock)
+
+    def test_resolve_debate_stem_deterministic_suffix(self):
+        """Validates _resolve_debate_stem appends timestamp and resolves across sources."""
+        import oracle_agent
+        old_session = os.environ.get("AI_FACTORY_SESSION")
+        try:
+            # 1. Explicit stem
+            stem1 = oracle_agent._resolve_debate_stem("my_custom_stem")
+            self.assertTrue(stem1.startswith("my_custom_stem_"))
+            self.assertEqual(len(stem1.split("_")[-1]), 6)  # HHMMSS
+
+            # 2. Session name fallback
+            os.environ["AI_FACTORY_SESSION"] = "test_sess"
+            stem2 = oracle_agent._resolve_debate_stem()
+            self.assertTrue(stem2.startswith("test_sess_"))
+
+            # 3. Config target file fallback (requires AI_FACTORY_SESSION unset)
+            os.environ.pop("AI_FACTORY_SESSION", None)
+            cfg = {
+                "phases": [
+                    {
+                        "enabled": True,
+                        "files": {
+                            "target_files": ["src/service/worker.py"]
+                        }
+                    }
+                ]
+            }
+            stem3 = oracle_agent._resolve_debate_stem(config=cfg)
+            self.assertTrue(stem3.startswith("worker_"))
+
+            # 4. Fallback default (requires AI_FACTORY_SESSION and config unset)
+            stem4 = oracle_agent._resolve_debate_stem()
+            self.assertTrue(stem4.startswith("cli_debate_"))
+        finally:
+            if old_session is not None:
+                os.environ["AI_FACTORY_SESSION"] = old_session
+            else:
+                os.environ.pop("AI_FACTORY_SESSION", None)
+
+    def test_resolve_job_debate_collection_flow_sublists_clamping_and_edge_cases(self):
+        """Validates round index clamping, None safety, and flow database directories."""
+        root = "/tmp/lanceDB"
+        cfg = {
+            "job_debate_collection": [
+                "",
+                ["api_specs", None],
+                "",
+            ],
+            "job_debate_db": [
+                "",
+                ["/custom/db1", "/custom/db2"],
+                "",
+            ],
+        }
+        # 1. Round 1 Job 2 -> 'api_specs', '/custom/db1', 'top_k'
+        c1, db1, m1 = _resolve_job_debate_collection(
+            cfg, job_num=2, default_collection="default", rag_context_root=root, round_num=1
+        )
+        self.assertEqual(c1, "api_specs")
+        self.assertEqual(db1.replace("\\", "/"), "/custom/db1")
+        self.assertEqual(m1, "top_k")
+
+        # 2. Round 2 Job 2 (None in collection) -> '', '/custom/db2', 'no_retrieve'
+        c2, db2, m2 = _resolve_job_debate_collection(
+            cfg, job_num=2, default_collection="default", rag_context_root=root, round_num=2
+        )
+        self.assertEqual(c2, "")
+        self.assertEqual(db2.replace("\\", "/"), "/custom/db2")
+        self.assertEqual(m2, "no_retrieve")
+
+        # 3. Round 3 Job 2 (Exceeds sublist length 2; clamps to index -1 which is None) -> '', '/custom/db2', 'no_retrieve'
+        c3, db3, m3 = _resolve_job_debate_collection(
+            cfg, job_num=2, default_collection="default", rag_context_root=root, round_num=3
+        )
+        self.assertEqual(c3, "")
+        self.assertEqual(db3.replace("\\", "/"), "/custom/db2")
+        self.assertEqual(m3, "no_retrieve")
 
     def test_pre_edit_debate_and_escalation_isolated_file_propagation(self):
         """Validates that oracle_file and architect_file are parsed from YAML and populated into debate configs."""
@@ -900,6 +1106,126 @@ class TestWorkflow4JobUnits(unittest.TestCase):
         self.assertEqual(pre_edit_cfg.get("architect_file"), "markdown/templates/code_quality_audit.md")
         self.assertEqual(esc_cfg.get("oracle_file"), "markdown/templates/oracle_rubric.md")
         self.assertEqual(esc_cfg.get("architect_file"), "markdown/templates/code_quality_audit.md")
+
+    def test_high_watermark_proposal_retention(self):
+        """Validates that update_high_watermark_proposal preserves comprehensive plans."""
+        import deliberate
+
+        plan_10_tasks = "\n".join(f"### [Task ID: {i:03d}] - Task {i}\n- Pattern: code" for i in range(1, 11))
+        plan_2_tasks = "### [Task ID: 001] - Delta 1\n### [Task ID: 002] - Delta 2\n"
+        closing_banter = "All necessary files are now present in the chat. Ready to proceed."
+
+        # 1. 0 tasks -> 10 tasks updates
+        res1 = deliberate.update_high_watermark_proposal(plan_10_tasks, "")
+        self.assertEqual(res1, plan_10_tasks)
+
+        # 2. Refined 10 tasks updates (equal count)
+        plan_10_refined = plan_10_tasks + "\n# refined notes"
+        res2 = deliberate.update_high_watermark_proposal(plan_10_refined, res1)
+        self.assertEqual(res2, plan_10_refined)
+
+        # 3. Delta turn with 2 tasks does NOT overwrite 10 tasks
+        res3 = deliberate.update_high_watermark_proposal(plan_2_tasks, res2)
+        self.assertEqual(res3, plan_10_refined)
+
+        # 4. Closing conversational banter (0 tasks) does NOT overwrite 10 tasks
+        res4 = deliberate.update_high_watermark_proposal(closing_banter, res3)
+        self.assertEqual(res4, plan_10_refined)
+
+        # 5. Non-task legacy queries update normally (0 tasks vs 0 tasks)
+        res5 = deliberate.update_high_watermark_proposal("New answer", "Old answer")
+        self.assertEqual(res5, "New answer")
+
+        # 6. None / empty handling
+        self.assertEqual(deliberate.update_high_watermark_proposal("", res4), res4)
+        self.assertEqual(deliberate.update_high_watermark_proposal(None, res4), res4)
+
+    def test_symmetric_pre_edit_task_gating_matrix(self):
+        """U1: Validates symmetric verdict_gate wiring across Job 1, 2, and 3."""
+        base_name = "calc"
+        session_name = "test_sess"
+        timestamp = "20250518_120000"
+        run_tag = f"{base_name}_{session_name}_{timestamp}"
+
+        pre_cfg_all = {"enabled": True, "insert_debate": [1, 1, 1]}
+        d_j1, d_j2, d_j3 = _parse_insert_debate(pre_cfg_all)
+
+        j1_gate = f"/tmp/{run_tag}.job1_verdict.md" if d_j1 else None
+        j2_gate = f"/tmp/{run_tag}.job2_verdict.md" if d_j2 else None
+        j3_gate = f"/tmp/{run_tag}.job3_verdict.md" if d_j3 else None
+
+        self.assertIsNotNone(j1_gate)
+        self.assertIsNotNone(j2_gate)
+        self.assertIsNotNone(j3_gate)
+        self.assertIn("job1_verdict", j1_gate)
+        self.assertIn("job2_verdict", j2_gate)
+        self.assertIn("job3_verdict", j3_gate)
+
+        pre_cfg_j2_only = {"enabled": True, "insert_debate": [0, 1, 0]}
+        d_j1, d_j2, d_j3 = _parse_insert_debate(pre_cfg_j2_only)
+        self.assertIsNone(f"/tmp/{run_tag}.job1_verdict.md" if d_j1 else None)
+        self.assertIsNotNone(f"/tmp/{run_tag}.job2_verdict.md" if d_j2 else None)
+        self.assertIsNone(f"/tmp/{run_tag}.job3_verdict.md" if d_j3 else None)
+
+    def test_sanitize_proposal_text_complex_preambles(self):
+        """U2: Validates that earliest header is retained and wrapped chrome is stripped."""
+        import deliberate
+
+        raw = (
+            "Added src/calc.py to the chat (read-only).\n"
+            "Restored previous conversation history.\n"
+            "► thinking\n"
+            "## Executive Summary\n"
+            "This refactors the core math logic.\n\n"
+            "## Scope Analysis\n"
+            "Target: calc.py\n\n"
+            "## Implementation Plan\n"
+            "### [Task ID: 001] - Math fix\n"
+        )
+        cleaned = deliberate.sanitize_proposal_text(raw)
+        self.assertTrue(cleaned.startswith("## Executive Summary"))
+        self.assertIn("## Scope Analysis", cleaned)
+        self.assertIn("### [Task ID: 001] - Math fix", cleaned)
+        self.assertNotIn("chat (read-only)", cleaned)
+        self.assertNotIn("thinking", cleaned)
+
+    def test_proposal_hash_body_sensitivity(self):
+        """Validates that proposal_hash produces distinct hashes when task specifications change."""
+        import deliberate
+        t1 = "## Implementation Plan\n### [Task ID: 001] - Logic A\n- Pattern: A\nPROPOSAL: Refactor math"
+        t2 = "## Implementation Plan\n### [Task ID: 001] - Logic B\n- Pattern: B\nPROPOSAL: Refactor math"
+        self.assertNotEqual(deliberate.proposal_hash(t1), deliberate.proposal_hash(t2))
+
+    def test_resolve_job_debate_collection_flow_sublist_length_fallback(self):
+        """Validates that when job_num > len(raw) and raw[0] is a sublist, round_num resolves properly."""
+        root = "/tmp/lanceDB"
+        cfg = {"job_debate_collection": [["coll_r1", "coll_r2"]]}
+        c, db, mode = _resolve_job_debate_collection(
+            cfg, job_num=2, default_collection="default", rag_context_root=root, round_num=2
+        )
+        self.assertEqual(c, "coll_r2")
+        self.assertEqual(mode, "top_k")
+
+    def test_count_tasks_indented_and_quoted(self):
+        """Validates that count_tasks detects task headers indented, bulleted, or quoted."""
+        import deliberate
+        text = (
+            "> ### [Task ID: 001] - Quoted\n"
+            "   ### Task ID: 002 - Indented\n"
+            "- ### [Task ID: 003] - Bulleted\n"
+            "### [Task ID: 004] - Standard\n"
+        )
+        self.assertEqual(deliberate.count_tasks(text), 4)
+
+    def test_multi_target_files_distinct_run_tags_and_stems(self):
+        """R3: Validates that multiple target files produce distinct, isolated run_tags."""
+        targets = ["src/module_a.py", "src/module_b.py"]
+        session = "session_123"
+        ts = "20250518_120000"
+        tags = [f"{os.path.splitext(os.path.basename(t))[0]}_{session}_{ts}" for t in targets]
+        self.assertEqual(tags[0], "module_a_session_123_20250518_120000")
+        self.assertEqual(tags[1], "module_b_session_123_20250518_120000")
+        self.assertNotEqual(tags[0], tags[1])
 
 
 if __name__ == "__main__":

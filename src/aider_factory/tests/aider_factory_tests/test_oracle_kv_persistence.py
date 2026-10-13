@@ -181,6 +181,18 @@ class TestOracleKVPersistence(unittest.TestCase):
         self.assertIn("files_hash", stored_data)
         self.assertIn("messages", stored_data)
 
+    def test_atomic_json_save_cleanup_on_failure(self):
+        """Verify _atomic_json_save cleans up temporary files if serialization fails."""
+        target_json = os.path.join(self.temp_dir, "session.json")
+        with patch("json.dump", side_effect=TypeError("Non-serializable object")):
+            try:
+                oracle_agent._atomic_json_save(target_json, {"bad": object()})
+            except TypeError:
+                pass
+
+        leftover_tmps = [f for f in os.listdir(self.temp_dir) if f.endswith(".tmp")]
+        self.assertEqual(len(leftover_tmps), 0, "Failed atomic write must not leave orphaned .tmp files")
+
     def test_oracle_debate_files_hash_invalidation(self):
         """Verify changing target files invalidates stale debate session to prevent cross-file cache pollution."""
         debate_session_file = os.path.join(self.temp_dir, ".aider_factory", ".oracle_debate_session.json")

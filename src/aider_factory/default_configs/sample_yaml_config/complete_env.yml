@@ -44,8 +44,7 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         grounding_agent: "openai/minicheck-flan-t5-large"
 
     rag:
-        collection_name: "working_repo_lib" # folder name for all rag content
-        db: "" # override lanceDB dir (empty = .aider_factory/markdown/lanceDB/<collection>/lancedb)
+        collection_name: "working_repo_lib" # local name or path to external collection
         type_filter: null # null (fuse code+docs), "code" (*_code tables), or "docs" (*_docs tables)
         batch: true # a table per file/directory or all in one table
         retrieval_mode: top_k # no_retrieve, top_k, or full_document
@@ -87,8 +86,7 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
             oracle_file: "" # Oracle template/instruction path or list of paths
             architect_file: "" # Architect template/instruction path or list of paths
             job_debate_template: "" # Paths [/job1_tmpl,/job2_tmpl,/job3_tmpl]
-            job_debate_collection: "" # Paths [/coll1, /coll2, /coll3]
-            job_debate_db: "" # Paths [/db1, /db2, /db3] for external collections
+            job_debate_collection: "" # Names or paths [/coll1, /coll2, /coll3]
 
     toggles:
         pair_programming: true # Interactive mode with terminal chat

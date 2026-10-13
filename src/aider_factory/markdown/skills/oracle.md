@@ -1,9 +1,11 @@
 ---
 name: aider-oracle
-description: Query and maintain LanceDB vector stores for RAG side-agent retrieval, fact verification, and multi-turn architectural debates.
+description: Query and maintain LanceDB vector stores for RAG side-agent retrieval, fact verification, and web content ingestion.
 ---
 
 # SKILL: Knowledge Oracle (`aider-oracle`)
+
+> **Note on Deliberation & Debates:** For multi-turn adversarial debates, architectural deliberations, and persona-guided reviews (`--debate`), refer to the dedicated skill [`aider-oracle-debate`](oracle_debate.md).
 
 `aider-oracle` is a read-only retrieval side-agent backed by a local LanceDB vector database. It returns grounded, source-cited context (definitions, formulas, schemas, requirements) and synthesized reasoning.
 
@@ -31,14 +33,17 @@ description: Query and maintain LanceDB vector stores for RAG side-agent retriev
 
 | Flag | Argument | Description |
 | :--- | :--- | :--- |
+| `--config` | `<yaml_path>` | Loads endpoints, models, and RAG configuration from a specific pipeline YAML file. |
 | `--no-rag` | *(None)* | Standalone conversion / query mode. With `--add-web` or `--add-file`, converts content to clean Markdown on disk while bypassing LanceDB indexing. For queries, bypasses vector search. |
 | `--type` | `code` \| `docs` | Constrains fused search strictly to code (`*_code`) or documentation (`*_docs`) tables. |
 | `--no-rerank` | *(None)* | Disables Stage 2 cross-encoder/listwise reranking; returns raw vector similarity results. |
 | `--recall-k` | `<int>` | Sets candidate pool depth retrieved in Stage 1 prior to reranking. |
+| `--reasoning-effort` | `low` \| `medium` \| `high` | Sets reasoning effort parameter for reasoning-capable models. |
+| `--temperature` | `<float>` | Overrides model sampling temperature. |
 | `--db` | `<dir_path>` | Overrides the LanceDB storage directory path explicitly. |
 | `--no-print` | *(None)* | Suppresses stdout output when running `--claims-only` verification. |
 
-### 2. Query & Refereed Debate Invocations
+### 2. Query & Fact-Checking Invocations
 
 ```bash
 # Query active collection with natural language question
@@ -59,9 +64,11 @@ aider-oracle --no-rerank "Explain the session vault isolation mechanism"
 # Direct model query bypassing RAG retrieval
 aider-oracle --no-rag "Draft a unit test skeleton for JWT token decoding"
 
-# Execute multi-turn refereed debate (Architect vs. Oracle)
-aider-oracle --debate code --loops 3 "Evaluate locking strategy in src/service.py"
-aider-oracle --debate review --loops 4 --rounds 2 "Verify claim accuracy in report.md"
+# Query targeting an external LanceDB directory directly
+aider-oracle --collection /data/knowledge_base/lancedb "Explain the retry backoff policy"
+
+# Query with explicit configuration and reasoning effort override
+aider-oracle --config .aider_factory/.env_prod.yml --reasoning-effort high "Audit cryptographic key rotation"
 
 # Automated self-validation against database before output
 aider-oracle --claims-only "What are the retention bounds for user sessions?"
@@ -113,10 +120,7 @@ aider-oracle --collection api_docs "What headers are required for authentication
 # Example 2: Verifying a technical specification without database lookup
 aider-oracle --mode no_retrieve --file docs/rfc.md "Identify missing edge case handlers"
 
-# Example 3: Running a multi-turn adversarial debate to settle technical consensus
-aider-oracle --debate code --loops 3 "Should we use optimistic concurrency or row locks?"
-
-# Example 4: Tool-Chaining Web Research -> Standalone Extraction -> File Read
+# Example 3: Tool-Chaining Web Research -> Standalone Extraction -> File Read
 # 1. Search URLs via aider-research
 aider-research search "site:docs.rs/tokio/latest" --links-only --out temp/tokio_urls.txt
 # 2. Extract clean Markdown to disk without bloating vector DB
@@ -128,6 +132,7 @@ aider-oracle --add-web --file temp/tokio_urls.txt --no-rag --workers 4
 
 ## Execution Checklist
 
+- [ ] Pass `--config <file.yml>` if running outside a workspace with default `.env.yml`.
 - [ ] Check available collections using `aider-oracle --list` before running targeted queries.
 - [ ] Select `--mode top_k` for vector lookups, `--type code|docs` to constrain corpus, or `--mode no_retrieve` when providing a direct `--file`.
 - [ ] Use `--add-web <URL> --no-rag` or `--add-file <path> --no-rag` when only needing clean Markdown documents on disk without vector indexing.

@@ -42,7 +42,7 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         grounding_agent: "openai/minicheck-flan-t5-large"
 
     rag:
-        collection_name: "working_repo_lib"
+        collection_name: "working_repo_lib" # local name or path to external collection
         retrieval_mode: top_k # top_k, no_retrieve, full_document
         embed_backend: "sentence-transformers" # openai, sentence-transformers
         query_prefix: "Instruct: Given a coding or financial query, retrieve relevant passages\\nQuery: " # important for embedder chunk retrieval
@@ -120,12 +120,31 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         full_document: false
         pre_edit_debate:
             enabled: true
-            insert_debate: [0, 0, 1]              # Pre-test debate triggered before Job 3
-            loops: 3                              # 3 turns to reach consensus on test matrix
-            oracle_file: ""
-            architect_file: ""
-            job_debate_template: "markdown/templates/testing_debate.md"
-            job_debate_collection: ""             # Bypass RAG retrieval; Oracle audits target file AST
+            insert_debate: [0, 1, 1]              # Pre-job debate triggered before Job 2 and Job 3
+            loops: 3                              # 3 turns to reach consensus per round
+            rounds: 2                             # 2 outer debate rounds (cycles personas & collections)
+            pass_history: true                    # Carry debate context and KV cache to next round
+            persist: false                        # Conclude once consensus is reached
+            oracle_persona:
+                - "markdown/templates/agent_persona/critic.md"
+                - "markdown/templates/agent_persona/judge.md"
+            architect_persona:
+                - "markdown/templates/agent_persona/combined_reviewer_critic.md"
+                - "markdown/templates/agent_persona/code-reviewer.md"
+            oracle_file:
+                - "markdown/templates/debate_instruct/oracle_contract_audit_r1.md"
+                - "markdown/templates/debate_instruct/oracle_adversarial_hardening_r2.md"
+            architect_file:
+                - "markdown/templates/debate_instruct/architect_contract_spec_r1.md"
+                - "markdown/templates/debate_instruct/architect_execution_spec_r2.md"
+            job_debate_template:
+                - ""                                             # Job 1: Bypassed
+                - "markdown/templates/code_quality_audit.md"     # Job 2: Code quality audit shared directions
+                - "markdown/templates/testing_debate.md"         # Job 3: Unit test matrix shared directions
+            job_debate_collection:
+                - ""                                             # Job 1: No debate / no RAG
+                - ["working_repo_lib", ""]                       # Job 2: R1 retrieves working_repo_lib, R2 is pure AST
+                - ""                                             # Job 3: Pure AST (no_retrieve) across all rounds
 
     toggles:
         pair_programming: false
@@ -152,6 +171,7 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         loops: 4
         rounds: 2
         pass_history: true
+        persist: false
         oracle_persona: ""
         architect_persona: ""
         oracle_file: ""
@@ -165,7 +185,7 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         context_files_test: []
 
     plans:
-        job_one_plan: ".aider_factory/markdown/oracle_pre_plan/strategy_template.md"
+        job_one_plan: "markdown/oracle_pre_plan/strategy_template.md"
         job_two_plan: "markdown/templates/validate.md"
         job_three_plan: "markdown/templates/testing_exec.md"
         iterate_plan: "markdown/templates/testing_unit_iterate.md"

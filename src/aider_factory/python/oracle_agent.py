@@ -13,8 +13,11 @@ import datetime
 import json
 import logging
 import os
+import re
+import shutil
 import subprocess
 import sys
+from typing import Optional
 import uuid
 
 # Generate session ID once per pipeline run for KV-cache stickiness
@@ -45,7 +48,10 @@ _RESET = "\033[0m"
 def _session_file():
     """Return the active session file path. Overridable via ORACLE_SESSION_FILE
     env var for debate-specific sessions that survive the apply phase cleanup."""
-    return os.environ.get("ORACLE_SESSION_FILE", _DEFAULT_SESSION_FILE)
+    sf = os.environ.get("ORACLE_SESSION_FILE")
+    if sf:
+        return sf
+    return os.path.join(os.getcwd(), _DEFAULT_SESSION_FILE)
 
 
 def _session_cost_file():
@@ -66,9 +72,21 @@ if _python_dir not in sys.path:
     sys.path.insert(0, _python_dir)
 
 try:
-    from aider_factory.python.env_utils import load_env_files, resolve_api_key, get_model_settings
+    from aider_factory.python.env_utils import (
+        load_env_files,
+        resolve_api_key,
+        get_model_settings,
+        is_local_model,
+        is_valid_endpoint,
+    )
 except ImportError:
-    from env_utils import load_env_files, resolve_api_key, get_model_settings
+    from env_utils import (
+        load_env_files,
+        resolve_api_key,
+        get_model_settings,
+        is_local_model,
+        is_valid_endpoint,
+    )
 
 load_env_files()
 _resolve_api_key = resolve_api_key
@@ -131,11 +149,30 @@ def _load_session():
     return [{"role": "system", "content": SYSTEM_PROMPT}]
 
 
+def _atomic_json_save(path: str, data: dict) -> None:
+    """Atomically serialize JSON data to disk via tempfile and os.replace."""
+    target_dir = os.path.dirname(os.path.abspath(path))
+    if target_dir:
+        os.makedirs(target_dir, exist_ok=True)
+    import tempfile
+    fd, tmp_path = tempfile.mkstemp(dir=target_dir, suffix=".tmp")
+    os.close(fd)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
+
+
 def _save_session(messages):
     sf = _session_file()
-    os.makedirs(os.path.dirname(sf), exist_ok=True)
-    with open(sf, "w", encoding="utf-8") as f:
-        json.dump(messages, f, ensure_ascii=False, indent=2)
+    _atomic_json_save(sf, messages)
 
 
 try:
@@ -434,10 +471,13 @@ def _retrieve(query, k):
             requests.get(f"{api_base}/models", timeout=10).raise_for_status()
         except Exception as e:
             print(
-                f"[embed] endpoint unreachable at {api_base}: {e}; aborting.",
+                f"[embed] Warning: endpoint unreachable at {api_base} ({e}); falling back to local sentence-transformers.",
                 file=sys.stderr,
             )
-            sys.exit(2)
+            backend = "sentence-transformers"
+            api_base = None
+            if "openai" in model.lower() or "text-embedding" in model.lower():
+                model = "BAAI/bge-m3"
 
     try:
         import lancedb
@@ -465,6 +505,11 @@ def _retrieve(query, k):
         elif type_filter == "docs":
             tables = [t for t in tables if t.endswith("_docs")]
     if not tables:
+        print(
+            f"[oracle] warning: no matching tables found in database '{db_dir}' for collection '{collection}'. "
+            f"(available tables: {all_tables})",
+            file=sys.stderr,
+        )
         return ""
 
     # Truncate the query to fit the embedding model's context window. In debate
@@ -540,7 +585,7 @@ def _validate_oracle_response(answer_text):
     os.close(fd)  # Close the file descriptor immediately to prevent leaks
     
     with open(tmp_file, "w", encoding="utf-8") as f:
-        f.write(answer_text)
+        f.write(answer_text or "")
 
     report_path = os.path.join(os.getcwd(), ".aider_factory", "temp", "oracle_claims_report.md")
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
@@ -801,8 +846,8 @@ def _extract_overrides(argv):
     requests a listing of the tables and exits. Returns (remaining_args, do_list, did_clear, maintenance_action, maintenance_target).
     """
     transient_keys = [
+        "ORACLE_EXPLICIT_CONFIG",
         "ORACLE_EXPLICIT_COLLECTION",
-        "ORACLE_EXPLICIT_DB",
         "ORACLE_DEBATE_MODE",
         "ORACLE_DEBATE_LOOPS",
         "ORACLE_DEBATE_ROUNDS",
@@ -821,6 +866,7 @@ def _extract_overrides(argv):
         "ORACLE_DEBATE_NO_PASS_HISTORY",
         "ORACLE_REASONING_EFFORT",
         "ORACLE_TEMPERATURE",
+        "ORACLE_DEBATE_STEM",
     ]
     for k in transient_keys:
         os.environ.pop(k, None)
@@ -831,14 +877,27 @@ def _extract_overrides(argv):
     maintenance_target = None
     while i < len(args):
         a = args[i]
+        if a == "--config":
+            if i + 1 < len(args):
+                cfg_path = os.path.abspath(os.path.expanduser(args[i + 1].strip()))
+                os.environ["ORACLE_CONFIG_FILE"] = cfg_path
+                os.environ["ORACLE_EXPLICIT_CONFIG"] = "1"
+                i += 2
+                continue
+            print("[oracle] --config requires a file path", file=sys.stderr)
+            return out, do_list, did_clear, None, None
         if a == "--clear":
             _clear_session()
-            # Also clear debate-specific session files
             _project = os.getcwd()
-            for _df in [
+            import glob
+            stale_debate_files = [
                 os.path.join(_project, ".aider_factory", ".oracle_debate_session.json"),
-                os.path.join(_project, ".aider_factory", ".debate_aider_history.md"),
-            ]:
+                os.path.join(_project, ".aider_factory", ".oracle_debate_session.json.costs.json"),
+            ]
+            stale_debate_files.extend(
+                glob.glob(os.path.join(_project, ".aider_factory", ".debate_aider_history*.md"))
+            )
+            for _df in stale_debate_files:
                 if os.path.exists(_df):
                     try:
                         os.remove(_df)
@@ -892,6 +951,13 @@ def _extract_overrides(argv):
             os.environ["ORACLE_DEBATE_PERSIST"] = "1"
             i += 1
             continue
+        if a == "--stem":
+            if i + 1 < len(args):
+                os.environ["ORACLE_DEBATE_STEM"] = args[i + 1].strip()
+                i += 2
+                continue
+            print("[oracle] --stem requires a name", file=sys.stderr)
+            return out, do_list, did_clear, None, None
         if a in ("--no-pass-history", "--no-pass-round-history"):
             os.environ["ORACLE_DEBATE_NO_PASS_HISTORY"] = "1"
             i += 1
@@ -928,14 +994,6 @@ def _extract_overrides(argv):
                 continue
             print("[oracle] --architect-file requires a file path or comma-separated list", file=sys.stderr)
             return out, do_list, did_clear, None, None
-        if a == "--file" and ("--debate" in args or bool(os.environ.get("ORACLE_DEBATE_MODE"))):
-            if i + 1 < len(args):
-                if not os.environ.get("ORACLE_FILE_PATH"):
-                    os.environ["ORACLE_FILE_PATH"] = args[i + 1].strip()
-                i += 2
-                continue
-            print("[oracle] --file requires a path", file=sys.stderr)
-            return out, do_list, did_clear, None, None
         if a == "--loops":
             if i + 1 < len(args):
                 os.environ["ORACLE_DEBATE_LOOPS"] = args[i + 1].strip()
@@ -966,19 +1024,27 @@ def _extract_overrides(argv):
             return out, do_list, did_clear, None, None
         if a == "--collection":
             if i + 1 < len(args):
-                os.environ["ORACLE_COLLECTION"] = args[i + 1]
+                raw_val = args[i + 1].strip()
                 os.environ["ORACLE_EXPLICIT_COLLECTION"] = "1"
+                expanded = os.path.abspath(os.path.expanduser(raw_val))
+                if "/" in raw_val or "\\" in raw_val or os.path.exists(expanded):
+                    base = os.path.basename(expanded.rstrip("/\\"))
+                    if base.lower() == "lancedb":
+                        coll_name = os.path.basename(os.path.dirname(expanded.rstrip("/\\")))
+                        db_dir = expanded
+                    else:
+                        coll_name = base
+                        db_dir = os.path.join(expanded, "lancedb")
+                    os.environ["ORACLE_COLLECTION"] = coll_name
+                    os.environ["ORACLE_RAG_DB_DIR"] = db_dir
+                else:
+                    os.environ["ORACLE_COLLECTION"] = raw_val
+                    os.environ["ORACLE_RAG_DB_DIR"] = os.path.join(
+                        os.getcwd(), ".aider_factory", "markdown", "lanceDB", raw_val, "lancedb"
+                    )
                 i += 2
                 continue
-            print("[oracle] --collection requires a name", file=sys.stderr)
-            return out, do_list, did_clear, None, None
-        if a == "--db":
-            if i + 1 < len(args):
-                os.environ["ORACLE_RAG_DB_DIR"] = args[i + 1]
-                os.environ["ORACLE_EXPLICIT_DB"] = "1"
-                i += 2
-                continue
-            print("[oracle] --db requires a path", file=sys.stderr)
+            print("[oracle] --collection requires a name or path", file=sys.stderr)
             return out, do_list, did_clear, None, None
         if a == "--mode":
             if i + 1 < len(args):
@@ -1095,21 +1161,7 @@ def _extract_overrides(argv):
     if no_rag_forced:
         os.environ["ORACLE_RETRIEVE_MODE"] = "no_retrieve"
 
-    # Auto-derive DB from collection. If the user passed --collection explicitly,
-    # it MUST override any leaked ORACLE_RAG_DB_DIR from the environment.
-    coll = os.environ.get("ORACLE_COLLECTION")
-    explicit_coll = os.environ.get("ORACLE_EXPLICIT_COLLECTION") == "1"
-    explicit_db = os.environ.get("ORACLE_EXPLICIT_DB") == "1"
-    
-    if coll and not explicit_db and (explicit_coll or not os.environ.get("ORACLE_RAG_DB_DIR")):
-        # If the collection contains a slash, treat it as a global path
-        if "/" in coll or "\\" in coll:
-            abs_coll = os.path.abspath(os.path.normpath(coll))
-            os.environ["ORACLE_COLLECTION"] = os.path.basename(abs_coll)
-            os.environ["ORACLE_RAG_DB_DIR"] = os.path.join(abs_coll, "lancedb")
-        else:
-            # Otherwise, treat it as a local project collection
-            os.environ["ORACLE_RAG_DB_DIR"] = os.path.join(os.getcwd(), ".aider_factory", "markdown", "lanceDB", coll, "lancedb")
+    # DB directory and collection name are resolved directly in --collection parsing
 
     return out, do_list, did_clear, maintenance_action, maintenance_target
 
@@ -1772,6 +1824,28 @@ def _add_web_maintenance(urls):
         return 1
 
 
+def _resolve_debate_stem(explicit_stem: Optional[str] = None, config: Optional[dict] = None) -> str:
+    """Deterministically resolve collision-free stem with timestamp suffix."""
+    now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    if explicit_stem and explicit_stem.strip():
+        clean = re.sub(r"[^\w\-.]", "_", explicit_stem.strip())
+        return f"{clean}_{now_str}"
+    session = os.environ.get("AI_FACTORY_SESSION")
+    if session and session.strip():
+        clean = re.sub(r"[^\w\-.]", "_", session.strip())
+        return f"{clean}_{now_str}"
+    if config:
+        for phase in config.get("phases", []):
+            if not phase.get("enabled", True):
+                continue
+            targets = (phase.get("files", {}) or {}).get("target_files", []) or []
+            if targets and isinstance(targets[0], str):
+                base = os.path.splitext(os.path.basename(targets[0]))[0]
+                clean = re.sub(r"[^\w\-.]", "_", base.strip())
+                return f"{clean}_{now_str}"
+    return f"cli_debate_{now_str}"
+
+
 def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
     """Executes a unified, Aider-driven pair-programming debate with perfect persistence.
 
@@ -1818,19 +1892,33 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
     raw_arch_files = os.environ.get("ARCHITECT_FILE_PATH")
     active_idx = os.environ.get("ORACLE_PHASE_INDEX")
     target_coll = os.environ.get("ORACLE_COLLECTION")
+    config = {}
     if os.path.exists(yaml_path):
         try:
             with open(yaml_path, "r") as f:
-                config = yaml.safe_load(f)
+                config = yaml.safe_load(f) or {}
+            candidate_phase = None
             for idx, phase in enumerate(config.get("phases", [])):
                 if not phase.get("enabled", True):
                     continue
-                if active_idx is not None and str(idx) != active_idx:
-                    continue
+                if active_idx is not None and str(idx) == active_idx:
+                    candidate_phase = phase
+                    break
                 elif active_idx is None and target_coll:
                     phase_coll = (phase.get("rag") or {}).get("collection_name") or (phase.get("vector_store") or {}).get("collection_name")
-                    if phase_coll and phase_coll != target_coll:
-                        continue
+                    if phase_coll == target_coll:
+                        candidate_phase = phase
+                        break
+                elif candidate_phase is None:
+                    candidate_phase = phase
+                else:
+                    has_debate = bool(phase.get("escalation_debate") or (phase.get("oracle") or {}).get("pre_edit_debate"))
+                    cand_has_debate = bool(candidate_phase.get("escalation_debate") or (candidate_phase.get("oracle") or {}).get("pre_edit_debate"))
+                    if has_debate and not cand_has_debate:
+                        candidate_phase = phase
+
+            if candidate_phase:
+                phase = candidate_phase
                 files = phase.get("files", {})
                 raw_patterns = []
                 for k in [
@@ -1889,7 +1977,6 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
                 if not raw_arch_files:
                     raw_arch_files = _ot.get("architect_file") or _pre.get("architect_file")
                 target_coll = target_coll or (phase.get("rag") or {}).get("collection_name") or ""
-                break
         except Exception:
             pass
 
@@ -1972,9 +2059,10 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
         return 1
 
     # 3. Session state: Aider history file (architect) + persistent oracle session
+    stem = _resolve_debate_stem(os.environ.get("ORACLE_DEBATE_STEM"), config)
     debate_aider_history = os.environ.get(
         "ORACLE_DEBATE_AIDER_HISTORY",
-        os.path.join(project_dir, ".aider_factory", ".debate_aider_history.md")
+        os.path.join(project_dir, ".aider_factory", f".debate_aider_history_{stem}.md")
     )
     _debate_session_file = os.environ.get(
         "ORACLE_DEBATE_SESSION_FILE",
@@ -2165,6 +2253,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
 
         ledger = deliberate.new_ledger(f"cli_debate_r{round_idx}")
         state = "continue"
+        transcript = [f"# Deliberation transcript — {stem} (Round {round_idx})\n"]
 
         if rounds > 1:
             print(
@@ -2237,20 +2326,19 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
 
         oracle_messages.append({"role": "assistant", "content": initial_oracle})
         last_oracle = initial_oracle
+        transcript.append(
+            f"\n## Turn 0 — Oracle (pre-assessment)\n\n{(initial_oracle or '').strip()}\n"
+        )
         # Mark context as loaded so subsequent rounds (pass_history=True)
         # send only the delta question instead of re-sending all files + context
         # that are already in oracle_messages from this round's turn 0.
         _session_loaded = True
 
         # Persist oracle session after turn 0
-        os.makedirs(os.path.dirname(_debate_session_file), exist_ok=True)
-        with open(_debate_session_file, "w", encoding="utf-8") as _sf:
-            json.dump(
-                {"files_hash": _files_hash, "messages": oracle_messages},
-                _sf,
-                ensure_ascii=False,
-                indent=2,
-            )
+        _atomic_json_save(
+            _debate_session_file,
+            {"files_hash": _files_hash, "messages": oracle_messages},
+        )
 
         turn_label_0 = f"r{round_idx} turn 0/{max_turns}"
         print(
@@ -2296,12 +2384,20 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
                     f"{terminal_anchor}"
                 )
             elif turn == 0:
-                # First turn of a new round: re-seed with the question + prior state
+                if state == "agreed":
+                    round_context_intro = (
+                        "The previous debate round reached agreement on the prior proposal. "
+                        "Continue advancing the implementation by addressing the next audit layer "
+                        "and specification requirements using all prior context."
+                    )
+                else:
+                    round_context_intro = (
+                        "The previous debate round ended without full resolution. "
+                        "Continue working on the issue using all prior context."
+                    )
                 arch_prompt = (
                     f"{turn_banner}"
-                    "You are the software Architect. The previous debate round "
-                    "ended without full resolution. Continue working on the issue "
-                    "using all prior context.\n\n"
+                    f"You are the software Architect. {round_context_intro}\n\n"
                     f"{arch_spec_snippet}"
                     f"USER ISSUE: {question}\n\n"
                     f"LAST ORACLE RESPONSE:\n{last_oracle}\n\n"
@@ -2335,7 +2431,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
                 history_file=debate_aider_history,
             )
             pline = deliberate.proposal_line(arch_text) or "(no PROPOSAL line)"
-            last_proposal = arch_text or pline
+            last_proposal = deliberate.update_high_watermark_proposal(arch_text, last_proposal)
 
             deliberate.record_turn(
                 ledger,
@@ -2343,6 +2439,9 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
                 "architect",
                 pline,
                 proposal_hash=deliberate.proposal_hash(arch_text),
+            )
+            transcript.append(
+                f"\n## Turn {turn + 1} — Architect\n\n{(arch_text or '').strip()}\n"
             )
 
             # --- ORACLE TURN (persistent in-memory session for KV cache) ---
@@ -2407,13 +2506,10 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
 
             oracle_messages.append({"role": "assistant", "content": last_oracle})
             # Persist oracle debate session within the current invocation
-            with open(_debate_session_file, "w", encoding="utf-8") as _sf:
-                json.dump(
-                    {"files_hash": _files_hash, "messages": oracle_messages},
-                    _sf,
-                    ensure_ascii=False,
-                    indent=2,
-                )
+            _atomic_json_save(
+                _debate_session_file,
+                {"files_hash": _files_hash, "messages": oracle_messages},
+            )
 
             verdict = deliberate.oracle_verdict(last_oracle)
 
@@ -2426,6 +2522,9 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
             _validate_oracle_response(last_oracle)
 
             deliberate.record_turn(ledger, turn, "oracle", last_oracle, verdict=verdict)
+            transcript.append(
+                f"\n## Turn {turn + 1} — Oracle\n\n{(last_oracle or '').strip()}\n"
+            )
 
             # --- ARBITRATION ---
             state = deliberate.consensus_state(ledger)
@@ -2441,12 +2540,53 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
         if state == "continue":
             state = "exhausted"
 
-        # Early exit on agreement only if not in persist mode and no distinct personas remain
-        has_remaining_personas = (
-            round_idx < len(oracle_persona_contents) or round_idx < len(arch_persona_contents)
+        debates_dir = os.path.join(project_dir, ".aider_factory", "logs", "debates")
+        os.makedirs(debates_dir, exist_ok=True)
+        r_suf = f"_r{round_idx}" if rounds > 1 else ""
+        v_path = os.path.join(debates_dir, f"{stem}.verdict{r_suf}.md")
+        t_path = os.path.join(debates_dir, f"{stem}.debate{r_suf}.md")
+        l_path = os.path.join(debates_dir, f"{stem}.debate{r_suf}.json")
+        deliberate.save_ledger(l_path, ledger)
+        try:
+            with open(t_path, "w", encoding="utf-8") as tf:
+                tf.write("\n".join(transcript))
+        except Exception:
+            pass
+        deliberate.write_verdict(
+            v_path,
+            state,
+            False,
+            last_proposal,
+            draft_mode=True,
+            oracle_response=last_oracle,
         )
-        if state == "agreed" and not persist and not has_remaining_personas:
+
+        # Early exit on agreement only if not in persist mode and no distinct configurations remain
+        has_remaining_rounds = (
+            round_idx < len(oracle_persona_contents)
+            or round_idx < len(arch_persona_contents)
+            or round_idx < len(oracle_file_contents)
+            or round_idx < len(arch_file_contents)
+        )
+        if state == "agreed" and not persist and not has_remaining_rounds:
             break
+
+    # Archive debate chat history before exit
+    if not os.path.isfile(debate_aider_history):
+        try:
+            with open(debate_aider_history, "w", encoding="utf-8") as f:
+                f.write("\n".join(transcript))
+        except Exception:
+            pass
+
+    if os.path.isfile(debate_aider_history):
+        chat_logs_dir = os.path.join(project_dir, ".aider_factory", "logs", "chat_history")
+        os.makedirs(chat_logs_dir, exist_ok=True)
+        archived_chat = os.path.join(chat_logs_dir, f"{stem}_debate_history.md")
+        try:
+            shutil.copy2(debate_aider_history, archived_chat)
+        except Exception:
+            pass
 
     # Final Output to stdout (Aider reads this)
     print(f"## DEBATE VERDICT: {state.upper()}\n")
@@ -2454,22 +2594,66 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
         print("The Oracle agreed with the Architect's proposal.")
     else:
         print("The debate ended without agreement (deadlock or exhausted loops).")
-    print(f"\n### Final Proposal\n{last_proposal}")
+    clean_proposal = deliberate.sanitize_proposal_text(last_proposal)
+    print(f"\n### Final Proposal\n{clean_proposal}")
     return 0
 
 
 def _ensure_oracle_config():
     """Populate missing ORACLE_* environment variables from the active YAML config."""
+    try:
+        from aider_factory.python.env_utils import is_valid_endpoint, is_local_model
+    except ImportError:
+        from env_utils import is_valid_endpoint, is_local_model
+
     load_env_files()
 
     project_dir = os.getcwd()
-    yaml_path = os.environ.get("ORACLE_CONFIG_FILE")
-    if not yaml_path or not os.path.exists(yaml_path):
-        yaml_path = os.path.join(project_dir, ".aider_factory", ".env.yml")
-    if not os.path.exists(yaml_path):
-        yaml_path = os.path.join(project_dir, ".env.yml")
+    explicit_config = os.environ.get("ORACLE_EXPLICIT_CONFIG") == "1"
+    yaml_path = os.environ.get("ORACLE_CONFIG_FILE") if explicit_config else None
 
-    if not os.path.exists(yaml_path):
+    if not yaml_path:
+        repo_name = os.path.basename(project_dir.rstrip("/\\"))
+        candidates = [
+            os.path.join(project_dir, ".aider_factory", ".env.yml"),
+            os.path.join(project_dir, ".aider_factory", f".env_{repo_name}.yml"),
+            os.path.join(project_dir, ".env.yml"),
+            os.path.join(project_dir, f".env_{repo_name}.yml"),
+        ]
+        af_dir = os.path.join(project_dir, ".aider_factory")
+        if os.path.isdir(af_dir):
+            for fname in sorted(os.listdir(af_dir)):
+                if fname.startswith(".env_") and fname.endswith(".yml"):
+                    candidates.append(os.path.join(af_dir, fname))
+        for cand in candidates:
+            if os.path.isfile(cand):
+                yaml_path = cand
+                break
+
+    if not explicit_config and os.environ.get("ORACLE_CONFIG_FILE"):
+        ambient_cfg = os.path.abspath(os.environ["ORACLE_CONFIG_FILE"])
+        try:
+            rel = os.path.relpath(ambient_cfg, project_dir)
+            if rel.startswith(".."):
+                amb_sess = os.environ.get("ORACLE_SESSION_FILE")
+                if amb_sess:
+                    try:
+                        rel_s = os.path.relpath(os.path.abspath(amb_sess), project_dir)
+                        if rel_s.startswith(".."):
+                            os.environ.pop("ORACLE_SESSION_FILE", None)
+                    except ValueError:
+                        os.environ.pop("ORACLE_SESSION_FILE", None)
+            elif not yaml_path and os.path.isfile(ambient_cfg):
+                yaml_path = ambient_cfg
+        except ValueError:
+            pass
+
+    if not yaml_path or not os.path.isfile(yaml_path):
+        print(
+            f"❌ [oracle] Error: No configuration file (.env.yml) found in '{project_dir}'.\n"
+            "An active .env.yml is required to configure models and vector databases.",
+            file=sys.stderr,
+        )
         return
 
     try:
@@ -2477,7 +2661,12 @@ def _ensure_oracle_config():
         with open(yaml_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
 
-        project_dir = str(config.get("working_directory", project_dir))
+        raw_wd = str(config.get("working_directory") or "").strip()
+        if raw_wd and raw_wd != "/path/to/project" and os.path.isdir(raw_wd):
+            project_dir = raw_wd
+        else:
+            project_dir = os.getcwd()
+
         endpoints = config.get("endpoints", {}) or {}
         global_rag = config.get("rag", {}) or {}
         phases = config.get("phases", []) or []
@@ -2501,24 +2690,37 @@ def _ensure_oracle_config():
         if not active_phase and phases:
             active_phase = next((p for p in phases if p.get("enabled", True)), phases[0])
 
-        yaml_db = (active_phase.get("rag") or {}).get("db") or (config.get("rag") or {}).get("db")
-        if yaml_db and "ORACLE_RAG_DB_DIR" not in os.environ:
-            os.environ["ORACLE_RAG_DB_DIR"] = (
-                yaml_db if os.path.isabs(yaml_db) else os.path.join(project_dir, yaml_db)
-            )
-
         yaml_type = (active_phase.get("rag") or {}).get("type_filter") or (config.get("rag") or {}).get("type_filter")
         if yaml_type and "ORACLE_TYPE_FILTER" not in os.environ:
             os.environ["ORACLE_TYPE_FILTER"] = str(yaml_type).strip().lower()
 
-        if "ORACLE_COLLECTION" not in os.environ:
+        if os.environ.get("ORACLE_EXPLICIT_COLLECTION") != "1":
             yaml_coll = (active_phase.get("rag") or {}).get("collection_name") if active_phase else None
-            if yaml_coll:
-                os.environ["ORACLE_COLLECTION"] = yaml_coll
-                if not os.environ.get("ORACLE_RAG_DB_DIR"):
-                    os.environ.setdefault(
-                        "ORACLE_RAG_DB_DIR",
-                        os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB", yaml_coll, "lancedb"),
+            yaml_db = (active_phase.get("rag") or {}).get("db") or (config.get("rag") or {}).get("db")
+            if yaml_db:
+                raw_db = str(yaml_db).strip()
+                if not (raw_db.startswith("/") or raw_db.startswith("\\") or (len(raw_db) > 1 and raw_db[1] == ":")):
+                    os.environ["ORACLE_RAG_DB_DIR"] = os.path.join(project_dir, raw_db)
+                else:
+                    os.environ["ORACLE_RAG_DB_DIR"] = os.path.abspath(os.path.expanduser(raw_db))
+                if yaml_coll:
+                    os.environ["ORACLE_COLLECTION"] = yaml_coll
+            elif yaml_coll:
+                expanded = os.path.abspath(os.path.expanduser(yaml_coll))
+                if "/" in yaml_coll or "\\" in yaml_coll or os.path.exists(expanded):
+                    base = os.path.basename(expanded.rstrip("/\\"))
+                    if base.lower() == "lancedb":
+                        coll_name = os.path.basename(os.path.dirname(expanded.rstrip("/\\")))
+                        db_dir = expanded
+                    else:
+                        coll_name = base
+                        db_dir = os.path.join(expanded, "lancedb")
+                    os.environ["ORACLE_COLLECTION"] = coll_name
+                    os.environ["ORACLE_RAG_DB_DIR"] = db_dir
+                else:
+                    os.environ["ORACLE_COLLECTION"] = yaml_coll
+                    os.environ["ORACLE_RAG_DB_DIR"] = os.path.join(
+                        project_dir, ".aider_factory", "markdown", "lanceDB", yaml_coll, "lancedb"
                     )
         elif not os.environ.get("ORACLE_RAG_DB_DIR"):
             coll = os.environ.get("ORACLE_COLLECTION")
@@ -2530,10 +2732,20 @@ def _ensure_oracle_config():
         phase_models = (active_phase.get("models") or {}) if active_phase else {}
         phase_rag = (active_phase.get("rag") or {}) if active_phase else {}
 
-        rag_agent = phase_models.get("rag_agent") or config.get("models", {}).get("rag_agent", "gemini/gemini-2.5-flash")
-        arch_agent = phase_models.get("architect_agent") or config.get("models", {}).get("architect_agent", "gemini/gemini-3.6-flash")
+        arch_agent = (
+            os.environ.get("ORACLE_ARCHITECT_MODEL")
+            or phase_models.get("architect_agent")
+            or config.get("models", {}).get("architect_agent", "gemini/gemini-3.6-flash")
+        )
+        rag_agent = (
+            os.environ.get("ORACLE_AGENT_MODEL")
+            or phase_models.get("rag_agent")
+            or config.get("models", {}).get("rag_agent")
+            or arch_agent
+        )
         ranking_agent = phase_models.get("ranking_agent") or config.get("models", {}).get("ranking_agent", "")
-        ranking_api_base = endpoints.get("ranking_api_base", "")
+        raw_ranking_api = endpoints.get("ranking_api_base", "")
+        ranking_api_base = raw_ranking_api if is_valid_endpoint(raw_ranking_api) else ""
 
         try:
             rag_settings = get_model_settings(rag_agent, project_dir)
@@ -2551,7 +2763,7 @@ def _ensure_oracle_config():
         )
         if not reasoning_effort and rag_agent and any(p in rag_str for p in ("gemini", "o1", "o3", "deepseek")):
             reasoning_effort = "high"
-        if reasoning_effort and "ORACLE_REASONING_EFFORT" not in os.environ:
+        if reasoning_effort:
             os.environ["ORACLE_REASONING_EFFORT"] = str(reasoning_effort)
 
         temp_candidates = [
@@ -2563,16 +2775,18 @@ def _ensure_oracle_config():
         temp_val = next((t for t in temp_candidates if t is not None), None)
         if temp_val is None and rag_agent and "gemini" in rag_str:
             temp_val = 0.8
-        if temp_val is not None and "ORACLE_TEMPERATURE" not in os.environ:
+        if temp_val is not None:
             os.environ["ORACLE_TEMPERATURE"] = str(temp_val)
 
-        os.environ.setdefault("ORACLE_RANKING_MODEL", ranking_agent)
+        os.environ["ORACLE_RANKING_MODEL"] = ranking_agent
         if ranking_api_base:
-            os.environ.setdefault("ORACLE_RANKING_API_BASE", ranking_api_base)
+            os.environ["ORACLE_RANKING_API_BASE"] = ranking_api_base
+        else:
+            os.environ.pop("ORACLE_RANKING_API_BASE", None)
 
         recall_k = phase_rag.get("recall_k") or global_rag.get("recall_k")
         if recall_k:
-            os.environ.setdefault("ORACLE_RECALL_K", str(recall_k))
+            os.environ["ORACLE_RECALL_K"] = str(recall_k)
 
         embed_model = (
             phase_models.get("embed_model")
@@ -2580,39 +2794,61 @@ def _ensure_oracle_config():
             or global_rag.get("embed_model")
             or config.get("models", {}).get("embed_model", "gemini/text-embedding-004")
         )
-        embed_api_base = (
+        raw_embed_api_base = (
             phase_rag.get("embed_api_base")
             or global_rag.get("embed_api_base")
             or endpoints.get("embed_api_base")
         )
+        embed_api_base = raw_embed_api_base if is_valid_endpoint(raw_embed_api_base) else None
+
         embed_backend = (
             phase_rag.get("embed_backend")
             or global_rag.get("embed_backend")
             or phase_models.get("embed_backend")
-            or ("openai" if (embed_api_base or "gemini" in embed_model) else "sentence-transformers")
+            or ("openai" if (embed_api_base or "gemini" in embed_model.lower() or "openai" in embed_model.lower()) else "sentence-transformers")
         )
-        if (embed_api_base or "gemini" in embed_model) and embed_backend == "sentence-transformers":
+        if (embed_api_base or "gemini" in embed_model.lower() or "openai" in embed_model.lower()) and embed_backend == "sentence-transformers":
             embed_backend = "openai"
 
-        os.environ.setdefault("ORACLE_AGENT_MODEL", rag_agent)
-        os.environ.setdefault("ORACLE_ARCHITECT_MODEL", arch_agent)
-        os.environ.setdefault("ORACLE_EMBED_MODEL", embed_model)
-        os.environ.setdefault("ORACLE_EMBED_BACKEND", embed_backend)
+        if "ORACLE_AGENT_MODEL" not in os.environ:
+            os.environ["ORACLE_AGENT_MODEL"] = rag_agent
+        if "ORACLE_ARCHITECT_MODEL" not in os.environ:
+            os.environ["ORACLE_ARCHITECT_MODEL"] = arch_agent
+        os.environ["ORACLE_EMBED_MODEL"] = embed_model
+        os.environ["ORACLE_EMBED_BACKEND"] = embed_backend
         if embed_api_base:
-            os.environ.setdefault("ORACLE_EMBED_API_BASE", embed_api_base)
-        if "gemini/" not in rag_agent and endpoints.get("rag_agent_api"):
-            os.environ.setdefault("ORACLE_AGENT_API_BASE", endpoints.get("rag_agent_api"))
-        if "gemini/" not in arch_agent and endpoints.get("architect_api_base"):
-            os.environ.setdefault("ORACLE_ARCHITECT_API_BASE", endpoints.get("architect_api_base"))
+            os.environ["ORACLE_EMBED_API_BASE"] = embed_api_base
+        else:
+            os.environ.pop("ORACLE_EMBED_API_BASE", None)
+
+        raw_rag_agent_api = (
+            os.environ.get("ORACLE_AGENT_API_BASE")
+            or endpoints.get("rag_agent_api")
+            or endpoints.get("architect_api_base")
+        )
+        if is_local_model(rag_agent) and is_valid_endpoint(raw_rag_agent_api):
+            os.environ["ORACLE_AGENT_API_BASE"] = raw_rag_agent_api
+        elif "ORACLE_AGENT_API_BASE" not in os.environ:
+            os.environ.pop("ORACLE_AGENT_API_BASE", None)
+
+        raw_arch_api = (
+            os.environ.get("ORACLE_ARCHITECT_API_BASE")
+            or endpoints.get("architect_api_base")
+        )
+        if is_local_model(arch_agent) and is_valid_endpoint(raw_arch_api):
+            os.environ["ORACLE_ARCHITECT_API_BASE"] = raw_arch_api
+        elif "ORACLE_ARCHITECT_API_BASE" not in os.environ:
+            os.environ.pop("ORACLE_ARCHITECT_API_BASE", None)
     except Exception:
         pass
 
     # Inject LITELLM_BASE_URL fallback for cluster mode AFTER yaml
-    if os.environ.get("LITELLM_BASE_URL"):
+    if os.environ.get("LITELLM_BASE_URL") and is_valid_endpoint(os.environ["LITELLM_BASE_URL"]):
         rag_agent = os.environ.get("ORACLE_AGENT_MODEL", "")
-        if not any(rag_agent.startswith(p) for p in ("gemini/", "anthropic/", "groq/")):
+        if is_local_model(rag_agent):
             os.environ.setdefault("ORACLE_AGENT_API_BASE", os.environ["LITELLM_BASE_URL"])
-        os.environ.setdefault("ORACLE_EMBED_API_BASE", os.environ["LITELLM_BASE_URL"])
+        if os.environ.get("ORACLE_EMBED_BACKEND") == "openai":
+            os.environ.setdefault("ORACLE_EMBED_API_BASE", os.environ["LITELLM_BASE_URL"])
 
 
 def main():
@@ -2624,14 +2860,15 @@ Usage:
   aider-oracle "<question>"
   aider-oracle --file <path> ["<inline question>"]
   aider-oracle --debate [code|review] [--loops N] [--rounds N] "<question>"
-  aider-oracle --collection <table> [--db <dir>] "<question>"
+  aider-oracle --collection <name|path> "<question>"
+  aider-oracle --config <path> "<question>"
   aider-oracle --type [code|docs] "<question>"
   aider-oracle --no-rag "<question>"
   aider-oracle --clear [oracle]
 
 RAG Retrieval & Ranking:
-  --collection <name>       Target specific LanceDB table/collection
-  --db <dir>                Override LanceDB vector database directory
+  --config <path>           Explicit path to pipeline YAML configuration file
+  --collection <name|path>  Target specific collection (name in repo or path to external corpus)
   --mode <m>                Retrieval mode: top_k (default), no_retrieve, full_document
   --type <code|docs>        Corpus type filter (excludes per-doc literature tables)
   --no-rag                  Bypass RAG vector search (pure LLM reasoning)
@@ -2710,7 +2947,7 @@ Knowledge Base Maintenance:
             return 0  # Standalone --clear command; exit cleanly without showing usage.
         print(
             'usage: oracle "<question>" | oracle --file <path> ["note"] '
-            '| oracle --collection <table> [--db <dir>] "<q>" '
+            '| oracle --collection <name|path> "<q>" '
             '| oracle --no-rag "<q>" | oracle --debate [code|review] [--loops N] [--rounds N] [--oracle-persona <p>] [--architect-persona <p>] "<q>" '
             '| oracle --type [code|docs] "<q>" (fuse-only; excludes per-doc literature tables) '
             "| oracle --clear [oracle] | oracle --list\n"

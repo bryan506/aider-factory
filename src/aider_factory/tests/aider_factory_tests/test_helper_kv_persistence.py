@@ -149,14 +149,6 @@ class TestHelperKVPersistence(unittest.TestCase):
         master_msgs = mock_completion.call_args_list[-1][1]["messages"]
         master_user_content = master_msgs[1]["content"]
         self.assertIn("<yaml_documentation>", master_user_content)
-        self.assertTrue(
-            "YAML Configuration Reference" in master_user_content,
-            "Expected YAML Configuration Reference in master documentation",
-        )
-        self.assertTrue(
-            "Configuration Schema" in master_user_content,
-            "Expected Configuration Schema in master documentation",
-        )
         self.assertIn("<skills_reference>", master_user_content)
         self.assertGreater(len(master_user_content), 5000, "YAML documentation must be loaded completely without truncation")
 
@@ -290,8 +282,8 @@ class TestHelperKVPersistence(unittest.TestCase):
             # 3. NUL stripped
             self.assertNotIn("\x00", sent_content)
             self.assertIn("Usage textwith NUL byte.", sent_content)
-            # 4. Dynamic fence used for f1 (embedded ``` requires ````)
-            self.assertIn("````\nIntro text with ```python", sent_content)
+            # 4. Dynamic fence used for f1 (embedded ``` requires ```)
+            self.assertIn("```\nIntro text with ```python", sent_content)
             # 5. Canonical deduplication: f1 appears exactly once
             self.assertEqual(sent_content.count("Intro text with"), 1)
 

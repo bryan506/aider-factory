@@ -5,6 +5,7 @@ import sys
 script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(script_dir, "../../python"))
 
+import oracle_agent
 from oracle_agent import _extract_overrides
 
 print("Starting Oracle Debate CLI Tests...\n")
@@ -137,16 +138,13 @@ def test_persona_prompt_injection_and_cache_invalidation():
 def test_debate_flag():
     os.environ.pop("ORACLE_DEBATE_MODE", None)
     os.environ.pop("ORACLE_DEBATE_LOOPS", None)
-    os.environ.pop("ORACLE_FILE_PATH", None)
 
-    args = ["--file", "test.txt", "--debate", "code", "--loops", "5", "Query"]
+    args = ["--debate", "code", "--loops", "5", "Query"]
     out, do_list, did_clear, _, _ = _extract_overrides(args)
 
     assert out == ["Query"], f"Unexpected args left: {out}"
     assert os.environ.get("ORACLE_DEBATE_MODE") == "code"
     assert os.environ.get("ORACLE_DEBATE_LOOPS") == "5"
-    assert os.environ.get("ORACLE_FILE_PATH") == "test.txt"
-    os.environ.pop("ORACLE_FILE_PATH", None)
     print("  ✅ --debate <mode> and --loops <N> parse correctly.")
 
 
@@ -487,20 +485,146 @@ def test_conventions_disk_cache_invalidation():
                 os.chdir(orig_cwd)
 
 
+def test_ensure_oracle_config_working_dir_discovery_priority():
+    import oracle_agent
+    import tempfile
+    import yaml
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        af_dir = os.path.join(tmpdir, ".aider_factory")
+        os.makedirs(af_dir, exist_ok=True)
+        with open(os.path.join(af_dir, ".env.yml"), "w", encoding="utf-8") as f:
+            yaml.dump({"phases": [{"enabled": True, "models": {"rag_agent": "model_primary"}}]}, f)
+        with open(os.path.join(tmpdir, ".env.yml"), "w", encoding="utf-8") as f:
+            yaml.dump({"phases": [{"enabled": True, "models": {"rag_agent": "model_secondary"}}]}, f)
+
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("ORACLE_") and not k.startswith("AI_FACTORY_")}
+        with patch.dict("os.environ", clean_env, clear=True):
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                oracle_agent._ensure_oracle_config()
+                assert os.environ.get("ORACLE_AGENT_MODEL") == "model_primary"
+                print("  ✅ _ensure_oracle_config prioritizes .aider_factory/.env.yml over .env.yml.")
+            finally:
+                os.chdir(orig_cwd)
+
+
+def test_ensure_oracle_config_ignores_foreign_ambient_config_and_session():
+    import oracle_agent
+    import tempfile
+    import yaml
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as foreign_dir, tempfile.TemporaryDirectory() as local_dir:
+        foreign_cfg = os.path.join(foreign_dir, "foreign.yml")
+        with open(foreign_cfg, "w", encoding="utf-8") as f:
+            yaml.dump({"phases": [{"enabled": True, "models": {"rag_agent": "foreign_model"}}]}, f)
+        foreign_sess = os.path.join(foreign_dir, "foreign_session.json")
+
+        local_af = os.path.join(local_dir, ".aider_factory")
+        os.makedirs(local_af, exist_ok=True)
+        with open(os.path.join(local_af, ".env.yml"), "w", encoding="utf-8") as f:
+            yaml.dump({"phases": [{"enabled": True, "models": {"rag_agent": "local_model"}}]}, f)
+
+        ambient_env = {
+            "ORACLE_CONFIG_FILE": foreign_cfg,
+            "ORACLE_SESSION_FILE": foreign_sess,
+        }
+        with patch.dict("os.environ", ambient_env, clear=True):
+            orig_cwd = os.getcwd()
+            os.chdir(local_dir)
+            try:
+                oracle_agent._ensure_oracle_config()
+                assert os.environ.get("ORACLE_AGENT_MODEL") == "local_model", "Foreign config hijacked local directory!"
+                sess_path = oracle_agent._session_file()
+                assert not sess_path.startswith(foreign_dir), "Foreign session hijacked local directory!"
+                print("  ✅ Foreign ambient config and session files correctly ignored.")
+            finally:
+                os.chdir(orig_cwd)
+
+
+def test_ensure_oracle_config_rejects_placeholder_working_directory():
+    import oracle_agent
+    import tempfile
+    import yaml
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = {
+            "working_directory": "/path/to/project",
+            "phases": [{"enabled": True, "models": {"rag_agent": "placeholder_test_model"}}],
+        }
+        with open(os.path.join(tmpdir, ".env.yml"), "w", encoding="utf-8") as f:
+            yaml.dump(cfg, f)
+
+        clean_env = {
+            k: v for k, v in os.environ.items()
+            if not k.startswith("ORACLE_") and not k.startswith("AI_FACTORY_") and k not in ("LITELLM_BASE_URL", "LITELLM_API_KEY")
+        }
+        with patch.dict("os.environ", clean_env, clear=True):
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                oracle_agent._ensure_oracle_config()
+                assert os.environ.get("ORACLE_AGENT_MODEL") == "placeholder_test_model"
+                print("  ✅ Placeholder working_directory '/path/to/project' safely ignored.")
+            finally:
+                os.chdir(orig_cwd)
+
+
+def test_ensure_oracle_config_sanitizes_placeholder_endpoints():
+    import oracle_agent
+    import tempfile
+    import yaml
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = {
+            "endpoints": {"embed_api_base": "http://<your-router-host>:4000/v1"},
+            "phases": [
+                {
+                    "enabled": True,
+                    "rag": {
+                        "embed_model": "BAAI/bge-m3",
+                        "embed_backend": "sentence-transformers",
+                    },
+                }
+            ],
+        }
+        with open(os.path.join(tmpdir, ".env.yml"), "w", encoding="utf-8") as f:
+            yaml.dump(cfg, f)
+
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("ORACLE_")}
+        with patch.dict("os.environ", clean_env, clear=True):
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                oracle_agent._ensure_oracle_config()
+                assert "ORACLE_EMBED_API_BASE" not in os.environ, "Placeholder endpoint was not sanitized!"
+                assert os.environ.get("ORACLE_EMBED_BACKEND") == "sentence-transformers"
+                print("  ✅ Placeholder embedder endpoint sanitized without flipping backend.")
+            finally:
+                os.chdir(orig_cwd)
+
+
 def test_ensure_oracle_config_db_and_type_filter():
-    """Verify _ensure_oracle_config sets ORACLE_RAG_DB_DIR and ORACLE_TYPE_FILTER from YAML."""
+    """Verify _ensure_oracle_config sets ORACLE_RAG_DB_DIR and ORACLE_TYPE_FILTER from YAML collection path."""
     import oracle_agent
     import tempfile
     import yaml
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        custom_coll_dir = os.path.join(tmpdir, "custom_corpus")
+        os.makedirs(os.path.join(custom_coll_dir, "lancedb"), exist_ok=True)
         cfg = {
             "working_directory": tmpdir,
             "phases": [
                 {
                     "enabled": True,
                     "rag": {
-                        "db": "custom/lancedb_dir",
+                        "collection_name": custom_coll_dir,
                         "type_filter": "docs",
                     },
                 }
@@ -510,7 +634,7 @@ def test_ensure_oracle_config_db_and_type_filter():
         with open(cfg_path, "w", encoding="utf-8") as f:
             yaml.dump(cfg, f)
 
-        clean_env = {k: v for k, v in os.environ.items() if k not in ("ORACLE_RAG_DB_DIR", "ORACLE_TYPE_FILTER")}
+        clean_env = {k: v for k, v in os.environ.items() if k not in ("ORACLE_RAG_DB_DIR", "ORACLE_TYPE_FILTER", "ORACLE_COLLECTION")}
         clean_env["ORACLE_CONFIG_FILE"] = cfg_path
 
         from unittest.mock import patch
@@ -520,8 +644,9 @@ def test_ensure_oracle_config_db_and_type_filter():
             try:
                 oracle_agent._ensure_oracle_config()
                 assert os.environ.get("ORACLE_TYPE_FILTER") == "docs"
-                assert os.environ.get("ORACLE_RAG_DB_DIR", "").replace("\\", "/").endswith("custom/lancedb_dir")
-                print("  ✅ _ensure_oracle_config sets db and type_filter from YAML.")
+                assert os.environ.get("ORACLE_COLLECTION") == "custom_corpus"
+                assert os.environ.get("ORACLE_RAG_DB_DIR", "").replace("\\", "/").endswith("custom_corpus/lancedb")
+                print("  ✅ _ensure_oracle_config sets smart collection and type_filter from YAML.")
             finally:
                 os.chdir(orig_cwd)
 
@@ -714,26 +839,8 @@ def test_yaml_persona_list_parsing():
                 os.chdir(orig_cwd)
 
 
-if __name__ == "__main__":
-    test_instruction_file_disk_cache_invalidation()
-    test_yaml_persona_list_parsing()
-    test_debate_flag()
-    test_debate_default()
-    test_cli_debate_pass_history_resolution()
-    test_no_pass_history_flag_parsing()
-    test_persist_flag_parsing()
-    test_persona_sequencing_flags_parsing()
-    test_persona_flags_parsing()
-    test_persona_missing_file_abort()
-    test_persona_prompt_injection_and_cache_invalidation()
-    test_cli_debate_reads_glob_and_sticky_expansion()
-    test_conventions_system_prompt_primacy()
-    test_conventions_disk_cache_invalidation()
-    test_get_model_settings_embodiment()
-    test_reasoning_effort_and_temp_flag_parsing()
-    test_build_llm_kwargs_reasoning_propagation()
-    test_ensure_oracle_config_db_and_type_filter()
-    test_cli_debate_yaml_persona_and_persist_fallback()
+# Removed premature __main__ block
+
 def test_oracle_and_architect_file_flags_parsing():
     """Verify --oracle-file, --oracle-files, --architect-file, and --architect-files parse correctly."""
     os.environ.pop("ORACLE_FILE_PATH", None)
@@ -768,15 +875,28 @@ def test_oracle_and_architect_file_flags_parsing():
 
 
 def test_debate_mode_file_interception():
-    """Verify that --file in debate mode is intercepted as ORACLE_FILE_PATH and not left in arguments."""
-    os.environ.pop("ORACLE_FILE_PATH", None)
-    args = ["--file", "oracle_rubric.md", "--debate", "code", "Fix bug"]
-    out, do_list, did_clear, _, _ = _extract_overrides(args)
+    """Verify that --file in debate mode is NOT hijacked as ORACLE_FILE_PATH and forms the shared prompt."""
+    import oracle_agent
+    import tempfile
 
-    assert out == ["Fix bug"]
-    assert os.environ.get("ORACLE_FILE_PATH") == "oracle_rubric.md"
     os.environ.pop("ORACLE_FILE_PATH", None)
-    print("  ✅ --file intercepted as ORACLE_FILE_PATH in debate mode.")
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as tf:
+        tf.write("# Shared Specification Content")
+        tf.flush()
+        file_path = tf.name
+
+    try:
+        args = ["--file", file_path, "--debate", "code", "Fix bug"]
+        remaining, do_list, did_clear, _, _ = _extract_overrides(args)
+        assert os.environ.get("ORACLE_FILE_PATH") is None, "--file must NOT set ORACLE_FILE_PATH"
+
+        question, display = oracle_agent._build_question(remaining)
+        assert question.startswith("Fix bug\n\n# Shared Specification Content")
+        assert display.startswith("Fix bug [file:")
+        print("  ✅ --file in debate mode prepends the inline message and shares the file content.")
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 
 def test_cli_debate_turn0_prompt_isolation():
@@ -851,6 +971,94 @@ def test_cli_debate_turn0_prompt_isolation():
             os.chdir(orig_cwd)
 
 
+def test_cli_debate_emits_timestamped_artifacts_and_archives_history():
+    """R2: Validates that standalone CLI debate writes all 3 artifacts and archives history."""
+    import oracle_agent
+    import tempfile
+    from unittest.mock import patch
+
+    class FakeChoice:
+        def __init__(self, content): self.message = type("Msg", (), {"content": content})()
+        def get(self, item, default=None): return getattr(self, item, default)
+        def __getitem__(self, item): return getattr(self, item)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        clean_env = {
+            k: v for k, v in os.environ.items()
+            if not k.startswith("ORACLE_") and not k.startswith("AI_FACTORY_")
+        }
+        clean_env["ORACLE_DEBATE_STEM"] = "audit_unit"
+
+        with patch.dict("os.environ", clean_env, clear=True), \
+             patch("orchestrate.AiderFactory") as mock_factory, \
+             patch("oracle_agent._retrieve", return_value=""), \
+             patch("litellm.completion", return_value=type("Resp", (), {"choices": [FakeChoice("VERDICT: AGREE")], "usage": {}})()):
+
+            mock_factory.return_value._aider_ask_turn.return_value = "PROPOSAL: verified fix"
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                ret = oracle_agent._run_cli_debate("Test artifact writing", "code", max_turns=1, rounds=1)
+                assert ret == 0
+
+                debates_dir = os.path.join(tmpdir, ".aider_factory", "logs", "debates")
+                assert os.path.isdir(debates_dir)
+                files = os.listdir(debates_dir)
+
+                v_files = [f for f in files if f.startswith("audit_unit_") and f.endswith(".verdict.md")]
+                d_files = [f for f in files if f.startswith("audit_unit_") and f.endswith(".debate.md")]
+                j_files = [f for f in files if f.startswith("audit_unit_") and f.endswith(".debate.json")]
+
+                assert len(v_files) == 1, f"Expected 1 verdict file, got: {v_files}"
+                assert len(d_files) == 1, f"Expected 1 debate markdown file, got: {d_files}"
+                assert len(j_files) == 1, f"Expected 1 ledger json file, got: {j_files}"
+
+                chat_dir = os.path.join(tmpdir, ".aider_factory", "logs", "chat_history")
+                assert os.path.isdir(chat_dir)
+                archived = [f for f in os.listdir(chat_dir) if f.startswith("audit_unit_") and f.endswith("_debate_history.md")]
+                assert len(archived) == 1, f"Expected archived chat history, got: {archived}"
+                print("  ✅ CLI debate artifact parity and history archival verified.")
+            finally:
+                os.chdir(orig_cwd)
+
+
+def test_cli_debate_multi_round_agreement_continuation_with_instruction_files():
+    """Verify debate continues to round 2 on agreement when distinct architect files are configured."""
+    import oracle_agent
+    import tempfile
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        a1 = os.path.join(tmpdir, "arch1.md")
+        a2 = os.path.join(tmpdir, "arch2.md")
+        with open(a1, "w", encoding="utf-8") as f:
+            f.write("SPEC_1")
+        with open(a2, "w", encoding="utf-8") as f:
+            f.write("SPEC_2")
+
+        clean_env = {
+            "ARCHITECT_FILE_PATH": f"{a1},{a2}",
+            "ORACLE_DEBATE_STEM": "test_stem",
+        }
+        with patch.dict("os.environ", clean_env, clear=True), \
+             patch("orchestrate.AiderFactory") as mock_factory, \
+             patch("oracle_agent._retrieve", return_value=""), \
+             patch("litellm.completion", return_value=type("Resp", (), {"choices": [type("C", (), {"message": type("M", (), {"content": "VERDICT: AGREE"})()})()], "usage": {}})()):
+
+            mock_factory.return_value._aider_ask_turn.return_value = "PROPOSAL: fix"
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                ret = oracle_agent._run_cli_debate("Query", "code", max_turns=1, rounds=2, persist=False)
+                assert ret == 0
+                assert mock_factory.return_value._aider_ask_turn.call_count == 2, (
+                    f"Expected 2 turns across rounds despite round 1 agreement, got {mock_factory.return_value._aider_ask_turn.call_count}"
+                )
+                print("  ✅ Debate continues to round 2 on agreement with multi-round instruction files.")
+            finally:
+                os.chdir(orig_cwd)
+
+
 def test_cli_debate_multi_round_file_cycling():
     """Verify --architect-files cycles across rounds."""
     import oracle_agent
@@ -911,7 +1119,70 @@ def test_cli_debate_multi_round_file_cycling():
             os.chdir(orig_cwd)
 
 
+def test_env_plan_do_persona_and_instruction_pairing_exists_and_resolves():
+    """Verify all personas and instruction files configured in env_plan_do.yml exist on disk
+    and conform to role terminal contracts (Oracle -> VERDICT:, Architect -> PROPOSAL:)."""
+    import yaml
+    from run_workflow import resolve_template_path
+
+    env_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "default_configs", "sample_yaml_config", "env_plan_do.yml"
+    )
+    assert os.path.isfile(env_path), f"env_plan_do.yml not found at {env_path}"
+    with open(env_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    phase2 = cfg["phases"][1]
+    pre_edit = phase2["oracle"]["pre_edit_debate"]
+
+    # 1. Verify Oracle Personas (must terminate with VERDICT:)
+    for p in pre_edit["oracle_persona"]:
+        resolved = resolve_template_path(p)
+        assert resolved is not None, f"Could not resolve oracle persona: {p}"
+        assert os.path.isfile(resolved), f"Missing file: {resolved}"
+        with open(resolved, "r", encoding="utf-8") as f:
+            content = f.read()
+        assert "VERDICT:" in content, f"Oracle persona {p} must define VERDICT: output contract"
+
+    # 2. Verify Architect Personas (must terminate with PROPOSAL:)
+    for p in pre_edit["architect_persona"]:
+        resolved = resolve_template_path(p)
+        assert resolved is not None, f"Could not resolve architect persona: {p}"
+        assert os.path.isfile(resolved), f"Missing file: {resolved}"
+        with open(resolved, "r", encoding="utf-8") as f:
+            content = f.read()
+        assert "PROPOSAL:" in content, f"Architect persona {p} must define PROPOSAL: terminal directive"
+
+    # 3. Verify Oracle Instruction Files (must contain Primacy & Recency anchors)
+    for fpath in pre_edit["oracle_file"]:
+        resolved = resolve_template_path(fpath)
+        assert resolved is not None, f"Could not resolve oracle file: {fpath}"
+        assert os.path.isfile(resolved), f"Missing file: {resolved}"
+        with open(resolved, "r", encoding="utf-8") as f:
+            content = f.read()
+        assert "Primacy Anchor" in content
+        assert "Recency Anchor" in content
+
+    # 4. Verify Architect Instruction Files (must contain Task ID schema and Cumulative Invariant)
+    for fpath in pre_edit["architect_file"]:
+        resolved = resolve_template_path(fpath)
+        assert resolved is not None, f"Could not resolve architect file: {fpath}"
+        assert os.path.isfile(resolved), f"Missing file: {resolved}"
+        with open(resolved, "r", encoding="utf-8") as f:
+            content = f.read()
+        assert "Task ID" in content
+        assert "PROPOSAL:" in content
+        assert "Cumulative Plan Invariant" in content, (
+            f"Architect instruction file {fpath} must define Cumulative Plan Invariant"
+        )
+    print("  ✅ env_plan_do.yml persona and instruction pairings verified.")
+
+
 if __name__ == "__main__":
+    test_env_plan_do_persona_and_instruction_pairing_exists_and_resolves()
+    test_instruction_file_disk_cache_invalidation()
+    test_yaml_persona_list_parsing()
     test_debate_flag()
     test_debate_default()
     test_cli_debate_pass_history_resolution()
@@ -927,10 +1198,16 @@ if __name__ == "__main__":
     test_get_model_settings_embodiment()
     test_reasoning_effort_and_temp_flag_parsing()
     test_build_llm_kwargs_reasoning_propagation()
+    test_ensure_oracle_config_working_dir_discovery_priority()
+    test_ensure_oracle_config_ignores_foreign_ambient_config_and_session()
+    test_ensure_oracle_config_rejects_placeholder_working_directory()
+    test_ensure_oracle_config_sanitizes_placeholder_endpoints()
     test_ensure_oracle_config_db_and_type_filter()
     test_cli_debate_yaml_persona_and_persist_fallback()
     test_oracle_and_architect_file_flags_parsing()
     test_debate_mode_file_interception()
     test_cli_debate_turn0_prompt_isolation()
     test_cli_debate_multi_round_file_cycling()
+    test_cli_debate_emits_timestamped_artifacts_and_archives_history()
+    test_cli_debate_multi_round_agreement_continuation_with_instruction_files()
     print("\n🎉 All CLI Oracle Debate Tests Passed!")

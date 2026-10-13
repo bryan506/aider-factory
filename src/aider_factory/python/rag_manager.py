@@ -96,10 +96,25 @@ def embed_texts(texts, backend, model, api_base, batch_size=8):
             emb_key = _resolve_api_key(model, None)
 
             for i in range(0, len(texts), batch_size):
-                emb_kwargs = {"model": model, "input": texts[i : i + batch_size]}
+                batch_input = texts[i : i + batch_size]
+                emb_kwargs = {"model": model, "input": batch_input, "timeout": 60}
                 if emb_key:
                     emb_kwargs["api_key"] = emb_key
-                r = litellm.embedding(**emb_kwargs)
+
+                retries = 3
+                last_err = None
+                r = None
+                for attempt in range(retries + 1):
+                    try:
+                        r = litellm.embedding(**emb_kwargs)
+                        break
+                    except Exception as e:
+                        last_err = e
+                        if attempt < retries:
+                            time.sleep(2 * (attempt + 1))
+                if r is None:
+                    raise last_err
+
                 out.extend(d["embedding"] for d in r["data"])
                 
                 try:

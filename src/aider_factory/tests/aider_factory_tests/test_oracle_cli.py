@@ -82,6 +82,105 @@ def test_explicit_collection_overrides_leaked_db_dir():
     print("  ✅ --collection explicitly overrides leaked ORACLE_RAG_DB_DIR.")
 
 
+def test_oracle_cli_config_flag_parsing():
+    for k in ["ORACLE_CONFIG_FILE", "ORACLE_EXPLICIT_CONFIG"]:
+        os.environ.pop(k, None)
+    args = ["--config", "my_custom_env.yml", "Test query"]
+    out, do_list, did_clear, _, _ = _extract_overrides(args)
+    assert out == ["Test query"]
+    assert os.environ.get("ORACLE_EXPLICIT_CONFIG") == "1"
+    assert os.environ.get("ORACLE_CONFIG_FILE") == os.path.abspath("my_custom_env.yml")
+    print("  ✅ --config flag parsed and normalized to absolute path.")
+
+
+def test_oracle_cli_collection_path_resolution():
+    for k in ["ORACLE_COLLECTION", "ORACLE_RAG_DB_DIR", "ORACLE_EXPLICIT_COLLECTION"]:
+        os.environ.pop(k, None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        coll_dir = os.path.join(tmpdir, "My_External_Corpus")
+        sub_lancedb = os.path.join(coll_dir, "lancedb")
+        os.makedirs(sub_lancedb, exist_ok=True)
+        args = ["--collection", coll_dir, "Query"]
+        out, do_list, did_clear, _, _ = _extract_overrides(args)
+        assert os.environ.get("ORACLE_EXPLICIT_COLLECTION") == "1"
+        assert os.environ.get("ORACLE_COLLECTION") == "My_External_Corpus"
+        assert os.environ.get("ORACLE_RAG_DB_DIR") == os.path.abspath(sub_lancedb)
+    print("  ✅ --collection with directory path resolves collection name and lancedb/ subfolder.")
+
+
+def test_oracle_cli_collection_path_ending_in_lancedb():
+    for k in ["ORACLE_COLLECTION", "ORACLE_RAG_DB_DIR", "ORACLE_EXPLICIT_COLLECTION"]:
+        os.environ.pop(k, None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        coll_dir = os.path.join(tmpdir, "My_External_Corpus")
+        sub_lancedb = os.path.join(coll_dir, "lancedb")
+        os.makedirs(sub_lancedb, exist_ok=True)
+        args = ["--collection", sub_lancedb, "Query"]
+        _extract_overrides(args)
+        assert os.environ.get("ORACLE_EXPLICIT_COLLECTION") == "1"
+        assert os.environ.get("ORACLE_COLLECTION") == "My_External_Corpus"
+        assert os.environ.get("ORACLE_RAG_DB_DIR") == os.path.abspath(sub_lancedb)
+    print("  ✅ --collection pointing directly to lancedb/ resolves parent directory name.")
+
+
+def test_oracle_cli_collection_tilde_and_relative_path_expansion():
+    for k in ["ORACLE_COLLECTION", "ORACLE_RAG_DB_DIR", "ORACLE_EXPLICIT_COLLECTION"]:
+        os.environ.pop(k, None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        coll_dir = os.path.join(tmpdir, "Tilde_Corpus")
+        sub_lancedb = os.path.join(coll_dir, "lancedb")
+        os.makedirs(sub_lancedb, exist_ok=True)
+
+        orig_cwd = os.getcwd()
+        os.chdir(tmpdir)
+        try:
+            rel_arg = os.path.join(".", "Tilde_Corpus")
+            args = ["--collection", rel_arg, "Query"]
+            _extract_overrides(args)
+            assert os.environ.get("ORACLE_EXPLICIT_COLLECTION") == "1"
+            assert os.environ.get("ORACLE_COLLECTION") == "Tilde_Corpus"
+            assert os.environ.get("ORACLE_RAG_DB_DIR") == os.path.abspath(sub_lancedb)
+        finally:
+            os.chdir(orig_cwd)
+    print("  ✅ --collection correctly expands relative paths and resolves lancedb/ directory.")
+
+
+def test_oracle_cli_db_flag_regression_ignored():
+    for k in ["ORACLE_COLLECTION", "ORACLE_RAG_DB_DIR", "ORACLE_EXPLICIT_DB"]:
+        os.environ.pop(k, None)
+    args = ["--db", "/some/legacy/db/path", "Query"]
+    out, do_list, did_clear, _, _ = _extract_overrides(args)
+    assert "ORACLE_EXPLICIT_DB" not in os.environ
+    assert os.environ.get("ORACLE_RAG_DB_DIR") != "/some/legacy/db/path"
+    print("  ✅ Obsolete --db flag is safely ignored and does not mutate environment.")
+
+
+def test_oracle_cli_collection_path_overrides_yaml_default():
+    for k in ["ORACLE_COLLECTION", "ORACLE_RAG_DB_DIR", "ORACLE_EXPLICIT_COLLECTION"]:
+        os.environ.pop(k, None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ext_coll = os.path.join(tmpdir, "Global_Knowledge")
+        sub_lancedb = os.path.join(ext_coll, "lancedb")
+        os.makedirs(sub_lancedb, exist_ok=True)
+
+        args = ["--collection", ext_coll, "Question"]
+        _extract_overrides(args)
+
+        fake_yaml = {
+            "phases": [
+                {"enabled": True, "rag": {"collection_name": "local_default_docs"}}
+            ]
+        }
+        with patch("os.path.exists", return_value=True), \
+             patch("builtins.open"), \
+             patch("yaml.safe_load", return_value=fake_yaml):
+            oracle_agent._ensure_oracle_config()
+
+        assert os.environ.get("ORACLE_COLLECTION") == "Global_Knowledge"
+        assert os.environ.get("ORACLE_RAG_DB_DIR") == os.path.abspath(sub_lancedb)
+    print("  ✅ CLI --collection <path> survives _ensure_oracle_config without being reset by YAML.")
+
+
 def test_explicit_collection_override_preserves_rag_db_dir():
     for k in ["ORACLE_COLLECTION", "ORACLE_RAG_DB_DIR", "ORACLE_EXPLICIT_COLLECTION"]:
         os.environ.pop(k, None)
@@ -357,6 +456,39 @@ def test_auto_job_cloud_model_bypasses_dummy_api_key():
             os.environ.pop(k, None)
 
 
+def test_non_gemini_cloud_model_omits_local_router_endpoint():
+    """Verify non-Gemini cloud models omit ORACLE_AGENT_API_BASE when local router is defined in config."""
+    import yaml
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = {
+            "endpoints": {"rag_agent_api": "http://127.0.0.1:4000/v1"},
+            "phases": [
+                {
+                    "enabled": True,
+                    "models": {"rag_agent": "anthropic/claude-3-7-sonnet"},
+                }
+            ],
+        }
+        cfg_path = os.path.join(tmpdir, ".env.yml")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            yaml.dump(cfg, f)
+
+        clean_env = {"ORACLE_CONFIG_FILE": cfg_path}
+        with patch.dict("os.environ", clean_env, clear=True):
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                oracle_agent._ensure_oracle_config()
+                assert os.environ.get("ORACLE_AGENT_MODEL") == "anthropic/claude-3-7-sonnet"
+                assert "ORACLE_AGENT_API_BASE" not in os.environ, (
+                    "Non-Gemini cloud model must not inherit local router endpoint!"
+                )
+                print("  ✅ Non-gemini cloud model omits local router endpoint.")
+            finally:
+                os.chdir(orig_cwd)
+
+
 def test_oracle_passes_session_id():
     if "ORACLE_RETRIEVE_MODE" in os.environ:
         del os.environ["ORACLE_RETRIEVE_MODE"]
@@ -383,6 +515,12 @@ def test_oracle_passes_session_id():
 
 
 if __name__ == "__main__":
+    test_oracle_cli_config_flag_parsing()
+    test_oracle_cli_collection_path_resolution()
+    test_oracle_cli_collection_path_ending_in_lancedb()
+    test_oracle_cli_collection_tilde_and_relative_path_expansion()
+    test_oracle_cli_db_flag_regression_ignored()
+    test_oracle_cli_collection_path_overrides_yaml_default()
     test_no_rag_flag()
     test_explicit_collection_overrides_leaked_db_dir()
     test_explicit_collection_override_preserves_rag_db_dir()
@@ -395,4 +533,5 @@ if __name__ == "__main__":
     test_oracle_clear_custom_session_file()
     test_cloud_model_bypasses_dummy_api_key()
     test_auto_job_cloud_model_bypasses_dummy_api_key()
+    test_non_gemini_cloud_model_omits_local_router_endpoint()
     print("\n🎉 All CLI Oracle Tests Passed!")

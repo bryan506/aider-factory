@@ -62,6 +62,56 @@ def test_type_filter():
     assert "doc.md" not in res
     print("  ✅ --type code filter successfully narrows tables.")
 
+
+def test_retrieve_wildcard_all_tables_with_external_db():
+    ext_dir = os.path.join(base_dir, "ext_db")
+    os.makedirs(ext_dir, exist_ok=True)
+    ext_db = lancedb.connect(ext_dir)
+    ext_db.create_table("custom_financials", schema=MChunk).add([
+        {"text": "Net Margin 24%", "vector": [0.1]*1024, "source_file": "fin.pdf", "source_type": "doc", "line_start": 1, "line_end": 2}
+    ])
+    ext_db.create_table("custom_code", schema=MChunk).add([
+        {"text": "def calc_margin(): pass", "vector": [0.1]*1024, "source_file": "margin.py", "source_type": "code", "line_start": 1, "line_end": 5}
+    ])
+    os.environ["ORACLE_RAG_DB_DIR"] = ext_dir
+    os.environ["ORACLE_COLLECTION"] = "*"
+    os.environ["ORACLE_TYPE_FILTER"] = ""
+    res = _retrieve("margin", 5)
+    assert "[source: doc | fin.pdf:1-2]" in res
+    assert "[source: code | margin.py:1-5]" in res
+    print("  ✅ Wildcard retrieval successfully queries all tables in external database.")
+
+
+def test_retrieve_smart_collection_table_prefix_matching():
+    ext_dir = os.path.join(base_dir, "smart_coll_db")
+    os.makedirs(ext_dir, exist_ok=True)
+    ext_db = lancedb.connect(ext_dir)
+    ext_db.create_table("Financial_Corpus_Q3_docs", schema=MChunk).add([
+        {"text": "Revenue grew by 18%", "vector": [0.1]*1024, "source_file": "q3.pdf", "source_type": "doc", "line_start": 10, "line_end": 12}
+    ])
+    ext_db.create_table("Unrelated_Corpus_docs", schema=MChunk).add([
+        {"text": "Irrelevant data", "vector": [0.1]*1024, "source_file": "other.pdf", "source_type": "doc", "line_start": 1, "line_end": 2}
+    ])
+    os.environ["ORACLE_RAG_DB_DIR"] = ext_dir
+    os.environ["ORACLE_COLLECTION"] = "Financial_Corpus"
+    os.environ["ORACLE_TYPE_FILTER"] = ""
+    res = _retrieve("revenue", 5)
+    assert "[source: doc | q3.pdf:10-12]" in res
+    assert "other.pdf" not in res
+    print("  ✅ Smart collection table prefix correctly matches and filters LanceDB tables.")
+
+
+def test_retrieve_embedder_unreachable_fallback_sentence_transformers():
+    os.environ["ORACLE_RAG_DB_DIR"] = os.path.abspath(base_dir)
+    os.environ["ORACLE_COLLECTION"] = "*"
+    os.environ["ORACLE_EMBED_BACKEND"] = "openai"
+    os.environ["ORACLE_EMBED_API_BASE"] = "http://127.0.0.1:54321/v1"
+    os.environ["ORACLE_EMBED_MODEL"] = "text-embedding-ada-002"
+
+    res = _retrieve("query", 5)
+    assert os.environ.get("ORACLE_EMBED_BACKEND") == "sentence-transformers" or "[source:" in res
+    print("  ✅ Unreachable embedder endpoint caught gracefully with local fallback.")
+
 def teardown_function():
     for k in ("ORACLE_COLLECTION", "ORACLE_TYPE_FILTER", "ORACLE_RAG_DB_DIR"):
         os.environ.pop(k, None)
@@ -72,6 +122,10 @@ if __name__ == "__main__":
     test_fuse_all()
     setup_function()
     test_type_filter()
+    test_retrieve_wildcard_all_tables_with_external_db()
+    test_retrieve_smart_collection_table_prefix_matching()
+    setup_function()
+    test_retrieve_embedder_unreachable_fallback_sentence_transformers()
     teardown_function()
     print("🎉 All Phase 4 Retrieve Tests Passed!")
     shutil.rmtree(base_dir)

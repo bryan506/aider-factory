@@ -34,8 +34,27 @@ def _get_clean_env(extra_env=None):
     """Construct an isolated environment dictionary scrubbing ambient session and factory variables."""
     env = os.environ.copy()
     for k in list(env.keys()):
-        if k.startswith("AI_FACTORY_") or k.startswith("ORACLE_") or k == "AIDER_ARCHITECT":
+        if (
+            k.startswith("AI_FACTORY_")
+            or k.startswith("ORACLE_")
+            or k.startswith("AIDER_")
+            or k.startswith("GOOGLE_")
+            or k.startswith("VERTEX")
+            or k in (
+                "LITELLM_API_KEY",
+                "LITELLM_BASE_URL",
+                "GEMINI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "OPENROUTER_API_KEY",
+                "GROQ_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "MISTRAL_API_KEY",
+            )
+        ):
             env.pop(k, None)
+    # Default non-interactive dummy key so headless aider commands (e.g. --show-repo-map) never prompt on stdin
+    env["OPENAI_API_KEY"] = "sk-dummy"
     if extra_env:
         env.update(extra_env)
     return env
@@ -52,8 +71,10 @@ def test_e2e_matrix_1_cli_aider_factory():
             [sys.executable, cli_script, "--repo-map"],
             cwd=tmp_dir,
             env=env,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            timeout=30,
         )
         assert proc.returncode == 0, f"Expected rc 0, got {proc.returncode}: {proc.stderr}"
 
@@ -112,8 +133,10 @@ def test_e2e_matrix_1_cli_aider_factory():
             [sys.executable, cli_script, "--repo-map"],
             cwd=tmp_dir,
             env=env,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            timeout=30,
         )
         assert reinit_proc.returncode == 0
         with open(custom_file, "r", encoding="utf-8") as f:
@@ -265,8 +288,10 @@ def test_e2e_partial_markdown_tree_backfill():
             [sys.executable, cli_script, "--repo-map"],
             cwd=tmp_dir,
             env=_get_clean_env(),
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            timeout=30,
         )
         assert proc.returncode == 0
 
@@ -293,8 +318,10 @@ def test_e2e_existing_repo_file_discovery():
             [sys.executable, cli_script, "--repo-map"],
             cwd=tmp_dir,
             env=_get_clean_env(),
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            timeout=30,
         )
         assert proc.returncode == 0
         assert not (tmp_path / "scratchpad.py").exists(), "Must not create scratchpad.py if source files exist"
@@ -443,6 +470,80 @@ def test_e2e_helper_non_utf8_context_file():
         mock_server.server_close()
 
 
+def test_e2e_helper_model_routing_and_cloud_isolation():
+    """Zero-mock live subprocess test verifying model resolution and endpoint isolation via CLI."""
+    print("\n[Helper Model Routing E2E] Testing subprocess model resolution and router isolation...")
+    import json
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading
+
+    requested_models = []
+
+    class _MockRouterHandler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"data": [{"id": "qwen2.5-coder:latest"}]}')
+
+        def do_POST(self):
+            content_len = int(self.headers.get("Content-Length", 0))
+            if content_len > 0:
+                try:
+                    payload = json.loads(self.rfile.read(content_len).decode("utf-8", errors="replace"))
+                    requested_models.append(payload.get("model"))
+                except Exception:
+                    pass
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(
+                b'data: {"id":"1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"OK"}}]}\n\n'
+                b'data: [DONE]\n\n'
+            )
+
+    server = HTTPServer(("127.0.0.1", 0), _MockRouterHandler)
+    server_port = server.server_port
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_dir = os.path.abspath(os.path.join(script_dir, "../../../.."))
+            existing_pp = os.environ.get("PYTHONPATH", "")
+            pp = f"{src_dir}{os.pathsep}{python_dir}{os.pathsep}{existing_pp}" if existing_pp else f"{src_dir}{os.pathsep}{python_dir}"
+
+            env_router = _get_clean_env({
+                "AIDER_HELPER_API_BASE": f"http://127.0.0.1:{server_port}/v1",
+                "AIDER_HELPER_MODEL": "litellm/custom-router-model",
+                "LITELLM_API_KEY": "sk-dummy-token",
+                "PYTHONPATH": pp,
+            })
+            res_router = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.argv=['aider-helper', 'query', '-a', 'Explain routing']; from aider_factory.cli import helper_cli; helper_cli()",
+                ],
+                cwd=tmp_dir,
+                env=env_router,
+                capture_output=True,
+                text=True,
+            )
+            assert res_router.returncode == 0, f"Router subprocess failed: {res_router.stderr}"
+            assert "[aider-helper] Asking openai/custom-router-model..." in res_router.stdout or "[aider-helper] Asking openai/custom-router-model..." in res_router.stderr
+            assert any(m in ("custom-router-model", "openai/custom-router-model") for m in requested_models)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    print("  ✅ Helper Model Routing & Isolation E2E PASS")
+
+
 if __name__ == "__main__":
     print("\n==================================================")
     print("Starting Zero-Mock Factory Matrix Smoke Test Suite")
@@ -456,4 +557,5 @@ if __name__ == "__main__":
     test_e2e_existing_repo_file_discovery()
     test_e2e_helper_flags_real_context_loading()
     test_e2e_helper_non_utf8_context_file()
+    test_e2e_helper_model_routing_and_cloud_isolation()
     print("\n🎉 All Initialization Matrix & Edge-Case E2E Tests Passed Successfully!")

@@ -14,7 +14,9 @@ ALL_KEYS_TO_POP = [
     "DEEPSEEK_API_KEY", "AIDER_DEEPSEEK_API_KEY",
     "MISTRAL_API_KEY", "AIDER_MISTRAL_API_KEY",
     "OPENCODE_API_KEY", "LITELLM_API_KEY", "LITELLM_BASE_URL",
-    "AIDER_HELPER_API_BASE", "AIDER_HELPER_MODEL"
+    "AIDER_HELPER_API_BASE", "AIDER_HELPER_MODEL",
+    "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_VERTEX_PROJECT",
+    "VERTEXAI_PROJECT", "GOOGLE_VERTEX_LOCATION",
 ]
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -653,6 +655,201 @@ def test_25_bootstrap_provisions_bash_wrappers():
                 os.environ[k] = v
 
 
+def test_26_helper_model_normalization():
+    """Verify normalize_helper_model converts provider aliases to LiteLLM standards."""
+    assert bootstrap.normalize_helper_model("litellm/glm-5.3") == "openai/glm-5.3"
+    assert bootstrap.normalize_helper_model("google-vertex/gemini-2.5-flash") == "vertex_ai/gemini-2.5-flash"
+    assert bootstrap.normalize_helper_model("vertex/gemini-2.5-flash") == "vertex_ai/gemini-2.5-flash"
+    assert bootstrap.normalize_helper_model("google/gemini-2.5-flash") == "gemini/gemini-2.5-flash"
+    assert bootstrap.normalize_helper_model("gemini/gemini-2.5-flash") == "gemini/gemini-2.5-flash"
+    assert bootstrap.normalize_helper_model("qwen2.5-coder", router_active=True) == "openai/qwen2.5-coder"
+    assert bootstrap.normalize_helper_model("qwen2.5-coder", router_active=False) == "qwen2.5-coder"
+
+
+def test_27_helper_cloud_model_ignores_ambient_router_endpoint():
+    """Verify choosing a gemini model ignores ambient AIDER_HELPER_API_BASE and omits api_base."""
+    with patch("litellm.completion", return_value=mock_response) as mock_comp:
+        old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
+        try:
+            os.environ["AIDER_HELPER_API_BASE"] = "http://192.168.100.1:4000/v1"
+            os.environ["LITELLM_API_KEY"] = "sk-router"
+            os.environ["GEMINI_API_KEY"] = "test-gemini-key"
+            os.environ["AIDER_HELPER_MODEL"] = "gemini/gemini-2.5-flash"
+
+            bootstrap.run_query("Explain concepts", None, "", ask_mode=True)
+            mock_comp.assert_called()
+            kwargs = mock_comp.call_args[1]
+            assert kwargs["model"] == "gemini/gemini-2.5-flash"
+            assert "api_base" not in kwargs, "Cloud Gemini calls must not be routed to local api_base"
+            assert "api_key" not in kwargs, "Cloud Gemini calls must omit explicit api_key in kwargs"
+        finally:
+            for k, v in old_env.items():
+                if v is not None:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
+
+
+def test_28_helper_vertex_credentials_detection_and_isolation():
+    """Verify Google Cloud Vertex models detect Vertex credentials and normalize to vertex_ai/."""
+    with patch("litellm.completion", return_value=mock_response) as mock_comp, \
+         patch("bootstrap._has_vertex_auth", return_value=True):
+        old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
+        try:
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/user/creds.json"
+            os.environ["GOOGLE_VERTEX_PROJECT"] = "gemini-ai-studio-488316"
+            os.environ["AIDER_HELPER_API_BASE"] = "http://192.168.100.1:4000/v1"
+            os.environ["AIDER_HELPER_MODEL"] = "google-vertex/gemini-2.5-flash"
+
+            assert bootstrap.detect_api_key()[0] == "GOOGLE_APPLICATION_CREDENTIALS"
+
+            bootstrap.run_query("Explain concepts", None, "", ask_mode=True)
+            mock_comp.assert_called()
+            kwargs = mock_comp.call_args[1]
+            assert kwargs["model"] == "vertex_ai/gemini-2.5-flash"
+            assert "api_base" not in kwargs, "Vertex AI calls must connect directly without local api_base"
+        finally:
+            for k, v in old_env.items():
+                if v is not None:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
+
+
+def test_29_helper_litellm_prefix_normalization_with_router():
+    """Verify litellm/<model> is normalized to openai/<model> with active router endpoint."""
+    with patch("litellm.completion", return_value=mock_response) as mock_comp:
+        old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
+        try:
+            os.environ["AIDER_HELPER_API_BASE"] = "http://192.168.100.1:4000/v1"
+            os.environ["LITELLM_API_KEY"] = "sk-router-token"
+            os.environ["AIDER_HELPER_MODEL"] = "litellm/glm-5.3"
+
+            bootstrap.run_query("Explain concepts", None, "", ask_mode=True)
+            mock_comp.assert_called()
+            kwargs = mock_comp.call_args[1]
+            assert kwargs["model"] == "openai/glm-5.3"
+            assert kwargs["api_base"] == "http://192.168.100.1:4000/v1"
+            assert kwargs["api_key"] == "sk-router-token"
+        finally:
+            for k, v in old_env.items():
+                if v is not None:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
+
+
+def test_30_helper_fallback_chain_on_invalid_model():
+    """Verify failure on user-specified model falls back to active provider default."""
+    calls = []
+
+    def mock_completion_side_effect(**kwargs):
+        calls.append(kwargs)
+        if kwargs["model"] == "openai/invalid-nonexistent-model":
+            raise RuntimeError("Invalid model name")
+        return mock_response
+
+    with patch("litellm.completion", side_effect=mock_completion_side_effect):
+        old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
+        try:
+            os.environ["GEMINI_API_KEY"] = "gemini-key"
+            os.environ["AIDER_HELPER_MODEL"] = "openai/invalid-nonexistent-model"
+
+            bootstrap.run_query("Explain concepts", None, "", ask_mode=True)
+            assert len(calls) == 2
+            assert calls[0]["model"] == "openai/invalid-nonexistent-model"
+            assert calls[1]["model"] == "gemini/gemini-2.5-flash"
+        finally:
+            for k, v in old_env.items():
+                if v is not None:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
+
+
+def test_31_helper_all_cloud_providers_ignore_ambient_router():
+    """Verify all cloud providers strip api_base even when AIDER_HELPER_API_BASE is set."""
+    cloud_models = [
+        ("anthropic/claude-3-7-sonnet-latest", "ANTHROPIC_API_KEY"),
+        ("groq/llama-3.3-70b-versatile", "GROQ_API_KEY"),
+        ("deepseek/deepseek-chat", "DEEPSEEK_API_KEY"),
+        ("mistral/mistral-large-latest", "MISTRAL_API_KEY"),
+        ("openrouter/auto", "OPENROUTER_API_KEY"),
+    ]
+
+    for model_name, key_var in cloud_models:
+        with patch("litellm.completion", return_value=mock_response) as mock_comp:
+            old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
+            try:
+                os.environ["AIDER_HELPER_API_BASE"] = "http://192.168.100.1:4000/v1"
+                os.environ["LITELLM_API_KEY"] = "sk-router"
+                os.environ[key_var] = "test-cloud-key"
+                os.environ["AIDER_HELPER_MODEL"] = model_name
+
+                bootstrap.run_query("Test question", None, "", ask_mode=True)
+                mock_comp.assert_called()
+                kwargs = mock_comp.call_args[1]
+                assert kwargs["model"] == model_name
+                assert "api_base" not in kwargs, f"{model_name} must not be routed to local api_base"
+            finally:
+                for k, v in old_env.items():
+                    if v is not None:
+                        os.environ[k] = v
+                    else:
+                        os.environ.pop(k, None)
+
+
+def test_32_helper_provider_fallback_priority_hierarchy():
+    """Verify fallback hierarchy strictly respects provider precedence when no model is specified."""
+    # Priority 1: Google Cloud Vertex AI
+    with patch("litellm.completion", return_value=mock_response) as mock_comp, \
+         patch("bootstrap._has_vertex_auth", return_value=True):
+        old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
+        try:
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/path/to/creds.json"
+            os.environ["GEMINI_API_KEY"] = "gemini-key"
+            os.environ["ANTHROPIC_API_KEY"] = "anthropic-key"
+            bootstrap.run_query("Test question", None, "", ask_mode=True)
+            assert mock_comp.call_args[1]["model"] == "vertex_ai/gemini-2.5-flash"
+        finally:
+            for k, v in old_env.items():
+                if v is not None:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
+
+    # Priority 2: Google AI Studio (Gemini) over Anthropic
+    with patch("litellm.completion", return_value=mock_response) as mock_comp:
+        old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
+        try:
+            os.environ["GEMINI_API_KEY"] = "gemini-key"
+            os.environ["ANTHROPIC_API_KEY"] = "anthropic-key"
+            os.environ["OPENAI_API_KEY"] = "openai-key"
+            bootstrap.run_query("Test question", None, "", ask_mode=True)
+            assert mock_comp.call_args[1]["model"] == "gemini/gemini-2.5-flash"
+        finally:
+            for k, v in old_env.items():
+                if v is not None:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
+
+    # Priority 3: Anthropic over OpenAI
+    with patch("litellm.completion", return_value=mock_response) as mock_comp:
+        old_env = {k: os.environ.pop(k, None) for k in ALL_KEYS_TO_POP}
+        try:
+            os.environ["ANTHROPIC_API_KEY"] = "anthropic-key"
+            os.environ["OPENAI_API_KEY"] = "openai-key"
+            bootstrap.run_query("Test question", None, "", ask_mode=True)
+            assert mock_comp.call_args[1]["model"] == "anthropic/claude-3-7-sonnet-latest"
+        finally:
+            for k, v in old_env.items():
+                if v is not None:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
+
+
 if __name__ == "__main__":
     print("Running helper logic tests...")
     test_01_api_key_detection()
@@ -680,4 +877,11 @@ if __name__ == "__main__":
     test_23_select_models_edge_cases()
     test_24_generated_yaml_is_valid_yaml()
     test_25_bootstrap_provisions_bash_wrappers()
+    test_26_helper_model_normalization()
+    test_27_helper_cloud_model_ignores_ambient_router_endpoint()
+    test_28_helper_vertex_credentials_detection_and_isolation()
+    test_29_helper_litellm_prefix_normalization_with_router()
+    test_30_helper_fallback_chain_on_invalid_model()
+    test_31_helper_all_cloud_providers_ignore_ambient_router()
+    test_32_helper_provider_fallback_priority_hierarchy()
     print("All tests passed!")

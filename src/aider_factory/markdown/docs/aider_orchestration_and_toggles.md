@@ -2,119 +2,218 @@
 
 ## 1. Executive Overview & Foundational Invariants
 
-### Purpose
-The AI Factory pipeline wraps the Aider chat engine to orchestrate complex Directed Acyclic Graph (DAG) software engineering workflows. Rather than executing raw, unconstrained interactive AI coding sessions, the pipeline acts as an automated harness that controls Aider's execution environment, prompt injection, chat history preservation, and operational parameters on a per-phase and per-task basis.
+### 1.1 Architectural Purpose
+The AI Factory pipeline wraps the Aider chat engine to orchestrate complex Directed Acyclic Graph (DAG) software engineering workflows. Rather than executing unconstrained interactive AI coding sessions, the pipeline acts as a deterministic, headless-first orchestration harness that governs Aider's execution environment, prompt injection, chat history preservation, model routing, and operational parameters on a per-phase and per-task basis.
 
-### Foundational Invariants
-1. **YAML-Driven Orchestration Scope**: The pipeline configuration file (`.env.yml` / `session.yml`) is the single source of truth for execution parameters. Global default configuration files (`.aider.conf.yml`, `.aider.model.settings.yml`) are overridden dynamically at runtime by task-specific flags parsed from the YAML `toggles:` block.
-2. **Tri-Layer Flag Enforcement (Belt-and-Suspenders)**: When overriding Aider flags, the pipeline applies them across three simultaneous mechanisms: dynamically compiled session configuration files (`.aider.conf.yml`), CLI command-line arguments (e.g., `--yes-always`, `--map-tokens`), and environment variables (e.g., `AIDER_YES_ALWAYS=true`).
+By decoupling the high-level workflow definition from Aider's lower-level code editing loop, the pipeline enforces strict scope boundaries, automated multi-turn verification loops, and non-destructive fallback escalation across diverse local and cloud inference backends.
+
+### 1.2 The Eight Foundational Invariants
+1. **YAML-Driven Orchestration Scope**: The pipeline configuration file (`.env.yml` or `session.yml`) is the single source of truth for execution parameters. Global default configuration files (`.aider.conf.yml`, `.aider.model.settings.yml`) are overridden dynamically at runtime by task-specific flags parsed from the YAML `toggles:` block.
+2. **Tri-Layer Flag Enforcement (Belt-and-Suspenders)**: When overriding Aider flags, the pipeline enforces parameters simultaneously across three execution layers: dynamically compiled session configuration files (`.aider.conf.yml`), CLI command-line arguments (e.g., `--yes-always`, `--map-tokens`), and environment variables (e.g., `AIDER_YES_ALWAYS=true`).
 3. **Session State & Per-Target History Isolation**: Multi-turn conversation histories (`.aider.chat.history.md`, `.aider.input.history`) and session cost accounting ledgers are stored inside isolated session directories (`.aider_factory/sessions/<slug>/`). When `shared_history: false` is configured, active staging files are dynamically swapped and wiped per target file via `chat_history/` vaulting, guaranteeing zero conversation bleeding across sequential target files.
-4. **Strict Single-Target Scoping & Prompt Defense**: In autonomous execution (`pair_programming: false`), all tasks are strictly bound to their explicitly declared `target_files`. Out-of-scope mid-run confirmation prompts (`Add file to the chat?`, `Create new file?`) are deterministically rejected via a continuous rejection buffer (`b"n\n" * 50`) and the `--exit` flag, preventing model wandering and duplicate file creation.
-5. **Cross-Platform PTY & Stream Wrapping**: When `pair_programming: true` is configured, Aider is executed inside a platform-tailored wrapper (GNU `script -qfe` on Linux, BSD `script -q` on macOS, and direct line-buffered `Popen` on Windows) to support `prompt_toolkit` interactive prompt rendering while capturing all telemetry to `.pair_capture.log`.
+4. **Strict Single-Target Scoping & Prompt Defense**: In autonomous execution (`pair_programming: false`), all tasks are strictly bound to their explicitly declared `target_files`. Out-of-scope mid-run confirmation prompts (`Add file to the chat?`, `Create new file?`) are deterministically rejected via a continuous rejection buffer (`b"n\n" * 50`) and the `--exit` flag, preventing model wandering and phantom file creation.
+5. **Cross-Platform PTY & Line-Tee Stream Wrapping**: When `pair_programming: true` is configured, Aider is executed inside a platform-tailored wrapper (GNU `script -qfe` on Linux, BSD `script -q` on macOS, and direct line-buffered `Popen` on Windows) to support `prompt_toolkit` interactive prompt rendering while capturing all telemetry to `.pair_capture.log`.
 6. **Deterministic Fallback Escalation**: In iterative testing loops (`iterate_test: true`), if an initial execution attempt fails using `editor_agent`, subsequent outer-loop retry attempts automatically escalate model routing to `fallback_editor_model` (if configured) on attempt $N > 0$.
+7. **Process Tree Watchdog Termination**: Every subprocess invocation is guarded by an asynchronous watchdog timer (`AIDER_STREAM_TIMEOUT`, default 300s). Upon expiration, `kill_proc_tree` terminates the entire process tree (`taskkill /F /T` on Windows; process group `SIGKILL` on POSIX), preventing zombie background workers.
+8. **Stream Output Isolation**: For headless passes (e.g., `apply_agent.py`), raw token emissions, thinking traces, and file echoes are routed to `/dev/tty` (or `CONOUT$`) for live terminal visibility, keeping `stdout` strictly reserved for machine-parseable artifacts (such as unified git diffs).
 
 ---
 
 ## 2. System Topology & Lifecycle Flowcharts
 
+### 2.1 Complete Pipeline DAG Orchestration Flow
 The lifecycle of an Aider task invocation flows from YAML phase parsing through DAG task construction, session configuration compilation, and subprocess execution:
 
 ```mermaid
 graph TD
     A[YAML Configuration .env.yml] -->|Parse Phase & Toggles| B[run_workflow.py]
-    B -->|Instantiate Task Dataclass| C[Task Object]
+    B -->|Instantiate Task Dataclasses| C[Task DAG Node]
     C -->|Dispatch Task| D[AiderFactory.run_task / orchestrate.py]
-    
-    subgraph Execution Pipeline
-        D --> E{task.skip_aider?}
-        E -->|True| F[Execute Side-Agent Job / Ingest / Oracle]
-        E -->|False| G[Compile Session .aider.conf.yml]
-        
-        G --> H{pair_programming?}
-        H -->|True| I[Wrap with script -qfe PTY]
-        H -->|False| J[Build Headless Subprocess Command]
-        
-        I --> K[Spawn Aider PTY Subprocess]
-        J --> K
-        
-        K --> L{attempt > 0 & fallback_editor_model?}
-        L -->|Yes| M[Route Editor to fallback_editor_model]
-        L -->|No| N[Route Editor to editor_model]
-        
-        M --> O[Execute Aider Iteration Pass]
-        N --> O
-        
-        O --> P[Capture Output via OSTee / PTY Log]
-        P --> Q[Archive History & Telemetry Logs]
+
+    subgraph State Management
+        D -->|If history_stem set| E[AiderFactory._swap_in_state]
+        E --> F[Active Staging: .aider.chat.history.md]
+    end
+
+    subgraph Task Routing
+        F --> G{task.skip_aider?}
+        G -->|True| H[Execute RAG Ingest / Oracle Job / Evidence Audit]
+        G -->|False| I{task.deliberate?}
+        I -->|True| J[Execute 2-Party Debate / deliberate.py]
+        I -->|False| K[Compile Session .aider.conf.yml & .aider.model.settings.yml]
+    end
+
+    subgraph Execution Harness
+        K --> L{iterate_test & attempt > 0?}
+        L -->|Yes| M[Run Baseline Test Suite]
+        M -->|Tests Pass| N[Task Success: Bypass Aider]
+        M -->|Tests Fail| O[Inject Failure Log into Repair Prompt]
+        L -->|No| P[Inject Plan / Message File]
+
+        O --> Q{pair_programming?}
+        P --> Q
+        Q -->|True| R[Wrap via PTY: script -qfe / Win32 line-tee]
+        Q -->|False| S[Headless Popen with Continuous n-buffer]
+
+        R --> T[Aider Subprocess Execution]
+        S --> T
+    end
+
+    subgraph Post-Execution & Verification
+        T --> U{task.final_check?}
+        U -->|True| V[Re-run test_cmd Once]
+        V -->|Pass| W[Task Success]
+        V -->|Fail & soft_fail| X[Soft Success: Defer to Downstream Finalize]
+        V -->|Fail & !soft_fail| Y[Task Failure]
+        U -->|False| Z[Evaluate Process Return Code]
+        Z -->|rc == 0| W
+        Z -->|rc != 0| Y
+        W --> AA[AiderFactory._swap_out_state]
+        X --> AA
+        Y --> AA
     end
 ```
 
-### Lifecycle Data Flow State Machine
+### 2.2 Task Lifecycle State Machine (Produce-Verify-Escalate-Finalize)
+The core architecture follows a standardized four-phase lifecycle for every target file:
 
 ```
-[YAML Config] ──► [run_workflow.py] ──► [Task Dataclass]
-                                              │
- ┌────────────────────────────────────────────┴──────────────────────────────────────────┐
- │ Task Parameters:                                                                     │
- │  - model / editor_model / fallback_editor_model                                       │
- │  - map_tokens / map_refresh / map_multiplier_no_files                                │
- │  - max_chat_history_tokens / yes_always / auto_accept_architect                       │
- │  - auto_commits / suggest_shell_commands / detect_urls / disable_playwright          │
- └────────────────────────────────────────────┬──────────────────────────────────────────┘
-                                              │
-                                              ▼
-                                 [orchestrate.py: Task Execution]
-                                              │
-                     ┌────────────────────────┴────────────────────────┐
-                     ▼                                                 ▼
-        [Dynamic Config Compilation]                     [Environment Injection]
-      Writes session .aider.conf.yml                    AIDER_YES_ALWAYS, OPENAI_API_BASE
-                     │                                                 │
-                     └────────────────────────┬────────────────────────┘
-                                              │
-                                              ▼
-                                 [Aider Subprocess Launch]
-                                              │
-                        ┌─────────────────────┴─────────────────────┐
-                        ▼                                           ▼
-             [Autonomous Mode]                           [Pair Programming Mode]
-       Popen(cmd_str, shell=True)                   Popen(["script", "-qfe", "-c", ...])
-                        │                                           │
-                        └─────────────────────┬─────────────────────┘
-                                              │
-                                              ▼
-                               [Telemetry & Log Archival]
-                Archives .aider.chat.history.md & .aider.llm.history to
-                   .aider_factory/logs/chat_history/ and llm_history/
+  [Produce Node]
+   ├── Job 1 (Implementation): Edits target_files via job_one_plan
+   └── Job 2 (Spec Validation): Audits target_files via job_two_plan
+          │
+          ▼
+  [Verify Node]
+   └── Iterative Test Loop: Runs test_cmd up to loop_aider_test attempts
+          ├── Pass: Exit task with success
+          └── Fail (exhausted): Advance to Escalation
+          │
+          ▼
+  [Escalate Node]
+   ├── Deliberation (Ask Mode): Architect <-> Oracle multi-turn debate
+   │    └── Ledger consensus: 'agreed' | 'deadlock' | 'exhausted'
+   └── Apply Pass: Applies verdict resolution to target files
+          │
+          ▼
+  [Finalize Node]
+   └── Terminal Authority: Runs validator.py --finalize-unsupported
+        ├── Promotes grounded edits -> [validated] / [fixed]
+        └── Demotes agreed-ungrounded edits -> [unsupported]
+```
+
+### 2.3 Session Vault State Swapping Machine (`shared_history: false`)
+When per-target history isolation is enabled, state transitions between active staging and the session vault follow an atomic swap protocol:
+
+```
+  [Pre-Task: _swap_in_state(stem)]
+   1. Wipe active staging in session root:
+      - .aider.chat.history.md
+      - .aider.input.history
+      - .oracle_session.json, etc.
+   2. Inspect .aider_factory/sessions/<slug>/chat_history/
+      ├── Found .aider.chat.history_<stem>.md  ──► Copy to active staging
+      └── Not Found (First Run)                ──► Active staging remains blank
+          │
+          ▼
+  [Task Execution: Aider reads/writes active staging files]
+          │
+          ▼
+  [Post-Task: _swap_out_state(stem)]
+   1. Copy modified active files to chat_history/ vault:
+      - active stage/.aider.chat.history.md -> vault/.aider.chat.history_<stem>.md
+      - active stage/.aider.input.history   -> vault/.aider.input.history_<stem>
+   2. Retain vault artifacts across phases for resumption
 ```
 
 ---
 
 ## 3. Technical Mechanics & Deep-Dive Logic
 
-### Per-Target History Isolation & State Vaulting (`shared_history: false`)
+### 3.1 Mathematical Formulations & Token Budgeting
+
+#### 1. Active Context Window Decomposition
+Aider's active context window consumption $T_{\text{active}}$ is constrained by the maximum context capacity $T_{\text{max}}$ of the active model:
+$$T_{\text{active}} = T_{\text{prefix}} + T_{\text{repomap}} + T_{\text{retrieval}} + T_{\text{history}} + T_{\text{headroom}} \le T_{\text{max}}$$
+Where:
+- $T_{\text{prefix}}$: Locked immutable system directives and project invariants (`CONVENTIONS.md`).
+- $T_{\text{repomap}}$: Token allocation for the ranked repository dependency graph.
+- $T_{\text{retrieval}}$: External knowledge context injected via LanceDB RAG chunks.
+- $T_{\text{history}}$: Cumulative multi-turn conversational transcript.
+- $T_{\text{headroom}}$: Reserved output generation and thinking token buffer (typically 15–20% of $T_{\text{max}}$).
+
+#### 2. Chat History Compaction Bound
+The conversation history token count is bounded strictly by `max_chat_history_tokens`:
+$$T_{\text{history}} \le T_{\text{max\_chat}} \quad (\text{default: } 100{,}000)$$
+When $T_{\text{history}} > T_{\text{max\_chat}}$, Aider truncates the oldest conversational turns while retaining the system prompt and the current turn.
+
+#### 3. Repository Map Scaling
+The repository map allocation $T_{\text{repomap}}$ is governed by `map_tokens` and `map_multiplier_no_files`:
+$$T_{\text{repomap}} = \begin{cases} 0, & \text{if } \text{map\_tokens} = 0 \\ \min(M_{\text{tokens}}, \mu \cdot T_{\text{budget}}), & \text{if } \text{map\_tokens} > 0 \end{cases}$$
+Where $M_{\text{tokens}}$ is `map_tokens` and $\mu$ is `map_multiplier_no_files` (set to `0.0` when explicit target files are loaded).
+
+#### 4. Attempt-Based Fallback Routing Function
+In iterative repair loops (`iterate_test: true`), model routing for the editing agent $E(a)$ at outer attempt $a \in \{0, 1, \dots, N-1\}$ is defined by:
+$$E(a) = \begin{cases} M_{\text{editor}}, & \text{if } a = 0 \\ M_{\text{fallback}} \lor M_{\text{editor}}, & \text{if } a > 0 \end{cases}$$
+Where $M_{\text{fallback}}$ is `fallback_editor_model` (e.g., escalating from a lightweight local model to a frontier cloud model).
+
+#### 5. Vault History Key Derivation
+Under `shared_history: false`, the isolated history identifier $\sigma$ is computed deterministically:
+$$\sigma = \text{job\_prefix} \mathbin{\Vert} \text{"\_"} \mathbin{\Vert} \text{slug}(F_{\text{target}})$$
+Where $\text{slug}(F)$ extracts the sanitized base stem:
+$$\text{slug}(F) = \operatorname{strip\_ext}(\operatorname{basename}(F))$$
+
+---
+
+### 3.2 Per-Target History Isolation & State Vaulting (`shared_history: false`)
 When `shared_history: false` is configured in a multi-file phase, `run_workflow.py` stems each task's history by its job prefix and target filename base:
-$$\text{stem} = \text{job\_prefix} + \text{"\_"} + \text{base\_name}$$
+$$\sigma = \text{job\_prefix} + \text{"\_"} + \text{base\_name}$$
 
-The `AiderFactory` manages state isolation across sequential tasks using a two-stage vaulting protocol:
-1. **`_swap_in_state(stem)`**: Before launching a task, `_swap_in_state` deletes all active staging files in the session root (`.aider.chat.history.md`, `.aider.input.history`, `.oracle_session.json`). If vault artifacts exist in `chat_history/.aider.chat.history_<stem>.md`, they are copied to the active stage; if the target file is running for the first time, the active stage remains completely blank. This guarantees that Task $N$ never inherits residual prompts or wandering architectural plans from Task $N-1$.
-2. **`_swap_out_state(stem)`**: Upon task completion, active history files are synced back into the session's `chat_history/` vault under their respective `<stem>` identifiers.
+The `AiderFactory` manages state isolation across sequential tasks using a two-stage vaulting protocol across nine distinct state files:
+1. `.aider.chat.history.md`: Full markdown conversational turn transcript.
+2. `.aider.input.history`: Command-line raw input history.
+3. `.aider.llm.history`: Raw JSON request/response payloads sent to the model inference endpoint.
+4. `.oracle_session.json`: Knowledge Oracle side-agent conversational context.
+5. `.oracle_session.json.costs.json`: Sidecar tracking cumulative Oracle API usage costs.
+6. `.oracle_debate_session.json`: Multi-turn debate KV-cache context for deliberation turns.
+7. `.debate_aider_history.md`: Architect conversational turn transcript during ask-mode debate rounds.
+8. `.oracle_chat.history.md`: Human-readable markdown audit transcript of Oracle queries and retrieved chunks.
+9. `.pair_capture.log`: Terminal screen scrape captured during interactive pair-programming sessions.
 
-### Headless Prompt Defense & Stdin Stream Management (`yes_always: false`)
+The two-stage vaulting lifecycle operates as follows:
+- **`_swap_in_state(stem)`**: Before launching a task, `_swap_in_state` iterates over all nine active staging files in `.aider_factory/sessions/<slug>/` and deletes any existing instances. It then checks `.aider_factory/sessions/<slug>/chat_history/` for corresponding vaulted files matching `<base>_<stem>.<ext>`. If matching artifacts exist, they are copied to active staging; if the target file is running for the first time, active staging remains blank. This guarantees that Task $N$ never inherits residual prompts, out-of-scope files, or wandering architectural plans from Task $N-1$.
+- **`_swap_out_state(stem, purge_missing=False)`**: Upon task completion, active history files are synced back into the session's `chat_history/` vault under their respective `<stem>` identifiers.
+
+---
+
+### 3.3 Headless Prompt Defense & Stdin Stream Management (`yes_always: false`)
 In headless/autonomous mode (`pair_programming: false`), unexpected interactive prompts can cause catastrophic scope drift:
-* **The `Add file to chat?` Prompt**: If the Architect proposes edits referencing non-target files, accepting prompts causes Aider to auto-accept future file additions, giving write access to unassigned files.
-* **The `Create new file?` Prompt**: When `stdin` is closed prematurely after a single response, secondary prompts hit `EOF`, which falls back to Aider's default `[Yes]` and silently creates duplicate or hallucinated files on disk.
+- **The `Add file to chat?` Prompt**: If the Architect proposes edits referencing non-target files, accepting prompts causes Aider to auto-accept future file additions, giving write access to unassigned files.
+- **The `Create new file?` Prompt**: When `stdin` is closed prematurely after a single response, secondary prompts hit `EOF`, which falls back to Aider's default `[Yes]` and silently creates duplicate or hallucinated files on disk.
 
 To prevent this, `orchestrate.py` appends `--exit` to the invocation arguments and injects a continuous rejection buffer into `stdin`:
 ```python
-# Send repeated 'n\n' (No) to gracefully reject all out-of-scope mid-run prompts
-process.stdin.write(b"n\n" * 50)
-process.stdin.flush()
-process.stdin.close()
+popen_kwargs = {"start_new_session": True} if sys.platform != "win32" else {}
+process = subprocess.Popen(
+    cmd,
+    cwd=self.project_dir,
+    env=env,
+    stdin=subprocess.PIPE,
+    **popen_kwargs,
+)
+
+try:
+    # Send repeated 'n\n' (No) to gracefully reject all out-of-scope mid-run prompts
+    process.stdin.write(b"n\n" * 50)
+    process.stdin.flush()
+    process.stdin.close()
+except Exception:
+    pass
 ```
 Because all intended `target_files` and derived test files (`test_{stem}.*`) are declared in YAML and passed as positional CLI arguments at startup, Aider pre-authorizes them with zero confirmation prompts. Any mid-run confirmation dialog represents an out-of-scope prompt and is safely rejected. When execution completes, `--exit` immediately shuts down Aider without polling for trailing interactive chat turns.
 
-### Dynamic Target Scoping in `--message`
+---
+
+### 3.4 Dynamic Target Scoping in `--message`
 To prevent the Architect model from applying global repository-wide goals across all files simultaneously, `orchestrate.py` dynamically anchors the `--message` payload to the active target file:
 ```text
 ACTIVE TARGET FILE(S): `src/core/engine.py`
@@ -126,7 +225,9 @@ All files passed via --read are IMMUTABLE context.
 Please execute the instructions found in /path/to/plan.md.
 ```
 
-### Dynamic Session Configuration Compilation
+---
+
+### 3.5 Dynamic Session Configuration Compilation
 When `orchestrate.py` executes a task, it dynamically compiles a session-scoped configuration file located at `.aider_factory/sessions/<slug>/.aider.conf.yml`. This compilation merges base default configurations with explicit overrides provided in the `Task` dataclass:
 
 ```python
@@ -179,33 +280,70 @@ with open(session_aider_conf, "w", encoding="utf-8") as f:
     yaml.safe_dump(conf_data, f)
 ```
 
-### Subprocess Environment Variable Injection
-While the session `.aider.conf.yml` handles base settings, `orchestrate.py` enforces a belt-and-suspenders approach by directly injecting critical overrides into the `env` dictionary immediately prior to subprocess execution. This guarantees that flags like `AIDER_YES_ALWAYS`, `AIDER_AUTO_COMMITS`, `AIDER_AUTO_LINT`, `AIDER_SUGGEST_SHELL_COMMANDS`, and `AIDER_DETECT_URLS` are strictly honored, overriding any conflicting local environment state.
+---
 
-### KV-Cache Preservation & Python Hash Seeding
-To guarantee 100% KV-cache prefix hits on local inference servers during interactive or `ask` mode turns, `orchestrate.py` explicitly injects `PYTHONHASHSEED="0"` into the subprocess environment. This forces Python to use deterministic set iteration, ensuring that the generated prompt string is byte-for-byte identical across multiple runs and eliminating random cache invalidation.
-
-### Model Routing & Attempt-Based Fallback Escalation
-When executing tasks with multiple outer iteration loops (`iterate_test: true`), `orchestrate.py` monitors the attempt counter. On the initial attempt (`attempt == 0`), Aider routes editor requests to `editor_model`. If the initial attempt fails or test execution yields errors, subsequent retry loops (`attempt > 0`) dynamically escalate to `fallback_editor_model` if configured:
+### 3.6 Session Model Settings Compilation (`ensure_model_settings`)
+When configuring weak models or custom local endpoints, `ensure_model_settings` in `env_utils.py` merges endpoint configurations into `.aider_factory/sessions/<slug>/.aider.model.settings.yml`:
+- Performs non-destructive upserts for both prefixed (`openai/model`) and bare model names.
+- Injects `api_base` and `api_key` under `extra_params`.
+- Uses atomic file writes via `tempfile.mkstemp` and `os.replace` to prevent race conditions during parallel task runs.
 
 ```python
-current_editor = (
-    task.fallback_editor_model
-    if (attempt > 0 and task.fallback_editor_model)
-    else task.editor_model
-)
-
-cmd = [
-    "aider",
-    "--no-check-model-accepts-settings",
-    "--no-show-model-warnings",
-    "--model", task.model,
-    "--editor-model", current_editor,
+# Extract from env_utils.py (ensure_model_settings)
+def ensure_model_settings(
+    target_path: str,
+    models_to_configure: list[dict],
+    base_settings_path: Optional[str] = None,
+) -> str:
+    # Loads base settings and merges new entries non-destructively
     ...
-]
+    target_dir = os.path.dirname(os.path.abspath(target_path))
+    fd, tmp_path = tempfile.mkstemp(dir=target_dir, suffix=".tmp")
+    os.close(fd)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(settings_list, f, default_flow_style=False, sort_keys=False)
+        os.replace(tmp_path, target_path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+    return target_path
 ```
 
-### Cross-Platform Pseudo-Terminal (PTY) Wrapping in Pair Programming Mode
+---
+
+### 3.7 Subprocess Environment Variable Injection
+While the session `.aider.conf.yml` handles base settings, `orchestrate.py` enforces a belt-and-suspenders approach by directly injecting critical overrides into the `env` dictionary immediately prior to subprocess execution:
+- **Automation Flags**: `AIDER_YES_ALWAYS`, `AIDER_AUTO_COMMITS`, `AIDER_AUTO_LINT`, `AIDER_SUGGEST_SHELL_COMMANDS`, `AIDER_DETECT_URLS`.
+- **KV-Cache Prefix Seeding**: Injects `PYTHONHASHSEED="0"` into the subprocess environment. This forces Python to use deterministic set iteration, ensuring that generated prompt strings are byte-for-byte identical across multiple runs and eliminating random cache invalidation on local inference engines.
+- **Model Endpoint Credentials**: Sets `OPENAI_API_BASE`, `OPENAI_API_KEY`, `WEAK_MODEL_API_BASE`, and `AIDER_WEAK_MODEL_API_BASE`.
+
+---
+
+### 3.8 Iterative Testing Loop & Initial Baseline Test Evaluation
+When `iterate_test: true` and `test_cmd` are configured:
+1. **Initial Baseline Evaluation (Attempt 0)**: Before invoking Aider, `orchestrate.py` runs `test_cmd` directly in Python using `subprocess.Popen` with line-buffered character streaming (`char = test_proc.stdout.read(1)`). If the test suite already passes, Aider execution is bypassed completely, saving model tokens.
+2. **Failure Capture & Repair Injection**: If the initial baseline test fails, the combined `stdout` and `stderr` output is captured and injected into `.aider_factory/temp/.aider_repair_prompt_<tmp>.txt` along with the `FIX_CONSTRAINTS` specification:
+   ```text
+   CONSTRAINTS FOR THIS FIX:
+   - You may edit the source file and the test file to ensure the tests pass and the logic is mathematically sound.
+   - Make targeted, minimal edits to the source code. Do not attempt to rewrite massive blocks of code to fix a single-line bug.
+   - Do not create new files
+   - Do not delete existing passing tests
+   - Your SEARCH blocks must exactly match current file content
+   ```
+3. **Escalation**: Subsequent outer-loop attempts pass the repair prompt via `--message-file`.
+
+---
+
+### 3.9 Final Check & Soft-Fail Semantics
+- **`final_check: true`**: In standard iterate loops, edit attempt $N$ is verified by the test check at the start of attempt $N+1$. Consequently, the final attempt's edit is never re-tested within the loop. When `final_check: true` is configured, `orchestrate.py` re-runs `test_cmd` once after loop completion to establish the true final pass/fail status of the file.
+- **`soft_fail: true`**: In evidence grounding apply passes, the terminal authority is a downstream step (`validator.py --finalize-unsupported`), which promotes verified quotes and demotes ungrounded residuals. Setting `soft_fail: true` ensures that exhausting outer test loops is treated as a soft success rather than halting the entire pipeline DAG.
+
+---
+
+### 3.10 Cross-Platform Pseudo-Terminal (PTY) Wrapping in Pair Programming Mode
 Standard Python `subprocess.Popen` calls attach pipes to `stdout` and `stdin`. In autonomous mode, this works cleanly. In pair-programming mode, however, Aider's interactive prompt requires a TTY terminal device for `prompt_toolkit`.
 
 `orchestrate.py` provides cross-platform execution branching:
@@ -254,8 +392,17 @@ else:
 
 ---
 
+### 3.11 Headless Apply Pass Output Isolation (`apply_agent.py`)
+When `aider-apply` runs via `apply_agent.py`:
+- **Config Sanitization**: Sanitizes `.aider.conf.yml` into a temporary configuration file (`.apply.aider.conf.yml`), stripping `read` and `files` keys to prevent ambient repo map tokens from polluting the apply pass context.
+- **Stream Redirection (`/dev/tty`)**: Directs raw inner Aider output (thinking traces, token lines, file echoes) to `/dev/tty` (or `CONOUT$` on Windows) so the user has live terminal visibility without polluting the outer caller's context window.
+- **Diff Cleanliness**: Emits only the post-apply unified git diff (`git diff HEAD~1 HEAD`) to standard `stdout`.
+
+---
+
 ## 4. Exhaustive CLI & Parameter Reference
 
+### 4.1 Master Toggle Matrix
 The table below maps every supported YAML toggle to its corresponding Aider CLI flag, environment variable, default value, and functional description:
 
 | YAML Toggle (under `toggles:`) | Aider CLI Flag | Environment Variable | Default Value | Functional Description |
@@ -270,29 +417,82 @@ The table below maps every supported YAML toggle to its corresponding Aider CLI 
 | `suggest_shell_commands` | `--suggest-shell-commands`<br>`--no-suggest-shell-commands` | `AIDER_SUGGEST_SHELL_COMMANDS` | `true` | **True**: Allows the model to propose shell execution blocks.<br>**False**: Disables shell command suggestions. |
 | `detect_urls` | `--detect-urls`<br>`--no-detect-urls` | `AIDER_DETECT_URLS` | `false` | **True**: Auto-scrapes URLs found in LLM responses.<br>**False**: Disables web URL scraping. |
 | `disable_playwright` | `--disable-playwright` | `AIDER_DISABLE_PLAYWRIGHT` | `false` | **True**: Explicitly disables Playwright/Chromium browser initialization. |
-| `sticky_context` | N/A | N/A | `false` | **True**: Automatically passes target files modified in the current phase as `--read` context to subsequent phases. |
+| `sticky_context` | N/A | N/A | `false` | **True**: Automatically passes target files modified in earlier tasks as `--read` context to subsequent tasks. |
 | `map_tokens` | `--map-tokens <int>` | N/A (via config) | Config default (`0`) | Sets token budget for repository map generation. `0` disables repository map. |
 | `map_refresh` | `--map-refresh <str>` | N/A (via config) | `"manual"` | Controls repository map refresh frequency (`manual`, `auto`, `always`). |
 | `map_multiplier_no_files`| `--map-multiplier-no-files <float>`| N/A (via config) | `0.0` | Multiplier for repository map token allocation when no files are in chat context. |
 | `max_chat_history_tokens` | `--max-chat-history-tokens <int>` | N/A (via config) | `100000` | Maximum token budget for chat history before truncation occurs. |
+| `iterate_test` | N/A | N/A | `false` | **True**: Enables multi-loop iterative testing against `test_cmd`. |
+| `auto_test` | `--auto-test` | N/A | `false` | **True**: Enables Aider's internal 3-loop test iteration. |
+| `final_check` | N/A | N/A | `false` | **True**: Executes `test_cmd` once after outer loop exhaustion to verify final edit. |
+| `soft_fail` | N/A | N/A | `false` | **True**: Treats loop exhaustion as a soft success, deferring authority to downstream finalize step. |
+
+---
+
+### 4.2 Subprocess Environment Variable Matrix
+| Environment Variable | Injected Value | Target Subprocess | Purpose |
+| :--- | :--- | :--- | :--- |
+| `AI_FACTORY_SESSION` | `<slug>` | All sub-agents / tools | Identifies the active session directory under `.aider_factory/sessions/`. |
+| `AI_FACTORY_CONFIG` | `/path/to/session.yml` | Sub-agents / apply_agent | Points to the active pipeline YAML configuration file. |
+| `AIDER_STREAM_TIMEOUT` | `300.0` | Aider / Tests / Gates | Subprocess watchdog timeout in seconds (default 300s). |
+| `PYTHONHASHSEED` | `"0"` | Aider Subprocess | Enforces deterministic set iteration for byte-exact KV-cache prefix hits. |
+| `FORCE_COLOR` | `"1"` | Aider Subprocess | Forces Rich terminal library to emit ANSI colors when piped through `OSTee`. |
+| `OPENAI_API_BASE` | `<url>` | Aider Subprocess | Base URL for OpenAI-compatible LLM endpoints. |
+| `OPENAI_API_KEY` | `<key>` | Aider Subprocess | Authentication token for router/endpoint (or `sk-dummy`). |
+| `WEAK_MODEL_API_BASE` | `<url>` | Aider Subprocess | Dedicated endpoint base URL for weak model operations. |
+| `AIDER_WEAK_MODEL_API_BASE` | `<url>` | Aider Subprocess | Backup environment variable for weak model endpoint routing. |
+| `ORACLE_SESSION_FILE` | `/path/to/.oracle_session.json` | Oracle Side-Agent | Persists Oracle KV-cache state across turns. |
+| `ORACLE_DEBATE_SESSION_FILE` | `/path/to/.oracle_debate_session.json` | Oracle Debate Node | Isolates debate KV-cache state from standard query sessions. |
+
+---
+
+### 4.3 Pipeline CLI Entrypoint Matrix
+| CLI Command | Source Script | Primary Arguments | Operational Description |
+| :--- | :--- | :--- | :--- |
+| `aider-factory` | `run_workflow.py` | `[session_name] [config.yml]` | Executes complete multi-phase DAG pipeline across declared targets. |
+| `aider-launcher` | `factory_launcher.py` | `[session_name] [config.yml]` | Cross-platform runner teeing all output to timestamped log and aggregating costs. |
+| `aider-apply` | `apply_agent.py` | `<files...> [--spec <path>]` | Headless code editing pass driven by chat history specs or markdown plans. |
+| `aider-clean-lancedb` | `clean_lancedb.py` | `<collection> [--project-dir <path>]` | Cleans ephemeral images, validations, and debates while preserving LanceDB tables. |
+| `aider-oracle` | `oracle_agent.py` | `"<question>" [--debate] [--mode]` | Side-agent interface for LanceDB RAG retrieval and architect debates. |
+| `aider-validate` | `validator.py` | `--file <path> --source <path>` | Deterministic evidence grounding auditor and quotation verifier. |
+
+---
+
+### 4.4 Exit Codes & Termination Signals
+| Exit Code | Signal / Source | Description | Recovery / Diagnostic Action |
+| :--- | :--- | :--- | :--- |
+| `0` | Success | Task or pipeline completed successfully; all tests or gates passed. | Normal continuation. |
+| `1` | General Failure | Aider subprocess crashed, syntax error, or unhandled exception. | Inspect `.aider_factory/logs/` for traceback. |
+| `2` | Configuration Error | Missing required CLI flag or invalid parameter syntax. | Validate arguments against CLI matrix. |
+| `130` | `SIGINT` | Process terminated via user interrupt (`Ctrl+C`). | Session state preserved in vault; resume with same session slug. |
+| `137` | `SIGKILL` | Subprocess terminated by watchdog timer (`AIDER_STREAM_TIMEOUT`). | Increase timeout via `export AIDER_STREAM_TIMEOUT=600`. |
 
 ---
 
 ## 5. Configuration Schema & YAML Knobs
 
-### 1. Master Pipeline Phase Toggles (`.env.yml` / `session.yml`)
+### 5.1 Master Pipeline Configuration (`.env.yml` / `session.yml`)
 
 ```yaml
 name: "Production DAG Pipeline"
 working_directory: "/home/user/project"
 
+endpoints:
+  architect_api_base: "http://localhost:4000/v1"
+  editor_api: "http://localhost:4000/v1"
+  editor_api_fallback: "http://localhost:4000/v1"
+  weak_model_api_base: "http://localhost:4000/v1"
+
+models:
+  architect_agent: "openai/qwen3.5-122b-a10b-90k:latest"
+  editor_agent: "ollama/qwen3.6-27b-90k:latest"
+  weak_model: "gemini/gemini-2.5-flash"
+
 phases:
   - name: "Autonomous Implementation Phase"
     enabled: true
     models:
-      architect_agent: "openai/qwen3.5-122b-a10b-90k:latest"
-      editor_agent: "ollama/qwen3.6-27B-90k:latest"
-      editor_agent_test: "ollama/qwen3.6-27B-90k:latest"
+      editor_agent_test: "ollama/qwen3.6-27b-90k:latest"
       editor_agent_test_fallback: "openai/qwen3.5-122b-a10b-90k:latest"
 
     toggles:
@@ -311,9 +511,17 @@ phases:
       yes_always: true
       auto_accept_architect: true
       auto_commits: true
+      auto_lint: true
+      lint_cmd: "flake8 {file}"
       suggest_shell_commands: true
       detect_urls: false
       disable_playwright: true
+
+      # Verification & Testing
+      iterate_test: true
+      auto_test: false
+      final_check: true
+      soft_fail: false
 
     files:
       target_files:
@@ -326,7 +534,7 @@ phases:
       context_files_test: []
 ```
 
-### 2. Global Baseline Configuration (`.aider_factory/.aider.conf.yml`)
+### 5.2 Global Baseline Configuration (`.aider_factory/.aider.conf.yml`)
 
 ```yaml
 # .aider_factory/.aider.conf.yml
@@ -341,7 +549,7 @@ attribute-author: false
 attribute-committer: false
 ```
 
-### 3. Reasoning Budget & Model Overrides (`.aider_factory/.aider.model.settings.yml`)
+### 5.3 Reasoning Budget & Model Overrides (`.aider_factory/.aider.model.settings.yml`)
 
 ```yaml
 # .aider_factory/.aider.model.settings.yml
@@ -363,11 +571,20 @@ attribute-committer: false
     think: false
 ```
 
+### 5.4 Six-Tier Precedence Hierarchy
+When resolving operational parameters, the pipeline evaluates configurations in the following strict order of precedence (highest to lowest):
+1. **Runtime CLI Flags**: Explicit arguments passed on the command line (`--yes-always`, `--map-tokens 0`).
+2. **Subprocess Environment Overrides**: Environment variables injected immediately prior to execution (`AIDER_YES_ALWAYS=true`, `OPENAI_API_BASE`).
+3. **Session Configuration**: Dynamically compiled session file (`.aider_factory/sessions/<slug>/.aider.conf.yml`).
+4. **Phase-Level YAML Toggles**: Settings declared under `phases[].toggles`.
+5. **Global Workspace Configuration**: Base configuration file (`.aider_factory/.aider.conf.yml`).
+6. **Built-in System Defaults**: Default parameter values embedded within the Aider engine binary.
+
 ---
 
 ## 6. Telemetry, Diagnostics & Operational Edge Cases
 
-### Operational Quirks & Shell Command Execution
+### 6.1 Operational Quirks & Shell Command Execution
 Getting an LLM to propose and execute shell commands (such as running tests or invoking `.aider_factory/bash/oracle`) involves specific constraints within Aider's internal architecture:
 
 1. **Architect Mode Disables Shell Execution**: When acting as the Architect (`architect: true` or `AIDER_ARCHITECT=true`), Aider disables shell command scanning. Any shell block proposed by an Architect model is treated strictly as explanatory markdown text or converted into a file edit.
@@ -375,27 +592,66 @@ Getting an LLM to propose and execute shell commands (such as running tests or i
 3. **The `yes-always` Blocking Quirk**: Setting `--yes-always` (or `yes_always: true`) actually **blocks** model-suggested shell commands. Aider requires an explicit, interactive human confirmation before executing shell commands; under `--yes-always`, shell command confirmation defaults to "no" and skips silently (Aider upstream issue #3903).
 4. **Slash-Command Syntax Restriction**: The `/run` directive is an interactive human slash-command. If an LLM outputs `/run .aider_factory/bash/oracle` inside a ` ```bash ` block, the system shell attempts to execute the literal `/run` system directory and fails with `Permission denied`. Models must emit bare executable paths (e.g., `.aider_factory/bash/oracle "..."`).
 
-### The `E2BIG` Argument Buffer Safeguard
+### 6.2 The `E2BIG` Argument Buffer Safeguard
 During multi-turn debate escalations or large RAG context queries, debate prompts containing source code, test failure logs, and architectural specifications can exceed several megabytes in size. Passing these prompts directly as CLI string arguments to subprocesses triggers the Linux kernel `E2BIG` error (`Argument list too long`).
 
-To prevent process crashes, `orchestrate.py` and `oracle_agent.py` automatically write large debate prompts to temporary files inside `.aider_factory/.oracle_prompt_<tmp>.txt` and pass them via the `--file` flag:
+To prevent process crashes, `orchestrate.py` and `oracle_agent.py` automatically write large debate prompts to temporary files inside `.aider_factory/temp/.oracle_prompt_<tmp>.txt` and pass them via the `--file` flag:
 
 ```python
 # Extract from orchestrate.py (_oracle_turn)
+temp_dir = os.path.join(str(self.project_dir), ".aider_factory", "temp")
+os.makedirs(temp_dir, exist_ok=True)
 prompt_file = tempfile.NamedTemporaryFile(
     mode="w",
     suffix=".txt",
-    dir=os.path.join(self.project_dir, ".aider_factory"),
+    dir=temp_dir,
     prefix=".oracle_prompt_",
     delete=False,
+    encoding="utf-8",
 )
 prompt_file.write(prompt)
 prompt_file.close()
 
-args = [oracle, "--mode", mode, "--file", prompt_file.name]
+args = cmd_base + ["--mode", mode, "--file", prompt_file.name]
 ```
 
-### OS-Level Telemetry Redirection (`OSTee` & `_TeeWriter`)
+### 6.3 Process Tree Watchdog Termination (`kill_proc_tree`)
+To prevent stalled test suites, frozen inference connections, or deadlocked background threads from hanging the automated pipeline, all subprocess invocations are monitored by an asynchronous watchdog thread (`AIDER_STREAM_TIMEOUT`, default 300s).
+
+Upon timeout expiration, the watchdog executes `kill_proc_tree`:
+- **Windows (`win32`)**: Invokes `taskkill /F /T /PID <pid>` to terminate the parent process and all child processes recursively.
+- **POSIX (Linux / macOS)**: Resolves the process group ID via `os.getpgid(p.pid)` and sends `signal.SIGKILL` to the entire process group (`os.killpg(pgrp, signal.SIGKILL)`).
+- **Stream Cleanup**: Explicitly closes `stdin`, `stdout`, and `stderr` pipes to release OS file descriptor handles.
+
+```python
+# Extract from env_utils.py (kill_proc_tree)
+def kill_proc_tree(p) -> None:
+    if not p:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        else:
+            import signal
+            try:
+                pgrp = os.getpgid(p.pid)
+                if pgrp > 1 and pgrp != os.getpgrp():
+                    os.killpg(pgrp, signal.SIGKILL)
+                else:
+                    p.kill()
+            except (ProcessLookupError, OSError):
+                p.kill()
+    except Exception:
+        pass
+    p.wait(timeout=5)
+```
+
+### 6.4 OS-Level Telemetry Redirection (`OSTee` & `_TeeWriter`)
 Standard Python logging redirects `sys.stdout` and `sys.stderr` in user-space, which misses output from native C/Rust extensions (such as LanceDB), child processes (Aider, pytest, Docker), and PTY script wrappers.
 
 `run_workflow.py` uses low-level OS redirection:
@@ -429,7 +685,25 @@ class OSTee:
 
 This guarantees that all terminal output is captured into `.aider_factory/logs/<config_stem>_run_<timestamp>.log` across all operating systems for cost accounting (`aggregate_costs.py`).
 
-### 6.4 The Factory Launcher Rationale
-The pipeline must be executed using the bundled bash wrappers (e.g., `.aider_factory/bash/factory .env.yml`), rather than calling `python run_workflow.py` directly. 
+### 6.5 The Factory Launcher Rationale
+The pipeline should be executed using the bundled launcher (`aider-launcher` or `.aider_factory/bash/factory .env.yml`), rather than invoking `python run_workflow.py` directly.
 
-**Why?** The pipeline runs ingestion (`rag_manager.py`) *in-process*. If you run the pipeline using your system Python, it will lack dependencies like `lancedb` and `sentence-transformers`, crashing immediately. The `bash/factory`, `bash/oracle`, and `bash/validate` wrappers dynamically resolve `AIDER_PY` to point to Aider's isolated `uv` tool environment, which contains the entire RAG/OCR stack.
+**Why?**
+1. **In-Process RAG Ingestion**: The pipeline runs LanceDB vector store creation and PyMuPDF/Docling extraction in-process via `rag_manager.py`. The launcher resolves `AIDER_PY` to point to Aider's isolated `uv` tool environment, which contains the complete ML/vector database stack (`lancedb`, `sentence-transformers`, `fitz`, `Levenshtein`).
+2. **Deterministic Telemetry Teeing**: The launcher captures all terminal emissions (including child process output) into a single timestamped log file.
+3. **Automated Cost Aggregation**: Upon workflow completion (regardless of exit status), the launcher automatically invokes `aggregate_costs.py` on the log file, computing total tokens sent/received and accurate message-level and session-level costs.
+
+### 6.6 Telemetry & Cost Aggregation Parsing
+During pipeline execution, LiteLLM completion calls emit standardized cost lines formatted by `cost_tracker.py`:
+```text
+Tokens: 12.4k sent, 850 received. Cost: $0.0024 message, $0.0152 session.
+```
+`aggregate_costs.py` parses these log lines in a single pass using regular expression extraction:
+```python
+COST_PATTERN = re.compile(
+    r"Tokens:\s*(?P<sent>[0-9.,]+[kM]?)\s*sent,\s*(?P<recv>[0-9.,]+[kM]?)\s*received(?:[.\s]*"
+    r"Cost:\s*\$\s*(?P<msg>[0-9.,]+)\s*message,\s*\$\s*(?P<sess>[0-9.,]+)(?:\s*session)?)?",
+    re.IGNORECASE,
+)
+```
+Token counts are converted from metric suffixes (`k`, `M`) to exact integers, and total run cost is computed as the exact sum of individual `message` costs, guaranteeing accurate billing telemetry even across multi-process and multi-target workflows.

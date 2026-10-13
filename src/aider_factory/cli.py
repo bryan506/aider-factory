@@ -351,7 +351,14 @@ def _generate_repo_maps(cwd, map_tokens=2048, target="all", is_global=False):
                     "--aiderignore",
                     e_ignore,
                 ]
-                res = subprocess.run(cmd, cwd=proj, capture_output=True, text=True)
+                res = subprocess.run(
+                    cmd,
+                    cwd=proj,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
                 if res.returncode == 0 and res.stdout.strip():
                     with open(out_path, "w", encoding="utf-8") as f:
                         f.write(res.stdout)

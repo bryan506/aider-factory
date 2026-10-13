@@ -153,48 +153,81 @@ def _resolve_job_debate_collection(
     rag_context_root: str,
     default_db: str = "",
     project_directory: str = None,
-) -> tuple[str, str]:
-    """Resolve specialized vector collection and LanceDB dir for Job 1, 2, or 3."""
+    round_num: int = 1,
+) -> tuple[str, str, str]:
+    """Resolve specialized vector collection, LanceDB dir, and retrieve_mode for Job and Round.
+    Supports flow sequences: [job1_coll, [round1_coll, round2_coll], job3_coll].
+    Empty, None, or 'no_retrieve' returns retrieve_mode='no_retrieve' to guarantee pure AST analysis."""
     chosen = default_collection
     if pre_edit_cfg and "job_debate_collection" in pre_edit_cfg:
         raw = pre_edit_cfg.get("job_debate_collection")
         if isinstance(raw, (list, tuple)):
             if 0 <= (job_num - 1) < len(raw):
-                chosen = str(raw[job_num - 1]).strip() if raw[job_num - 1] is not None else default_collection
+                job_entry = raw[job_num - 1]
+                if isinstance(job_entry, (list, tuple)):
+                    idx = min(round_num - 1, len(job_entry) - 1)
+                    chosen = str(job_entry[idx]).strip() if job_entry[idx] is not None else ""
+                else:
+                    chosen = str(job_entry).strip() if job_entry is not None else default_collection
             elif raw and raw[0] is not None:
-                chosen = str(raw[0]).strip()
+                if isinstance(raw[0], (list, tuple)):
+                    idx = min(round_num - 1, len(raw[0]) - 1)
+                    chosen = str(raw[0][idx]).strip() if raw[0][idx] is not None else ""
+                else:
+                    chosen = str(raw[0]).strip()
         elif isinstance(raw, str):
             chosen = raw.strip()
 
-    raw_db = pre_edit_cfg.get("job_debate_db") if pre_edit_cfg else None
-    chosen_db = None
-    if isinstance(raw_db, (list, tuple)):
-        if 0 <= (job_num - 1) < len(raw_db):
-            chosen_db = str(raw_db[job_num - 1]).strip() if raw_db[job_num - 1] is not None else ""
-        elif raw_db and raw_db[0] is not None:
-            chosen_db = str(raw_db[0]).strip()
-    elif isinstance(raw_db, str):
-        chosen_db = raw_db.strip()
+    has_explicit_db = False
+    chosen_db = default_db or ""
+    if pre_edit_cfg and "job_debate_db" in pre_edit_cfg:
+        raw_db = pre_edit_cfg.get("job_debate_db")
+        if isinstance(raw_db, (list, tuple)):
+            if 0 <= (job_num - 1) < len(raw_db):
+                entry_db = raw_db[job_num - 1]
+                if isinstance(entry_db, (list, tuple)):
+                    idx = min(round_num - 1, len(entry_db) - 1)
+                    if entry_db[idx] is not None and str(entry_db[idx]).strip():
+                        chosen_db = str(entry_db[idx]).strip()
+                        has_explicit_db = True
+                elif entry_db is not None and str(entry_db).strip():
+                    chosen_db = str(entry_db).strip()
+                    has_explicit_db = True
+            elif raw_db and raw_db[0] is not None and str(raw_db[0]).strip():
+                chosen_db = str(raw_db[0]).strip()
+                has_explicit_db = True
+        elif isinstance(raw_db, str) and raw_db.strip():
+            chosen_db = raw_db.strip()
+            has_explicit_db = True
 
     if chosen_db:
-        base_dir = str(project_directory or os.getcwd())
-        db_dir = (
-            chosen_db if os.path.isabs(chosen_db) else os.path.join(base_dir, chosen_db)
-        ).replace("\\", "/")
-    elif default_db:
-        db_dir = default_db
-    elif chosen and chosen != "*" and not os.path.isabs(chosen):
-        db_dir = os.path.join(rag_context_root, chosen, "lancedb").replace("\\", "/")
-    elif chosen == "":
-        db_dir = ""
-    else:
-        db_dir = (
-            os.path.join(rag_context_root, default_collection, "lancedb").replace("\\", "/")
-            if default_collection and default_collection != "*"
-            else ""
-        )
+        chosen_db = os.path.expanduser(chosen_db)
+        if project_directory and not (
+            chosen_db.startswith("/")
+            or chosen_db.startswith("\\")
+            or (len(chosen_db) > 1 and chosen_db[1] == ":")
+        ):
+            chosen_db = os.path.join(project_directory, chosen_db)
+        chosen_db = chosen_db.replace("\\", "/")
 
-    return chosen, db_dir
+    if not chosen or str(chosen).lower() in ("no_retrieve", "none"):
+        return "", (chosen_db if has_explicit_db else ""), "no_retrieve"
+
+    if chosen == "*":
+        return "*", chosen_db or "", "top_k"
+
+    expanded = os.path.abspath(os.path.expanduser(chosen))
+    if "/" in chosen or "\\" in chosen or os.path.exists(expanded):
+        base = os.path.basename(expanded.rstrip("/\\"))
+        if base.lower() == "lancedb":
+            coll = os.path.basename(os.path.dirname(expanded.rstrip("/\\")))
+            db_dir = expanded.replace("\\", "/")
+        else:
+            coll = base
+            db_dir = os.path.join(expanded, "lancedb").replace("\\", "/")
+        return coll, (chosen_db if has_explicit_db else (db_dir or chosen_db)), "top_k"
+
+    return chosen, (chosen_db or os.path.join(rag_context_root, chosen, "lancedb").replace("\\", "/")), "top_k"
 
 
 def _render_validate_template(
@@ -715,7 +748,8 @@ Options:
             os.environ["WEAK_MODEL_API_BASE"] = str(global_weak_model_api_base)
         global_rag_agent_api = endpoints.get("rag_agent_api")
         global_grounding_api = endpoints.get("grounding_agent_api")
-        global_ranking_api = endpoints.get("ranking_api_base")
+        raw_ranking_api = endpoints.get("ranking_api_base")
+        global_ranking_api = raw_ranking_api if is_valid_endpoint(raw_ranking_api) else None
 
         # Find the first enabled phase to extract default RAG models if present
         global_models = config.get("models", {}) or {}
@@ -962,11 +996,11 @@ Options:
                 sys.exit(1)
 
             ARCHITECT_API_BASE = (
-                None if "gemini/" in ARCHITECT_AGENT else global_architect_api_base
+                None if not is_local_model(ARCHITECT_AGENT) else global_architect_api_base
             )
-            EDITOR_API = None if "gemini/" in EDITOR_AGENT else global_editor_api
+            EDITOR_API = None if not is_local_model(EDITOR_AGENT) else global_editor_api
             EDITOR_API_FALLBACK = (
-                None if "gemini/" in EDITOR_AGENT_TEST else global_editor_test_api
+                None if not is_local_model(EDITOR_AGENT_TEST) else global_editor_test_api
             )
 
             # Per-phase RAG collection
@@ -977,33 +1011,40 @@ Options:
                 phase_collection = ""
                 phase_run_ocr_rag = False
 
-            # Per-phase custom DB override
-            rag_custom_db = rag_phase_cfg.get("db") or global_rag.get("db")
-            if rag_custom_db:
-                phase_db_dir = (
-                    rag_custom_db
-                    if os.path.isabs(rag_custom_db)
-                    else os.path.join(str(project_directory), rag_custom_db)
-                ).replace("\\", "/")
+            # Resolve collection and DB directory via smart path detection
+            phase_custom_db = rag_phase_cfg.get("db") or global_rag.get("db")
+            if phase_custom_db:
+                raw_db = str(phase_custom_db).strip()
+                if not (raw_db.startswith("/") or raw_db.startswith("\\") or (len(raw_db) > 1 and raw_db[1] == ":")):
+                    phase_db_dir = os.path.join(str(project_directory), raw_db).replace("\\", "/")
+                else:
+                    phase_db_dir = os.path.abspath(os.path.expanduser(raw_db)).replace("\\", "/")
+            elif phase_collection and phase_collection != "*":
+                expanded = os.path.abspath(os.path.expanduser(phase_collection))
+                if "/" in phase_collection or "\\" in phase_collection or os.path.exists(expanded):
+                    base = os.path.basename(expanded.rstrip("/\\"))
+                    if base.lower() == "lancedb":
+                        phase_collection = os.path.basename(os.path.dirname(expanded.rstrip("/\\")))
+                        phase_db_dir = expanded.replace("\\", "/")
+                    else:
+                        phase_collection = base
+                        phase_db_dir = os.path.join(expanded, "lancedb").replace("\\", "/")
+                else:
+                    phase_db_dir = os.path.join(rag_context_root, phase_collection, "lancedb").replace("\\", "/")
             else:
-                phase_db_dir = (
-                    os.path.join(rag_context_root, phase_collection, "lancedb")
-                    if phase_collection
-                    else ""
-                )
+                phase_db_dir = ""
 
             # Per-phase corpus type filter
             rag_type_filter = rag_phase_cfg.get("type_filter") or global_rag.get("type_filter")
 
             # Oracle side-agent: defaults to the architect model if `rag_agent` is unset.
             RAG_AGENT = models.get("rag_agent", ARCHITECT_AGENT)
-            RAG_AGENT_API_BASE = None if "gemini/" in RAG_AGENT else global_rag_agent_api
-            # Grounding verifier (entailment): unset -> cosine fallback (zero behavior change). gemini/
-            # needs no api_base (same rule as architect/oracle).
+            RAG_AGENT_API_BASE = None if not is_local_model(RAG_AGENT) else global_rag_agent_api
+            # Grounding verifier (entailment): unset -> cosine fallback (zero behavior change).
             GROUNDING_AGENT = models.get("grounding_agent")
             GROUNDING_API_BASE = (
                 None
-                if (GROUNDING_AGENT and "gemini/" in GROUNDING_AGENT)
+                if (GROUNDING_AGENT and not is_local_model(GROUNDING_AGENT))
                 else global_grounding_api
             )
             # Per-phase retrieval & reranker settings
@@ -1014,7 +1055,8 @@ Options:
             ranking_agent = phase_models.get("ranking_agent") or global_models.get(
                 "ranking_agent", ""
             )
-            ranking_api_base = endpoints.get("ranking_api_base") or global_ranking_api
+            raw_phase_ranking = phase.get("endpoints", {}).get("ranking_api_base") or endpoints.get("ranking_api_base") or global_ranking_api
+            ranking_api_base = raw_phase_ranking if is_valid_endpoint(raw_phase_ranking) else None
             recall_k = str(rag_phase_cfg.get("recall_k", global_rag.get("recall_k", 30)))
 
             try:
@@ -1393,6 +1435,7 @@ Options:
             # The escalate (debate->apply) block is SHARED; only its gate/issue/template/env differ.
             for current_file in target_files:
                 base_name = os.path.splitext(os.path.basename(current_file))[0]
+                run_tag = f"{base_name}_{session_name}_{timestamp}"
 
                 def _h_stem(job_prefix: str) -> Optional[str]:
                     return None if shared_history else f"{job_prefix}_{base_name}"
@@ -1695,18 +1738,6 @@ Options:
                             _debate_template = _resolve_job_debate_template(
                                 pre_edit_cfg, job_num=1, project_directory=project_directory
                             )
-                            _j1_coll, _j1_db = _resolve_job_debate_collection(
-                                pre_edit_cfg,
-                                job_num=1,
-                                default_collection=_table,
-                                rag_context_root=rag_context_root,
-                                default_db=phase_db_dir,
-                                project_directory=project_directory,
-                            )
-                            _j1_rag_env = dict(file_rag_env)
-                            if pre_edit_cfg.get("job_debate_collection") is not None:
-                                _j1_rag_env["ORACLE_COLLECTION"] = _j1_coll
-                                _j1_rag_env["ORACLE_RAG_DB_DIR"] = _j1_db
 
                             _debate_reads = list(dict.fromkeys(
                                 [current_file]
@@ -1719,6 +1750,23 @@ Options:
 
                             prev_debate_id = None
                             for r_idx in range(1, _job1_rounds + 1):
+                                _j1_coll, _j1_db, _j1_mode = _resolve_job_debate_collection(
+                                    pre_edit_cfg,
+                                    job_num=1,
+                                    default_collection=_table,
+                                    rag_context_root=rag_context_root,
+                                    default_db=file_rag_env.get("ORACLE_RAG_DB_DIR", ""),
+                                    project_directory=project_directory,
+                                    round_num=r_idx,
+                                )
+                                _j1_rag_env = dict(file_rag_env)
+                                if (
+                                    pre_edit_cfg.get("job_debate_collection") is not None
+                                    or pre_edit_cfg.get("job_debate_db") is not None
+                                ):
+                                    _j1_rag_env["ORACLE_COLLECTION"] = _j1_coll
+                                    _j1_rag_env["ORACLE_RAG_DB_DIR"] = _j1_db
+
                                 r_suf = f"_r{r_idx}" if _job1_rounds > 1 else ""
                                 job1_debate_id = f"{env_prefix}_job1_debate_{base_name}{r_suf}"
                                 _verdict_job1_abs = os.path.join(
@@ -1728,6 +1776,11 @@ Options:
                                     _ddir, f"{base_name}.job1_debate{r_suf}.json"
                                 )
 
+                                _raw_coll = pre_edit_cfg.get("job_debate_collection")
+                                _job1_coll_entry = (
+                                    _raw_coll[0] if isinstance(_raw_coll, (list, tuple)) and len(_raw_coll) > 0
+                                    else _raw_coll
+                                )
                                 _r_deliberate = {
                                     "template": _debate_template,
                                     "issue": job_one_plan,
@@ -1735,7 +1788,7 @@ Options:
                                     "ledger": _ledger_job1_abs,
                                     "gate_cmd": None,
                                     "loops": _job1_loops,
-                                    "retrieve_mode": phase_retrieval_mode,
+                                    "retrieve_mode": _j1_mode if pre_edit_cfg.get("job_debate_collection") is not None else phase_retrieval_mode,
                                     "mode": "code",
                                     "draft_mode": True,
                                     "read_files": _debate_reads,
@@ -1746,6 +1799,7 @@ Options:
                                     "architect_persona": _job1_arch_persona,
                                     "oracle_file": _job1_orc_file,
                                     "architect_file": _job1_arch_file,
+                                    "job_debate_collection": _job1_coll_entry,
                                 }
                                 if r_idx > 1:
                                     _r_deliberate["prior_verdict"] = os.path.join(
@@ -1765,6 +1819,7 @@ Options:
                                         weak_model=weak_model,
                                         weak_model_api_base=weak_model_api_base,
                                         architect_api_base=ARCHITECT_API_BASE,
+                                        editor_api_base=EDITOR_API,
                                         rag_env=_j1_rag_env,
                                         ocr_ingest=task_ocr_ingest if r_idx == 1 else None,
                                         deliberate=_r_deliberate,
@@ -1786,6 +1841,7 @@ Options:
                                 id=job1_id,
                                 depends_on=job1_depends,
                                 message_file=job1_msg_file,
+                                verdict_gate=job1_msg_file if debate_j1 else None,
                                 read_files=job1_reads,
                                 files=[current_file] + extra_editable_files,
                                 model=ARCHITECT_AGENT,
@@ -1876,18 +1932,6 @@ Options:
                             _debate_template = _resolve_job_debate_template(
                                 pre_edit_cfg, job_num=2, project_directory=project_directory
                             )
-                            _j2_coll, _j2_db = _resolve_job_debate_collection(
-                                pre_edit_cfg,
-                                job_num=2,
-                                default_collection=_table,
-                                rag_context_root=rag_context_root,
-                                default_db=phase_db_dir,
-                                project_directory=project_directory,
-                            )
-                            _j2_rag_env = dict(file_rag_env)
-                            if pre_edit_cfg.get("job_debate_collection") is not None:
-                                _j2_rag_env["ORACLE_COLLECTION"] = _j2_coll
-                                _j2_rag_env["ORACLE_RAG_DB_DIR"] = _j2_db
 
                             _debate_reads = list(dict.fromkeys(
                                 [current_file]
@@ -1900,6 +1944,23 @@ Options:
 
                             prev_debate_id = None
                             for r_idx in range(1, _job2_rounds + 1):
+                                _j2_coll, _j2_db, _j2_mode = _resolve_job_debate_collection(
+                                    pre_edit_cfg,
+                                    job_num=2,
+                                    default_collection=_table,
+                                    rag_context_root=rag_context_root,
+                                    default_db=file_rag_env.get("ORACLE_RAG_DB_DIR", ""),
+                                    project_directory=project_directory,
+                                    round_num=r_idx,
+                                )
+                                _j2_rag_env = dict(file_rag_env)
+                                if (
+                                    pre_edit_cfg.get("job_debate_collection") is not None
+                                    or pre_edit_cfg.get("job_debate_db") is not None
+                                ):
+                                    _j2_rag_env["ORACLE_COLLECTION"] = _j2_coll
+                                    _j2_rag_env["ORACLE_RAG_DB_DIR"] = _j2_db
+
                                 r_suf = f"_r{r_idx}" if _job2_rounds > 1 else ""
                                 job2_debate_id = f"{env_prefix}_job2_debate_{base_name}{r_suf}"
                                 _verdict_job2_abs = os.path.join(
@@ -1909,6 +1970,11 @@ Options:
                                     _ddir, f"{base_name}.job2_debate{r_suf}.json"
                                 )
 
+                                _raw_coll = pre_edit_cfg.get("job_debate_collection")
+                                _job2_coll_entry = (
+                                    _raw_coll[1] if isinstance(_raw_coll, (list, tuple)) and len(_raw_coll) > 1
+                                    else (_raw_coll[0] if isinstance(_raw_coll, (list, tuple)) and len(_raw_coll) > 0 else _raw_coll)
+                                )
                                 _r_deliberate = {
                                     "template": _debate_template,
                                     "issue": job2_msg_file,
@@ -1916,7 +1982,7 @@ Options:
                                     "ledger": _ledger_job2_abs,
                                     "gate_cmd": None,
                                     "loops": _job2_loops,
-                                    "retrieve_mode": phase_retrieval_mode,
+                                    "retrieve_mode": _j2_mode if pre_edit_cfg.get("job_debate_collection") is not None else phase_retrieval_mode,
                                     "mode": "code",
                                     "draft_mode": True,
                                     "read_files": _debate_reads,
@@ -1927,6 +1993,7 @@ Options:
                                     "architect_persona": _job2_arch_persona,
                                     "oracle_file": _job2_orc_file,
                                     "architect_file": _job2_arch_file,
+                                    "job_debate_collection": _job2_coll_entry,
                                 }
                                 if r_idx > 1:
                                     _r_deliberate["prior_verdict"] = os.path.join(
@@ -1948,6 +2015,7 @@ Options:
                                         weak_model=weak_model,
                                         weak_model_api_base=weak_model_api_base,
                                         architect_api_base=ARCHITECT_API_BASE,
+                                        editor_api_base=EDITOR_API,
                                         rag_env=_j2_rag_env,
                                         ocr_ingest=task_ocr_ingest if r_idx == 1 else None,
                                         deliberate=_r_deliberate,
@@ -1975,6 +2043,7 @@ Options:
                                 id=job2_id,
                                 depends_on=job2_depends,
                                 message_file=job2_msg_file,
+                                verdict_gate=job2_msg_file if debate_j2 else None,
                                 read_files=job2_reads,
                                 files=[current_file] + extra_editable_files,
                                 model=ARCHITECT_AGENT,
@@ -2029,18 +2098,6 @@ Options:
                                     job_num=3,
                                     project_directory=project_directory,
                                 )
-                                _j3_coll, _j3_db = _resolve_job_debate_collection(
-                                    pre_edit_cfg,
-                                    job_num=3,
-                                    default_collection=_table,
-                                    rag_context_root=rag_context_root,
-                                    default_db=phase_db_dir,
-                                    project_directory=project_directory,
-                                )
-                                _j3_rag_env = dict(file_rag_env)
-                                if pre_edit_cfg.get("job_debate_collection") is not None:
-                                    _j3_rag_env["ORACLE_COLLECTION"] = _j3_coll
-                                    _j3_rag_env["ORACLE_RAG_DB_DIR"] = _j3_db
 
                                 _debate_reads = list(dict.fromkeys(
                                     [current_file, specific_test_file]
@@ -2053,6 +2110,23 @@ Options:
 
                                 prev_debate_id = None
                                 for r_idx in range(1, _job3_rounds + 1):
+                                    _j3_coll, _j3_db, _j3_mode = _resolve_job_debate_collection(
+                                        pre_edit_cfg,
+                                        job_num=3,
+                                        default_collection=_table,
+                                        rag_context_root=rag_context_root,
+                                        default_db=file_rag_env.get("ORACLE_RAG_DB_DIR", ""),
+                                        project_directory=project_directory,
+                                        round_num=r_idx,
+                                    )
+                                    _j3_rag_env = dict(file_rag_env)
+                                    if (
+                                        pre_edit_cfg.get("job_debate_collection") is not None
+                                        or pre_edit_cfg.get("job_debate_db") is not None
+                                    ):
+                                        _j3_rag_env["ORACLE_COLLECTION"] = _j3_coll
+                                        _j3_rag_env["ORACLE_RAG_DB_DIR"] = _j3_db
+
                                     r_suf = f"_r{r_idx}" if _job3_rounds > 1 else ""
                                     job3_debate_id = f"{env_prefix}_job3_debate_{base_name}{r_suf}"
                                     _verdict_job3_abs = os.path.join(
@@ -2062,6 +2136,11 @@ Options:
                                         _ddir, f"{base_name}.job3_debate{r_suf}.json"
                                     )
 
+                                    _raw_coll = pre_edit_cfg.get("job_debate_collection")
+                                    _job3_coll_entry = (
+                                        _raw_coll[2] if isinstance(_raw_coll, (list, tuple)) and len(_raw_coll) > 2
+                                        else (_raw_coll[0] if isinstance(_raw_coll, (list, tuple)) and len(_raw_coll) > 0 else _raw_coll)
+                                    )
                                     _r_deliberate = {
                                         "template": _debate_template,
                                         "issue": job_three_plan,
@@ -2069,7 +2148,7 @@ Options:
                                         "ledger": _ledger_job3_abs,
                                         "gate_cmd": None,
                                         "loops": _job3_loops,
-                                        "retrieve_mode": phase_retrieval_mode,
+                                        "retrieve_mode": _j3_mode if pre_edit_cfg.get("job_debate_collection") is not None else phase_retrieval_mode,
                                         "mode": "code",
                                         "draft_mode": True,
                                         "read_files": _debate_reads,
@@ -2080,6 +2159,7 @@ Options:
                                         "architect_persona": _job3_arch_persona,
                                         "oracle_file": _job3_orc_file,
                                         "architect_file": _job3_arch_file,
+                                        "job_debate_collection": _job3_coll_entry,
                                     }
                                     if r_idx > 1:
                                         _r_deliberate["prior_verdict"] = os.path.join(
@@ -2101,6 +2181,7 @@ Options:
                                             weak_model=weak_model,
                                             weak_model_api_base=weak_model_api_base,
                                             architect_api_base=ARCHITECT_API_BASE,
+                                            editor_api_base=EDITOR_API_FALLBACK,
                                             rag_env=_j3_rag_env,
                                             ocr_ingest=task_ocr_ingest if r_idx == 1 else None,
                                             deliberate=_r_deliberate,
@@ -2120,6 +2201,7 @@ Options:
                                     id=job3_id,
                                     depends_on=job3_depends,
                                     message_file=job3_msg_file,
+                                    verdict_gate=job3_msg_file if debate_j3 else None,
                                     read_files=job3_reads,
                                     files=[specific_test_file, current_file]
                                     + extra_editable_files,

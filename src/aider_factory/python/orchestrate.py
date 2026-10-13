@@ -582,11 +582,10 @@ class AiderFactory:
                             ch = proc.stdout.read(1)
                         except (ValueError, OSError):
                             break
-                        if not ch and proc.poll() is not None:
+                        if not ch:
                             break
-                        if ch:
-                            print(ch, end="", flush=True)
-                            chars.append(ch)
+                        print(ch, end="", flush=True)
+                        chars.append(ch)
                     try:
                         proc.stdout.close()
                     except Exception:
@@ -603,7 +602,7 @@ class AiderFactory:
             if timed_out.is_set():
                 print(f"\n⚠️  Architect turn timed out after {timeout_secs}s. Terminating process.└──{_RESET}", flush=True)
                 return "PROPOSAL: (architect turn timed out)"
-            if proc.returncode != 0 and not chars:
+            if proc.returncode != 0:
                 return "PROPOSAL: (architect turn failed)"
             return self._extract_assistant_text(self._strip_thinking("".join(chars)))
         finally:
@@ -865,6 +864,13 @@ class AiderFactory:
                     os.unlink(prompt_file.name)
             except OSError:
                 pass
+        if p.returncode != 0:
+            tail = " | ".join((p.stderr or "").splitlines()[-3:])
+            log.warning(
+                f"⚠️  oracle process failed [{task.id}] (rc={p.returncode}); stderr: {tail}"
+            )
+            return f"VERDICT: OBJECT - oracle process failed (exit code {p.returncode}): {tail}"
+
         out = re.sub(r"\033\[[0-9;]*m", "", (p.stdout or "")).strip()
         # Surface the oracle's retrieval status from stderr (always, not just on failure).
         # The oracle prints "[oracle] N source chunk(s) ..." to stderr on every call.
@@ -917,11 +923,34 @@ class AiderFactory:
         prior_verdict_path = d.get("prior_verdict")
         prior_ledger_path = d.get("prior_ledger")
 
+        # Check if there are unvisited multi-round configurations remaining
+        has_remaining_rounds = False
+        r_idx = int(d.get("round_idx", 1))
+        for raw_val in (
+            d.get("oracle_persona"),
+            d.get("architect_persona"),
+            d.get("oracle_file"),
+            d.get("architect_file"),
+            d.get("job_debate_collection"),
+        ):
+            if isinstance(raw_val, (list, tuple)) and r_idx <= len(raw_val):
+                has_remaining_rounds = True
+                break
+            elif isinstance(raw_val, str) and "," in raw_val:
+                parts = [p.strip() for p in raw_val.split(",") if p.strip()]
+                if r_idx <= len(parts):
+                    has_remaining_rounds = True
+                    break
+
         # Early exit: when no gate is present and the previous round already reached
-        # agreement or was clean, skip this round. When a gate IS present, do not
-        # skip here — the gate check below determines whether the prior round's fix
-        # actually passed the test suite.
-        if not gate_present and prior_verdict_path and os.path.isfile(prior_verdict_path):
+        # agreement or was clean, skip this round only if no configurations remain.
+        if (
+            not gate_present
+            and prior_verdict_path
+            and os.path.isfile(prior_verdict_path)
+            and not d.get("persist", False)
+            and not has_remaining_rounds
+        ):
             prior_state = deliberate.verdict_status(prior_verdict_path)
             if prior_state in ("agreed", "clean"):
                 if verdict_path and os.path.abspath(prior_verdict_path) != os.path.abspath(verdict_path):
@@ -950,10 +979,19 @@ class AiderFactory:
                 with open(p, encoding="utf-8") as f:
                     seed += f.read() + "\n\n"
 
-        # If a prior round's ledger was passed, extract its final agreed resolution to seed this round.
-        # This gives Round 2 knowledge of what Round 1 just attempted.
-        prior_ledger_path = d.get("prior_ledger")
-        if prior_ledger_path and os.path.isfile(prior_ledger_path):
+        # If a prior round's verdict was passed, extract its full # Resolution to seed this round.
+        if prior_verdict_path and os.path.isfile(prior_verdict_path):
+            try:
+                with open(prior_verdict_path, "r", encoding="utf-8") as pvf:
+                    pv_text = pvf.read()
+                res_match = re.search(r"(?s)# Resolution\s*\n\n(.*?)(?=\n---\n\n# Oracle Assessment|\Z)", pv_text)
+                if res_match:
+                    full_prior_proposal = res_match.group(1).strip()
+                    if full_prior_proposal:
+                        seed += f"## Context: The PREVIOUS escalation round agreed to attempt this specification:\n{full_prior_proposal}\n\n"
+            except Exception as e:
+                log.warning(f"⚠️  Could not read prior verdict {prior_verdict_path}: {e}")
+        elif prior_ledger_path and os.path.isfile(prior_ledger_path):
             try:
                 import json
 
@@ -1011,12 +1049,13 @@ class AiderFactory:
         issue_id = os.path.basename(issue or task.id)
         gate_present = bool(gate_cmd)
 
-        # Ensure a stale ledger from a previous run doesn't poison the gate's deletion guard
-        if ledger_path and os.path.exists(ledger_path):
-            try:
-                os.remove(ledger_path)
-            except OSError:
-                pass
+        # Ensure stale ledgers and verdicts from previous runs don't poison gating
+        for stale_path in (ledger_path, verdict_path):
+            if stale_path and os.path.exists(stale_path):
+                try:
+                    os.remove(stale_path)
+                except OSError:
+                    pass
 
         # Seed with the real failure; short-circuit if the gate is already green.
         if gate_present:
@@ -1234,7 +1273,7 @@ class AiderFactory:
                 history_file=debate_aider_history,
             )
 
-            last_proposal = arch_text or last_proposal
+            last_proposal = deliberate.update_high_watermark_proposal(arch_text, last_proposal)
             pline = deliberate.proposal_line(arch_text) or "(no PROPOSAL line)"
             log.info(f"   turn {turn + 1} architect → {pline[:160]}")
             deliberate.record_turn(
@@ -1284,11 +1323,12 @@ class AiderFactory:
         ledger["quote_baseline"] = quote_baseline
         if ledger_path:
             deliberate.save_ledger(ledger_path, ledger)
+        clean_proposal = deliberate.sanitize_proposal_text(last_proposal)
         actionable = deliberate.write_verdict(
             verdict_path,
             state,
             gate_present,
-            last_proposal,
+            clean_proposal,
             draft_mode=d.get("draft_mode", False),
             oracle_response=last_oracle,
         )
@@ -1383,7 +1423,9 @@ class AiderFactory:
         # Invalidate cached gate evaluations when mutating tasks run
         is_mutating_aider = bool(task.files and not task.skip_aider and not task.deliberate and not task.validate)
         is_mutating_oracle = bool(task.oracle and task.oracle.get("out"))
-        is_mutating_validate = bool(task.validate and task.validate.get("autofix"))
+        is_mutating_validate = bool(
+            task.validate and (task.validate.get("autofix") or task.validate.get("finalize"))
+        )
 
         if is_mutating_aider or is_mutating_oracle or is_mutating_validate:
             self.last_test_result.clear()
@@ -1786,11 +1828,10 @@ class AiderFactory:
                                 char = test_proc.stdout.read(1)
                             except (ValueError, OSError):
                                 break
-                            if not char and test_proc.poll() is not None:
+                            if not char:
                                 break
-                            if char:
-                                print(char, end="", flush=True)
-                                output_lines.append(char)
+                            print(char, end="", flush=True)
+                            output_lines.append(char)
                         try:
                             test_proc.stdout.close()
                         except Exception:
@@ -2186,7 +2227,14 @@ class AiderFactory:
                 **popen_kwargs,
             )
             try:
-                proc.communicate(timeout=float(os.environ.get("AIDER_STREAM_TIMEOUT", "300")))
+                timeout_secs = float(os.environ.get("AIDER_STREAM_TIMEOUT", "300"))
+                if timeout_secs <= 0.0:
+                    timeout_secs = 300.0
+            except (ValueError, TypeError):
+                timeout_secs = 300.0
+
+            try:
+                proc.communicate(timeout=timeout_secs)
                 passed = proc.returncode == 0
                 self.last_test_result[task.test_cmd] = passed
                 if passed:

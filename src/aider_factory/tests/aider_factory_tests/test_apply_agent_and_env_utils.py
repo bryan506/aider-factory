@@ -1488,5 +1488,35 @@ class TestStreamFlag(unittest.TestCase):
         self.assertNotIn("NOISE_LINE_", res.stdout)
 
 
+class TestPreEditVerdictGateHalting(unittest.TestCase):
+    def test_execute_task_node_pre_edit_verdict_gate_halting(self):
+        """R1: Validates that _execute_task_node halts on deadlock/exhausted draft gates."""
+        import deliberate
+        from orchestrate import AiderFactory, Task
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            factory = AiderFactory(tmpdir, session_name="test_gate_session")
+            deadlock_verdict = os.path.join(tmpdir, "calc.job2_verdict.md")
+            agreed_verdict = os.path.join(tmpdir, "calc_ok.job2_verdict.md")
+
+            # 1. Write deadlock draft verdict
+            deliberate.write_verdict(deadlock_verdict, "deadlock", False, "Contested plan", draft_mode=True)
+            task_deadlock = Task(
+                id="job2_task_deadlock",
+                files=["calc.py"],
+                verdict_gate=deadlock_verdict,
+                skip_aider=False,
+            )
+
+            # When verdict is deadlocked, _execute_task_node MUST return True without running Aider
+            res_deadlock = factory._execute_task_node(task_deadlock)
+            self.assertTrue(res_deadlock)
+            self.assertFalse(deliberate.verdict_is_actionable(deadlock_verdict))
+
+            # 2. Write agreed draft verdict
+            deliberate.write_verdict(agreed_verdict, "agreed", False, "Agreed plan", draft_mode=True)
+            self.assertTrue(deliberate.verdict_is_actionable(agreed_verdict))
+
+
 if __name__ == "__main__":
     unittest.main()

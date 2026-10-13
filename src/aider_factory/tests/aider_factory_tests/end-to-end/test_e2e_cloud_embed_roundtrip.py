@@ -110,6 +110,12 @@ def restore_cloud_env():
     if _is_valid(_ROUTER_KEY):
         os.environ["OPENAI_API_KEY"] = _ROUTER_KEY
         os.environ["LITELLM_API_KEY"] = _ROUTER_KEY
+    try:
+        import litellm
+        litellm.num_retries = 3
+        litellm.request_timeout = 60
+    except Exception:
+        pass
 
 _IS_CI = os.environ.get("CI") == "true"
 _RUN_LIVE = os.environ.get("AIDER_FACTORY_LIVE_CLOUD_E2E") == "1"
@@ -250,9 +256,6 @@ def test_cloud_routing_uses_litellm():
         assert captured["input"] == ["test"]
         print(f"  [PASS] Cloud routing: litellm.embedding called with model={CLOUD_MODEL}")
 
-    # Force clear litellm from sys.modules to prevent mock leakage into live tests
-    sys.modules.pop("litellm", None)
-
 
 # ---------------------------------------------------------------------------
 # Test 2: Real API call returns correct dimensionality
@@ -309,9 +312,6 @@ def test_cloud_embed_batching():
         # 10 / 3 = 4 batches (3+3+3+1)
         assert call_count["n"] == 4, f"Expected 4 batches, got {call_count['n']}"
         print(f"  [PASS] Cloud batching: 10 texts → {call_count['n']} API calls")
-
-    # Force clear litellm from sys.modules to prevent mock leakage into live tests
-    sys.modules.pop("litellm", None)
 
 
 # ---------------------------------------------------------------------------

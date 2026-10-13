@@ -16,12 +16,17 @@ def kill_proc_tree(p) -> None:
         return
     try:
         if sys.platform == "win32":
-            subprocess.run(
+            res = subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(p.pid)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
             )
+            if res.returncode != 0:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
         else:
             import signal
             try:

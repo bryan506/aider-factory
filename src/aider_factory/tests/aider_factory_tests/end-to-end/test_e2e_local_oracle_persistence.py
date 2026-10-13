@@ -259,6 +259,50 @@ class TestE2ELocalOraclePersistence(unittest.TestCase):
         self.assertGreaterEqual(len(data["messages"]), 3)
         print("✅ Live Oracle debate smoke test passed successfully.")
 
+    def test_e2e_oracle_external_corpus_path_query(self):
+        """Verify querying an external corpus via --collection <path> resolves collection name and lancedb directory."""
+        ext_dir = os.path.join(self.temp_dir, "external_corpus")
+        sub_lancedb = os.path.join(ext_dir, "lancedb")
+        os.makedirs(sub_lancedb, exist_ok=True)
+
+        orig_argv = list(sys.argv)
+        sys.argv = [
+            "oracle",
+            "--collection", ext_dir,
+            "--no-rag",
+            "What is the summary?",
+        ]
+        try:
+            rc = oracle_agent.main()
+        finally:
+            sys.argv = list(orig_argv)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(os.environ.get("ORACLE_COLLECTION"), "external_corpus")
+        self.assertEqual(os.environ.get("ORACLE_RAG_DB_DIR"), sub_lancedb)
+
+    def test_e2e_oracle_explicit_config_flag_from_isolated_directory(self):
+        """Verify --config <path> allows querying from an empty directory outside any workspace."""
+        empty_sandbox = tempfile.mkdtemp()
+        orig_cwd = os.getcwd()
+        orig_argv = list(sys.argv)
+        os.chdir(empty_sandbox)
+        sys.argv = [
+            "oracle",
+            "--config", self.config_path,
+            "--no-rag",
+            "Health check question",
+        ]
+        try:
+            rc = oracle_agent.main()
+        finally:
+            os.chdir(orig_cwd)
+            sys.argv = list(orig_argv)
+            shutil.rmtree(empty_sandbox, ignore_errors=True)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(os.environ.get("ORACLE_EXPLICIT_CONFIG"), "1")
+
 
 if __name__ == "__main__":
     unittest.main()

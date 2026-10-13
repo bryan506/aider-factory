@@ -311,6 +311,39 @@ sys.exit(0)
         finally:
             os.environ["PATH"] = old_path
 
+    def test_e2e_cross_directory_oracle_config_and_session_isolation(self):
+        """Verify standalone oracle execution in repo_B is not poisoned by repo_A ambient session/config."""
+        alpha_dir = os.path.join(self.test_dir, "workspace_alpha")
+        beta_dir = os.path.join(self.test_dir, "workspace_beta")
+        os.makedirs(os.path.join(alpha_dir, ".aider_factory"), exist_ok=True)
+        os.makedirs(os.path.join(beta_dir, ".aider_factory"), exist_ok=True)
+
+        alpha_cfg = os.path.join(alpha_dir, ".aider_factory", ".env.yml")
+        with open(alpha_cfg, "w", encoding="utf-8") as f:
+            yaml.dump({"phases": [{"enabled": True, "models": {"rag_agent": "gemini/model-alpha"}}]}, f)
+
+        beta_cfg = os.path.join(beta_dir, ".aider_factory", ".env.yml")
+        with open(beta_cfg, "w", encoding="utf-8") as f:
+            yaml.dump({"phases": [{"enabled": True, "models": {"rag_agent": "gemini/model-beta"}}]}, f)
+
+        env = self._get_subprocess_env()
+        env["ORACLE_CONFIG_FILE"] = alpha_cfg
+        env["ORACLE_SESSION_FILE"] = os.path.join(alpha_dir, ".aider_factory", ".oracle_session.json")
+
+        cmd = [
+            sys.executable,
+            "-c",
+            "import os, oracle_agent; "
+            "oracle_agent._ensure_oracle_config(); "
+            "print('MODEL:' + os.environ.get('ORACLE_AGENT_MODEL', '')); "
+            "print('SESSION:' + oracle_agent._session_file())",
+        ]
+        res = subprocess.run(cmd, cwd=beta_dir, env=env, capture_output=True, text=True, check=True)
+        out = res.stdout
+
+        self.assertIn("MODEL:gemini/model-beta", out, "Foreign ambient ORACLE_CONFIG_FILE hijacked beta workspace!")
+        self.assertIn(os.path.join(beta_dir, ".aider_factory", ".oracle_session.json"), out, "Foreign session file hijacked beta workspace!")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

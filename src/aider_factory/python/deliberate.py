@@ -26,11 +26,19 @@ _GATE = "GATE:"
 
 
 def proposal_hash(text):
-    """Hash the architect's PROPOSAL line(s); fall back to the whole turn."""
+    """Hash the architect's proposal, combining PROPOSAL lines with sanitized specification body."""
     props = re.findall(
         r"(?im)^[\s*>#*_`\-]*PROPOSAL[\s*_`]*[:\-]?[\s*_`]*(.+)$", text or ""
     )
-    basis = " ".join(props) if props else (text or "")
+    cleaned = sanitize_proposal_text(text)
+    if props and cleaned:
+        basis = " ".join(props) + "\n" + cleaned
+    elif props:
+        basis = " ".join(props)
+    elif cleaned:
+        basis = cleaned
+    else:
+        basis = text or ""
     return hashlib.sha1(_normalize(basis).encode("utf-8")).hexdigest()[:12]
 
 
@@ -61,6 +69,105 @@ def oracle_verdict(text):
     if raw_verdict in ("disagree", "reject"):
         return "object"
     return raw_verdict
+
+
+def count_tasks(text: str) -> int:
+    """Count discrete task definitions (### [Task ID: ...) in text."""
+    if not text:
+        return 0
+    return len(re.findall(r"(?im)^[\s*>#*_`\-]*###\s*\[?Task\s+ID:", text))
+
+
+def update_high_watermark_proposal(current_text: str, previous_proposal: str) -> str:
+    """Preserve the most comprehensive proposal, preventing brief closing turns
+    or delta responses from eclipsing an earlier cumulative task specification."""
+    if not current_text or not current_text.strip():
+        return previous_proposal or ""
+    current_tasks = count_tasks(current_text)
+    prev_tasks = count_tasks(previous_proposal)
+    if current_tasks >= prev_tasks or prev_tasks == 0:
+        return current_text
+    return previous_proposal
+
+
+def sanitize_proposal_text(raw: str) -> str:
+    """Sanitize architect proposal text through 3-tier cleanup.
+    Tier 1: Anchors to the earliest recognized specification header.
+    Tier 2: Strips leading startup noise lines sequentially.
+    Tier 3: Returns non-empty candidate or raw text fallback.
+    """
+    if not raw or not raw.strip():
+        return ""
+
+    text = raw.strip()
+
+    # Tier 1: Search for earliest recognized specification header
+    header_patterns = [
+        r"(?im)^##\s+Scope\s+Analysis\b",
+        r"(?im)^##\s+Implementation\s+Plan\b",
+        r"(?im)^##\s+Remediation\s+Plan\b",
+        r"(?im)^##\s+Problem\s+Diagnosis\b",
+        r"(?im)^##\s+Root\s+Cause\b",
+        r"(?im)^##\s+Executive\s+Summary\b",
+        r"(?im)^##\s+Architectural\s+Specification\b",
+        r"(?im)^###\s*\[?Task\s+ID:\b",
+    ]
+
+    earliest_pos = None
+    for pattern in header_patterns:
+        m = re.search(pattern, text)
+        if m:
+            if earliest_pos is None or m.start() < earliest_pos:
+                earliest_pos = m.start()
+
+    if earliest_pos is not None:
+        return text[earliest_pos:].strip()
+
+    # Tier 2: Line-by-line sequential stripping of known startup noise
+    noise_prefixes = (
+        "aider v",
+        "main model:",
+        "editor model:",
+        "weak model:",
+        "git repo:",
+        "repo-map:",
+        "added ",
+        "tokens:",
+        "cost:",
+        "warning:",
+        "scraping",
+        "for more info",
+        "use /help",
+        "commit",
+        "committing",
+        "restored previous",
+        "chat (read-only)",
+        "to the chat (read-only)",
+        "► thinking",
+        "▸ thinking",
+        "─",
+        "►",
+        "▸",
+    )
+
+    cleaned_lines = []
+    past_header_noise = False
+    for line in text.splitlines():
+        line_stripped = line.strip().lower()
+        if not past_header_noise:
+            if not line_stripped:
+                continue
+            if any(line_stripped.startswith(p) for p in noise_prefixes) or "to the chat (read-only)" in line_stripped:
+                continue
+            past_header_noise = True
+        cleaned_lines.append(line)
+
+    candidate = "\n".join(cleaned_lines).strip()
+
+    # Tier 3: Non-empty candidate or clean empty return for pure noise
+    if candidate:
+        return candidate
+    return ""
 
 
 def proposal_line(text):
@@ -115,11 +222,13 @@ def write_verdict(
     ([fixed]); a separate deterministic finalize flags the rest [unsupported] (only when
     the debate 'agreed'). 'clean' = the gate was already green. 'deadlock'/'exhausted' =
     no agreement -> held for a human (residuals stay [evidence]).
-    If draft_mode is True, the verdict is always considered actionable and no warning is added.
+    If draft_mode is True, the verdict is actionable iff state is agreed.
     oracle_response: the oracle's last reply (evidence citations + VERDICT line). Appended
     to the verdict file so downstream consumers see both sides of the debate.
     """
-    actionable = (state == "agreed" and gate_present) or draft_mode
+    gate_token = "present" if gate_present else ("draft" if draft_mode else "none")
+    actionable = (state == "agreed") if draft_mode else (state == "agreed" and gate_present)
+    clean_proposal = sanitize_proposal_text(proposal)
     if not path:
         return actionable
     import tempfile
@@ -130,7 +239,7 @@ def write_verdict(
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(
-                f"{_STATUS} {state}\n{_GATE} {'present' if gate_present else 'none'}\n\n"
+                f"{_STATUS} {state}\n{_GATE} {gate_token}\n\n"
             )
             if state == "clean":
                 f.write("> Already grounded; nothing to apply.\n\n")
@@ -139,7 +248,7 @@ def write_verdict(
                     "> HELD FOR HUMAN REVIEW — no agreement reached (deadlock/exhausted). "
                     "Leave quotes as [evidence]; do NOT delete, re-tag, or fabricate.\n\n"
                 )
-            f.write("# Resolution\n\n" + (proposal or "").strip() + "\n")
+            f.write("# Resolution\n\n" + (clean_proposal or "").strip() + "\n")
             if oracle_response:
                 f.write("\n---\n\n# Oracle Assessment\n\n" + oracle_response.strip() + "\n")
         os.replace(tmp_path, path)
@@ -177,9 +286,9 @@ def verdict_status(path):
 
 
 def verdict_is_actionable(path):
-    """True iff the verdict is an agreed, gate-backed, applicable resolution."""
+    """True iff the verdict is an agreed, gate-backed, or agreed-draft applicable resolution."""
     status, gate = _read_header(path)
-    return status == "agreed" and gate == "present"
+    return status == "agreed" and gate in ("present", "draft")
 
 
 def save_ledger(path, data):

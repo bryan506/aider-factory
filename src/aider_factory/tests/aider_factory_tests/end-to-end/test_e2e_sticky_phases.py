@@ -867,6 +867,7 @@ files:
                         "models": {
                             "architect_agent": "openai/mock-model",
                             "editor_agent": "openai/mock-model",
+                            "rag_agent": "openai/mock-model",
                         },
                         "files": {"target_files": ["src/debate_calc.py"]},
                         "plans": {"job_one_plan": "plan.md"},
@@ -1134,6 +1135,95 @@ files:
             import json
             j1_calls = [json.loads(l[len("AIDER_CALL: "):])["argv"] for l in lines]
             self.assertTrue(any("doc/spec.md" in c and "--message-file" not in c for c in j1_calls))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_e2e_env_plan_do_full_pre_edit_debate_chain(self):
+        """ADV-16: End-to-end live run of env_plan_do.yml with pre_edit_debate [0, 1, 1] rounds: 2.
+        Verifies 2 rounds of debate before Job 2 and Job 3 with correct verdict file handoff."""
+        subprocess.run(["git", "init"], cwd=self.test_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Tester"], cwd=self.test_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "tester@test.local"], cwd=self.test_dir, check=True)
+
+        os.makedirs(os.path.join(self.test_dir, "src"), exist_ok=True)
+        os.makedirs(os.path.join(self.test_dir, "tests", "unit"), exist_ok=True)
+
+        target_file = os.path.join(self.test_dir, "src", "calc.py")
+        with open(target_file, "w", encoding="utf-8") as f:
+            f.write("def add(a, b): return a + b\n")
+
+        plan_dir = os.path.join(self.test_dir, ".aider_factory", "markdown", "oracle_pre_plan")
+        os.makedirs(plan_dir, exist_ok=True)
+        plan_path = os.path.join(plan_dir, "strategy_template.md")
+        with open(plan_path, "w", encoding="utf-8") as f:
+            f.write("""# Strategy
+## Scope Analysis
+```yaml
+files:
+  target_files:
+    - "src/calc.py"
+  test_files:
+    - "tests/unit/test_calc.py"
+```
+""")
+
+        subprocess.run(["git", "add", "."], cwd=self.test_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=self.test_dir, check=True)
+
+        sample_yaml_src = os.path.join(pkg_dir, "default_configs", "sample_yaml_config", "env_plan_do.yml")
+        with open(sample_yaml_src, "r", encoding="utf-8") as yf:
+            cfg = yaml.safe_load(yf)
+
+        server, mock_url = self._start_mock_server()
+        try:
+            cfg["working_directory"] = self.test_dir
+            cfg["endpoints"] = {
+                "architect_api_base": mock_url,
+                "editor_api": mock_url,
+                "rag_agent_api": mock_url,
+            }
+            # Make Phase 0 non-interactive for headless automated execution
+            cfg["phases"][0]["toggles"]["pair_programming"] = False
+            cfg["phases"][0]["toggles"]["yes_always"] = True
+
+            for p in cfg["phases"]:
+                p["models"] = {
+                    "architect_agent": "openai/mock-model",
+                    "editor_agent": "openai/mock-model",
+                    "editor_agent_test": "openai/mock-model",
+                    "rag_agent": "openai/mock-model",
+                }
+
+            # Phase 2 test runner command
+            py_exec = sys.executable.replace("\\", "/")
+            cfg["test_runner"] = f'"{py_exec}" -c "import sys; sys.exit(0)"'
+
+            yaml_path = os.path.join(self.test_dir, "run_plan_do.yml")
+            with open(yaml_path, "w", encoding="utf-8") as f:
+                yaml.dump(cfg, f)
+
+            res = subprocess.run(
+                [sys.executable, RUN_WORKFLOW_PATH, "e2e_plan_do_sess", yaml_path],
+                cwd=self.test_dir,
+                env=self._get_subprocess_env(),
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(res.returncode, 0, f"Workflow failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
+
+            ddir = os.path.join(self.test_dir, ".aider_factory", "logs", "debates")
+            self.assertTrue(os.path.isfile(os.path.join(ddir, "calc.job2_verdict_r1.md")), "calc.job2_verdict_r1.md must exist")
+            self.assertTrue(os.path.isfile(os.path.join(ddir, "calc.job2_verdict_r2.md")), "calc.job2_verdict_r2.md must exist")
+            self.assertTrue(os.path.isfile(os.path.join(ddir, "calc.job3_verdict_r1.md")), "calc.job3_verdict_r1.md must exist")
+            self.assertTrue(os.path.isfile(os.path.join(ddir, "calc.job3_verdict_r2.md")), "calc.job3_verdict_r2.md must exist")
+
+            with open(self.log_file, "r", encoding="utf-8") as lf:
+                invocations = lf.read()
+
+            self.assertIn("calc.job2_verdict_r2.md", invocations, "Job 2 must receive calc.job2_verdict_r2.md")
+            self.assertIn("calc.job3_verdict_r2.md", invocations, "Job 3 must receive calc.job3_verdict_r2.md")
         finally:
             server.shutdown()
             server.server_close()

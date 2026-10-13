@@ -513,8 +513,11 @@ files:
             expected_nodes = [
                 "p0_job1_strategy_template",
                 "p1_job1_feature",
+                "p1_job2_debate_feature_r1",
+                "p1_job2_debate_feature_r2",
                 "p1_job2_feature",
-                "p1_job3_debate_feature",
+                "p1_job3_debate_feature_r1",
+                "p1_job3_debate_feature_r2",
                 "p1_job3_feature",
                 "p1_verify_feature",
                 "p1_deliberate_feature_r1",
@@ -526,9 +529,9 @@ files:
             for node_id in expected_nodes:
                 assert node_id in tasks, f"Expected node '{node_id}' not found in tasks: {list(tasks.keys())}"
 
-            # 2. Negative Scope: verify no debates before Job 1 or Job 2
+            # 2. Negative Scope: verify no debates before Job 1
             assert "p1_job1_debate_feature" not in tasks, "Found forbidden p1_job1_debate_feature node"
-            assert "p1_job2_debate_feature" not in tasks, "Found forbidden p1_job2_debate_feature node"
+            assert "p1_job1_debate_feature_r1" not in tasks, "Found forbidden p1_job1_debate_feature_r1 node"
 
             # 3. Phase 1 (Planning) Configuration
             p0_job1 = tasks["p0_job1_strategy_template"]
@@ -543,22 +546,38 @@ files:
                 f"Expected p1_job1_feature to depend on p0_job1_strategy_template, got: {p1_j1.depends_on}"
             )
 
-            # 4. Phase 2 (Code) Pre-Test Debate Node Invariants
-            j3_debate = tasks["p1_job3_debate_feature"]
-            assert j3_debate.deliberate is not None
-            assert j3_debate.deliberate["mode"] == "code"
-            assert j3_debate.deliberate["draft_mode"] is True
-            assert j3_debate.deliberate["loops"] == 3
-            assert j3_debate.deliberate["template"] is not None and os.path.isfile(j3_debate.deliberate["template"])
-            assert j3_debate.deliberate["template"].endswith("testing_debate.md")
-            assert j3_debate.deliberate["issue"] is not None and os.path.isfile(j3_debate.deliberate["issue"])
-            assert j3_debate.deliberate["issue"].endswith("testing_exec.md")
-            assert j3_debate.depends_on == ["p1_job2_feature"]
+            # 4. Phase 2 Job 2 Debate Invariants (2 Rounds: R1 = top_k, R2 = no_retrieve)
+            j2_d_r1 = tasks["p1_job2_debate_feature_r1"]
+            assert j2_d_r1.depends_on == ["p1_job1_feature"]
+            assert j2_d_r1.deliberate["retrieve_mode"] == "top_k"
+            assert j2_d_r1.rag_env.get("ORACLE_COLLECTION") == "working_repo_lib"
+            assert j2_d_r1.deliberate["template"].endswith("code_quality_audit.md")
 
-            # 5. Phase 2 Job 3 (Test Authoring) Invariants
+            j2_d_r2 = tasks["p1_job2_debate_feature_r2"]
+            assert j2_d_r2.depends_on == ["p1_job2_debate_feature_r1"]
+            assert j2_d_r2.deliberate["retrieve_mode"] == "no_retrieve"
+            assert j2_d_r2.rag_env.get("ORACLE_COLLECTION") == ""
+            assert j2_d_r2.deliberate["prior_verdict"].endswith("feature.job2_verdict_r1.md")
+
+            j2 = tasks["p1_job2_feature"]
+            assert j2.depends_on == ["p1_job2_debate_feature_r2"]
+            assert j2.message_file.endswith("feature.job2_verdict_r2.md")
+
+            # 5. Phase 2 Job 3 Debate Invariants (2 Rounds: Pure AST no_retrieve)
+            j3_d_r1 = tasks["p1_job3_debate_feature_r1"]
+            assert j3_d_r1.depends_on == ["p1_job2_feature"]
+            assert j3_d_r1.deliberate["retrieve_mode"] == "no_retrieve"
+            assert j3_d_r1.deliberate["template"].endswith("testing_debate.md")
+            assert j3_d_r1.deliberate["issue"].endswith("testing_exec.md")
+
+            j3_d_r2 = tasks["p1_job3_debate_feature_r2"]
+            assert j3_d_r2.depends_on == ["p1_job3_debate_feature_r1"]
+            assert j3_d_r2.deliberate["retrieve_mode"] == "no_retrieve"
+            assert j3_d_r2.deliberate["prior_verdict"].endswith("feature.job3_verdict_r1.md")
+
             j3 = tasks["p1_job3_feature"]
-            assert j3.depends_on == ["p1_job3_debate_feature"]
-            assert j3.message_file is not None and j3.message_file.endswith("feature.job3_verdict.md")
+            assert j3.depends_on == ["p1_job3_debate_feature_r2"]
+            assert j3.message_file.endswith("feature.job3_verdict_r2.md")
             assert any(f.endswith("test_feature.py") for f in j3.files)
             assert any(f.endswith("feature.py") for f in j3.files)
 
@@ -1601,6 +1620,42 @@ def test_rag_db_and_type_filter_dag_env_propagation():
             os.chdir(orig_cwd)
 
 
+def test_subprocess_non_zero_exit_error_propagation():
+    """Verify _aider_ask_turn and _oracle_turn propagate non-zero exit codes as failure proposals and rejection verdicts."""
+    import tempfile
+    from unittest.mock import MagicMock, patch
+    from orchestrate import AiderFactory, Task
+    import deliberate
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        factory = AiderFactory(tmpdir, session_name="test_err_session")
+        task = Task(id="test_fail_task")
+
+        # 1. Test _aider_ask_turn on non-zero exit code
+        mock_fail_proc = MagicMock()
+        mock_fail_proc.stdout.read.side_effect = ["Error: syntax error\n", ""]
+        mock_fail_proc.poll.return_value = 1
+        mock_fail_proc.returncode = 1
+        mock_fail_proc.wait.return_value = 1
+
+        with patch("subprocess.Popen", return_value=mock_fail_proc):
+            arch_res = factory._aider_ask_turn(task, "prompt", [])
+            assert arch_res == "PROPOSAL: (architect turn failed)"
+
+        # 2. Test _oracle_turn on non-zero exit code
+        mock_p = MagicMock()
+        mock_p.returncode = 1
+        mock_p.stdout = ""
+        mock_p.stderr = "Traceback (most recent call last):\nException: Fatal crash"
+
+        with patch("subprocess.run", return_value=mock_p):
+            d = {"mode": "code"}
+            orc_res = factory._oracle_turn(task, d, "proposal", 1)
+            assert "VERDICT: OBJECT" in orc_res
+            assert deliberate.oracle_verdict(orc_res) == "object"
+    print("  ✅ Subprocess non-zero exit code error propagation PASS")
+
+
 if __name__ == "__main__":
     print("Starting DAG Topology Tests...\n")
     test_code_mode_topology()
@@ -1625,4 +1680,5 @@ if __name__ == "__main__":
     test_asymmetric_sticky_phases_discovery()
     test_pre_edit_debate_multi_round_topology()
     test_rag_db_and_type_filter_dag_env_propagation()
+    test_subprocess_non_zero_exit_error_propagation()
     print("\nAll DAG Topology tests passed.")

@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
+from typing import Optional
 
 _python_dir = os.path.dirname(os.path.abspath(__file__))
 if _python_dir not in sys.path:
@@ -21,6 +22,21 @@ os.environ["LITELLM_SESSION_ID"] = _PIPELINE_SESSION_ID
 for _n in ("httpx", "urllib3", "LiteLLM", "litellm"):
     import logging
     logging.getLogger(_n).setLevel(logging.WARNING)
+
+try:
+    import litellm
+    litellm.suppress_debug_info = True
+except Exception:
+    pass
+
+
+def _has_vertex_auth() -> bool:
+    """Return True only if Google Cloud auth dependencies are available."""
+    try:
+        import google.auth  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 _RESET = "\033[0m"
 _HELPER_COLOR = "\033[38;2;56;189;248m"  # Sky blue
@@ -112,21 +128,63 @@ load_env_files()
 
 
 def detect_api_key():
-    if os.environ.get("AIDER_HELPER_API_BASE"):
-        return "CUSTOM_LOCAL", "dummy"
-    keys = ["GEMINI_API_KEY", "GOOGLE_API_KEY", "AIDER_GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY", "OPENCODE_API_KEY", "LITELLM_API_KEY"]
+    # 1. Google Cloud Vertex AI credentials
+    if _has_vertex_auth():
+        vertex_keys = ["GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_VERTEX_PROJECT", "VERTEXAI_PROJECT"]
+        for k in vertex_keys:
+            val = os.environ.get(k)
+            if val and not is_dummy_key(val):
+                return k, val
+
+    # 2. Standard Cloud Provider keys
+    keys = [
+        "GEMINI_API_KEY", "GOOGLE_API_KEY", "AIDER_GEMINI_API_KEY", "GOOGLE_GEMINI_API_KEY",
+        "ANTHROPIC_API_KEY", "AIDER_ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY", "AIDER_OPENAI_API_KEY",
+        "OPENROUTER_API_KEY", "AIDER_OPENROUTER_API_KEY",
+        "GROQ_API_KEY", "AIDER_GROQ_API_KEY",
+        "DEEPSEEK_API_KEY", "AIDER_DEEPSEEK_API_KEY",
+        "MISTRAL_API_KEY", "AIDER_MISTRAL_API_KEY",
+        "OPENCODE_API_KEY", "LITELLM_API_KEY",
+    ]
     for k in keys:
         val = os.environ.get(k)
         if val and not is_dummy_key(val):
             return k, val
+
+    # 3. Local Router / Custom Endpoint bypass
+    if os.environ.get("AIDER_HELPER_API_BASE") or os.environ.get("LITELLM_BASE_URL"):
+        return "CUSTOM_LOCAL", "dummy"
+
     return None, None
+
+
+def normalize_helper_model(model_name: str, router_active: bool = False) -> str:
+    """Normalize model prefix to LiteLLM-compatible provider names."""
+    if not model_name:
+        return ""
+    m = model_name.strip()
+    if m.startswith("litellm/"):
+        return f"openai/{m[len('litellm/'):]}"
+    if m.startswith("google-vertex/"):
+        return f"vertex_ai/{m[len('google-vertex/'):]}"
+    if m.startswith("vertex/"):
+        return f"vertex_ai/{m[len('vertex/'):]}"
+    if m.startswith("google/"):
+        return f"gemini/{m[len('google/'):]}"
+    if "/" not in m and router_active:
+        return f"openai/{m}"
+    return m
+
 
 def print_key_help_and_exit():
     print("❌ No active LLM API key detected.", file=sys.stderr)
     print("To run the bootstrapper, set one of the following environment variables:", file=sys.stderr)
     print("\n  export GEMINI_API_KEY=\"your-key-here\"", file=sys.stderr)
+    print("  export GOOGLE_APPLICATION_CREDENTIALS=\"/path/to/credentials.json\"", file=sys.stderr)
     print("  export ANTHROPIC_API_KEY=\"your-key-here\"", file=sys.stderr)
     print("  export OPENAI_API_KEY=\"your-key-here\"", file=sys.stderr)
+    print("  export LITELLM_API_KEY=\"your-key-here\"  # for local/remote routers", file=sys.stderr)
     print("\nTo make this permanent, add the export line to your ~/.bashrc or ~/.zshrc file.", file=sys.stderr)
     sys.exit(1)
 
@@ -519,6 +577,8 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
             os.path.join(pkg_dir, "markdown", "docs", "yaml_docs_sample.md"),
             os.path.join(repo_root, "src", "aider_factory", "markdown", "docs", "yaml_docs_sample.md"),
             os.path.join(pkg_dir, "markdown", "yaml_docs_sample.md"),
+            os.path.join(repo_root, "docs", "yaml_docs_sample.md"),
+            os.path.join(pkg_dir, "docs", "yaml_docs_sample.md"),
         ]
         yaml_docs_path = next((p for p in candidate_yaml_docs if os.path.exists(p)), None)
         yaml_docs = ""
@@ -648,67 +708,144 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
 
     # Call litellm with streaming
     import litellm
-    model_map = {
-        "GEMINI_API_KEY": "gemini/gemini-3.6-flash",
-        "GOOGLE_API_KEY": "gemini/gemini-3.6-flash",
-        "AIDER_GEMINI_API_KEY": "gemini/gemini-3.6-flash",
-        "ANTHROPIC_API_KEY": "anthropic/claude-3-5-sonnet-20241022",
-        "OPENROUTER_API_KEY": "openrouter/auto",
-        "GROQ_API_KEY": "groq/llama-3.3-70b-versatile",
-        "OPENCODE_API_KEY": "openai/opencode",
-        "OPENAI_API_KEY": "openai/gpt-4o"
-    }
-    model = os.environ.get("AIDER_HELPER_MODEL")
-    api_base = os.environ.get("AIDER_HELPER_API_BASE")
-    
-    if api_base:
-        if not model or any(model.startswith(p) for p in ("gemini/", "anthropic/", "groq/", "openrouter/")):
-            try:
-                import requests
-                r = requests.get(f"{api_base.rstrip('/')}/models", headers={"Authorization": "Bearer sk-dummy"}, timeout=2)
-                if r.status_code == 200:
-                    m_list = r.json().get("data", [])
-                    m_ids = [m["id"] for m in m_list if "id" in m]
-                    favored = [m for m in m_ids if "27b" in m.lower()]
-                    m_id = favored[0] if favored else (m_ids[0] if m_ids else None)
-                    if m_id:
-                        model = m_id if "/" in m_id else f"openai/{m_id}"
-            except Exception:
-                pass
-            if not model or any(model.startswith(p) for p in ("gemini/", "anthropic/", "groq/", "openrouter/")):
-                model = "openai/qwen3.6-27b-90k:LATEST"
-        elif "/" not in model:
-            model = f"openai/{model}"
+
+    router_url = os.environ.get("AIDER_HELPER_API_BASE") or os.environ.get("LITELLM_BASE_URL")
+    router_key = (
+        os.environ.get("LITELLM_API_KEY")
+        or resolve_api_key(api_base=router_url)
+    )
+
+    def _get_provider_fallback_model() -> tuple[str, Optional[str], Optional[str]]:
+        """Return (model, api_base, api_key) based on available credentials."""
+        # 1. Google Cloud Vertex AI
+        if _has_vertex_auth():
+            for k in ("GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_VERTEX_PROJECT", "VERTEXAI_PROJECT"):
+                if os.environ.get(k) and not is_dummy_key(os.environ.get(k)):
+                    return "vertex_ai/gemini-2.5-flash", None, None
+
+        # 2. Google AI Studio (Gemini)
+        for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "AIDER_GEMINI_API_KEY", "GOOGLE_GEMINI_API_KEY"):
+            if os.environ.get(k) and not is_dummy_key(os.environ.get(k)):
+                return "gemini/gemini-2.5-flash", None, None
+
+        # 3. Anthropic
+        for k in ("ANTHROPIC_API_KEY", "AIDER_ANTHROPIC_API_KEY"):
+            if os.environ.get(k) and not is_dummy_key(os.environ.get(k)):
+                return "anthropic/claude-3-7-sonnet-latest", None, None
+
+        # 4. OpenAI Cloud
+        for k in ("OPENAI_API_KEY", "AIDER_OPENAI_API_KEY"):
+            if os.environ.get(k) and not is_dummy_key(os.environ.get(k)):
+                return "openai/gpt-4o", None, None
+
+        # 5. Local Router / Proxy
+        if router_url:
+            from env_utils import probe_router
+            available = probe_router(router_url, router_key)
+            if available:
+                chosen = next((m for m in available if "27b" in m.lower()), available[0])
+                return chosen, router_url, router_key
+            return "openai/qwen2.5-coder:latest", router_url, router_key
+
+        # 6. OpenRouter
+        for k in ("OPENROUTER_API_KEY", "AIDER_OPENROUTER_API_KEY"):
+            if os.environ.get(k) and not is_dummy_key(os.environ.get(k)):
+                return "openrouter/auto", None, None
+
+        # 7. Groq
+        for k in ("GROQ_API_KEY", "AIDER_GROQ_API_KEY"):
+            if os.environ.get(k) and not is_dummy_key(os.environ.get(k)):
+                return "groq/llama-3.3-70b-versatile", None, None
+
+        # 8. DeepSeek
+        for k in ("DEEPSEEK_API_KEY", "AIDER_DEEPSEEK_API_KEY"):
+            if os.environ.get(k) and not is_dummy_key(os.environ.get(k)):
+                return "deepseek/deepseek-chat", None, None
+
+        # 9. Mistral
+        for k in ("MISTRAL_API_KEY", "AIDER_MISTRAL_API_KEY"):
+            if os.environ.get(k) and not is_dummy_key(os.environ.get(k)):
+                return "mistral/mistral-large-latest", None, None
+
+        return "gemini/gemini-2.5-flash", None, None
+
+    # Resolve requested model
+    raw_model = os.environ.get("AIDER_HELPER_MODEL")
+    normalized_model = normalize_helper_model(raw_model, router_active=bool(router_url)) if raw_model else None
+
+    target_model = None
+    target_api_base = None
+    target_api_key = None
+
+    if normalized_model:
+        if normalized_model.startswith("vertex_ai/") and not _has_vertex_auth():
+            print(
+                f"⚠️ [aider-helper] Google Cloud SDK not installed for '{normalized_model}'. "
+                "Falling back to available provider...",
+                file=sys.stderr,
+            )
+            target_model, target_api_base, target_api_key = _get_provider_fallback_model()
+        else:
+            is_cloud_provider = any(
+                normalized_model.startswith(p)
+                for p in ("gemini/", "vertex_ai/", "anthropic/", "openrouter/", "groq/", "deepseek/", "mistral/")
+            )
+            if is_cloud_provider:
+                # Cloud and Vertex models are strictly isolated from local router api_base
+                target_model = normalized_model
+                target_api_base = None
+                target_api_key = None
+            elif router_url:
+                target_model = normalized_model
+                target_api_base = router_url
+                target_api_key = router_key
+            else:
+                target_model = normalized_model
+                target_api_base = None
+                target_api_key = None
     else:
-        model = model or model_map.get(key_name, "gemini/gemini-2.5-flash")
-    
-    print(f"{_HELPER_COLOR}[aider-helper] Asking {model}...{_RESET}\n")
-    try:
-        kwargs = {
-            "model": model,
+        target_model, target_api_base, target_api_key = _get_provider_fallback_model()
+
+    def _execute_completion(m_name, m_base, m_key):
+        kw = {
+            "model": m_name,
             "messages": llm_messages,
             "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID},
             "stream": True,
-            "stream_options": {"include_usage": True}
+            "stream_options": {"include_usage": True},
         }
-        if api_base:
-            _explicit = (
-                os.environ.get(key_name) if key_name != "CUSTOM_LOCAL"
-                else os.environ.get("LITELLM_API_KEY")
-            )
-            helper_key = resolve_api_key(
-                model=model,
-                api_base=api_base,
-                explicit_key=_explicit,
-            )
-            kwargs["api_base"] = api_base
-            if helper_key and not is_dummy_key(helper_key):
-                kwargs["api_key"] = helper_key
-            elif _explicit and not is_dummy_key(_explicit):
-                kwargs["api_key"] = _explicit
-            # else: omit api_key entirely → litellm picks from env / no auth for local
+        if m_base:
+            kw["api_base"] = m_base
+            if m_key and not is_dummy_key(m_key):
+                kw["api_key"] = m_key
+        resp = litellm.completion(**kw)
+        try:
+            it = iter(resp)
+            first_chunk = next(it)
+            import itertools
+            return itertools.chain([first_chunk], it)
+        except StopIteration:
+            return iter([])
+        except (TypeError, AttributeError):
+            return resp
 
-        response = litellm.completion(**kwargs)
+    print(f"{_HELPER_COLOR}[aider-helper] Asking {target_model}...{_RESET}\n")
+    try:
+        try:
+            response = _execute_completion(target_model, target_api_base, target_api_key)
+            model = target_model
+        except Exception as primary_err:
+            fb_model, fb_base, fb_key = _get_provider_fallback_model()
+            if fb_model != target_model or fb_base != target_api_base:
+                print(
+                    f"⚠️ [aider-helper] Model '{target_model}' failed ({primary_err}). "
+                    f"Falling back to '{fb_model}'...",
+                    file=sys.stderr,
+                )
+                response = _execute_completion(fb_model, fb_base, fb_key)
+                model = fb_model
+            else:
+                raise primary_err
 
         final_usage = None
 
@@ -741,25 +878,26 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
             reply_text = "".join(full_reply)
             
         try:
-            from aider_factory.python.cost_tracker import fmt_token_count, fmt_cost_usd
-            import aider_factory.python.cost_tracker as ct
-        except ImportError:
-            from cost_tracker import fmt_token_count, fmt_cost_usd
-            import cost_tracker as ct
-            
+            try:
+                from aider_factory.python.cost_tracker import fmt_token_count, fmt_cost_usd
+                import aider_factory.python.cost_tracker as ct
+            except ImportError:
+                from cost_tracker import fmt_token_count, fmt_cost_usd
+                import cost_tracker as ct
+
             if final_usage:
                 sent = getattr(final_usage, "prompt_tokens", 0)
                 recv = getattr(final_usage, "completion_tokens", 0)
-                
+
                 try:
                     cost_tuple = litellm.cost_calculator.cost_per_token(model=model, prompt_tokens=sent, completion_tokens=recv)
                     msg_cost = float(cost_tuple[0] + cost_tuple[1]) if isinstance(cost_tuple, tuple) else float(cost_tuple)
                 except Exception:
                     msg_cost = 0.0
-                    
+
                 ct._PROCESS_SESSION_COST += msg_cost
                 session_cost = ct._PROCESS_SESSION_COST
-                
+
                 print(
                     f"Tokens: {fmt_token_count(sent)} sent, "
                     f"{fmt_token_count(recv)} received. "
@@ -767,7 +905,7 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
                     f"${fmt_cost_usd(session_cost)} session.",
                     file=sys.stderr
                 )
-        except Exception as e:
+        except Exception:
             pass
 
         messages.append({"role": "assistant", "content": reply_text})

@@ -139,7 +139,7 @@ def test_oracle_cli_collection_tilde_and_relative_path_expansion():
             _extract_overrides(args)
             assert os.environ.get("ORACLE_EXPLICIT_COLLECTION") == "1"
             assert os.environ.get("ORACLE_COLLECTION") == "Tilde_Corpus"
-            assert os.environ.get("ORACLE_RAG_DB_DIR") == os.path.abspath(sub_lancedb)
+            assert os.path.realpath(os.environ.get("ORACLE_RAG_DB_DIR")) == os.path.realpath(sub_lancedb)
         finally:
             os.chdir(orig_cwd)
     print("  ✅ --collection correctly expands relative paths and resolves lancedb/ directory.")

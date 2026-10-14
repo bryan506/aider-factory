@@ -313,6 +313,7 @@ def _generate_repo_maps(cwd, map_tokens=2048, target="all", is_global=False):
     projects = _get_registered_projects() if is_global else [os.path.abspath(cwd)]
     if not projects:
         projects = [os.path.abspath(cwd)]
+    projects = list(dict.fromkeys(os.path.realpath(p) for p in projects))
 
     for proj in projects:
         init_user_project(proj)

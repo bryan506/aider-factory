@@ -54,3 +54,13 @@ packages = ["src/aider_factory"]
 [tool.pytest.ini_options]
 testpaths = ["src/aider_factory/tests/aider_factory_tests"]
 norecursedirs = [".git", ".aider_factory", "temp", "tmp", "node_modules", ".venv"]
+
+[tool.uv]
+override-dependencies = [
+    "litellm>=1.105.1",
+    "importlib-metadata>=8.0.0",
+    "aiohttp>=3.14.0",
+    "requests>=2.34.0",
+    "yarl>=1.25.0",
+    "tiktoken>=0.8.0",
+]

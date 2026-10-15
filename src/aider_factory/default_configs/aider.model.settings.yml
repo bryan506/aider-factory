@@ -713,11 +713,15 @@
 - name: gemini/gemini-4-argon
   edit_format: ask
   use_repo_map: true
-  use_temperature: false        # Argon does not support temperature sampling
-  accepts_settings:
-    - reasoning_effort         # Exposes /reasoning-effort (low, medium, high)
+  overeager: true
+  use_temperature: false
+  examples_as_sys_msg: true
+  reminder: sys
+  caches_by_default: true
   extra_params:
-    reasoning_effort: "high"
+     reasoning_effort: "high"
+  accepts_settings:
+     - reasoning_effort
 
 - name: vertex_ai/gemini-3.5-flash
   edit_format: editor-diff

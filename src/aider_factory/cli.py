@@ -931,6 +931,91 @@ def ensure_aider_installed():
                 file=sys.stderr,
             )
 
+    def _patch_aider_exceptions(py_exe: str) -> None:
+        try:
+            subprocess.run(
+                [
+                    py_exe,
+                    "-c",
+                    "import aider.exceptions as ae, inspect, re; "
+                    "p = inspect.getsourcefile(ae); "
+                    "txt = open(p, encoding='utf-8').read(); "
+                    "new_txt = re.sub(r'raise ValueError\\([^\\n]*exceptions list[^\\n]*\\)', 'pass', txt); "
+                    "open(p, 'w', encoding='utf-8').write(new_txt) if new_txt != txt else None",
+                ],
+                check=False,
+                capture_output=True,
+            )
+        except Exception:
+            pass
+
+    if shutil.which("uv"):
+        try:
+            import importlib.metadata as _meta
+
+            ver_str = _meta.version("litellm")
+            ver_parts = tuple(int(x) for x in re.findall(r"\d+", ver_str)[:3])
+            if ver_parts < (1, 105, 1):
+                subprocess.run(
+                    [
+                        "uv",
+                        "pip",
+                        "install",
+                        "--quiet",
+                        "--python",
+                        sys.executable,
+                        "litellm>=1.105.1",
+                    ],
+                    check=False,
+                    capture_output=True,
+                )
+        except Exception:
+            pass
+
+        _patch_aider_exceptions(sys.executable)
+
+        try:
+            aider_bin = shutil.which("aider")
+            if aider_bin and os.path.isfile(aider_bin):
+                with open(aider_bin, "rb") as _bf:
+                    first_line = _bf.readline().decode("utf-8", errors="ignore").strip()
+                if first_line.startswith("#!"):
+                    shebang = first_line[2:].strip().split()
+                    aider_py = shebang[-1] if shebang else ""
+                    if (
+                        aider_py
+                        and os.path.isfile(aider_py)
+                        and os.path.abspath(aider_py) != os.path.abspath(sys.executable)
+                    ):
+                        chk = subprocess.run(
+                            [
+                                aider_py,
+                                "-c",
+                                "import importlib.metadata as m, re, sys; "
+                                "v = tuple(int(x) for x in re.findall(r'\\d+', m.version('litellm'))[:3]); "
+                                "sys.exit(0 if v >= (1, 105, 1) else 1)",
+                            ],
+                            check=False,
+                            capture_output=True,
+                        )
+                        if chk.returncode != 0:
+                            subprocess.run(
+                                [
+                                    "uv",
+                                    "pip",
+                                    "install",
+                                    "--quiet",
+                                    "--python",
+                                    aider_py,
+                                    "litellm>=1.105.1",
+                                ],
+                                check=False,
+                                capture_output=True,
+                            )
+                        _patch_aider_exceptions(aider_py)
+        except Exception:
+            pass
+
 
 def _backup_workspace_cache(proj_path: str):
     """Back up workspace .aider_factory directory to ~/.cache/aider_factory_cache/<repo_name>/.aider_factory/."""

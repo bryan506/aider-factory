@@ -354,10 +354,8 @@ def _generate_repo_maps(cwd, map_tokens=2048, target="all", is_global=False):
                 res = subprocess.run(
                     cmd,
                     cwd=proj,
-                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
-                    timeout=30,
                 )
                 if res.returncode == 0 and res.stdout.strip():
                     with open(out_path, "w", encoding="utf-8") as f:
@@ -888,12 +886,45 @@ def ensure_aider_installed():
         os.environ["PATH"] = f"{local_bin}{os.pathsep}{current_path}"
 
     if not shutil.which("aider"):
+        fallback_bins = [
+            os.path.expanduser("~/.local/bin"),
+            os.path.dirname(os.path.abspath(sys.executable)),
+        ]
+        try:
+            import pwd
+
+            real_home = pwd.getpwuid(os.getuid()).pw_dir
+            for candidate in (
+                os.path.join(real_home, ".local", "bin"),
+                os.path.join(
+                    real_home,
+                    "Library",
+                    "Python",
+                    f"{sys.version_info.major}.{sys.version_info.minor}",
+                    "bin",
+                ),
+            ):
+                if candidate not in fallback_bins:
+                    fallback_bins.append(candidate)
+        except Exception:
+            pass
+
+        for fb in fallback_bins:
+            cur_p = os.environ.get("PATH", "")
+            if fb and os.path.exists(fb) and fb not in cur_p.split(os.pathsep):
+                os.environ["PATH"] = f"{fb}{os.pathsep}{cur_p}"
+
+    if not shutil.which("aider"):
         print(
             "📦 [aider-factory] 'aider' not found. Auto-installing aider-chat globally via uv...",
             file=sys.stderr,
         )
         try:
             subprocess.run(["uv", "tool", "install", "aider-chat"], check=False)
+            for post_bin in (local_bin, os.path.expanduser("~/.local/bin")):
+                cur_p = os.environ.get("PATH", "")
+                if post_bin and os.path.exists(post_bin) and post_bin not in cur_p.split(os.pathsep):
+                    os.environ["PATH"] = f"{post_bin}{os.pathsep}{cur_p}"
         except Exception as e:
             print(
                 f"⚠️ [aider-factory] Could not auto-install aider-chat: {e}",

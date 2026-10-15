@@ -126,7 +126,8 @@ def test_oracle_cli_collection_path_ending_in_lancedb():
 def test_oracle_cli_collection_tilde_and_relative_path_expansion():
     for k in ["ORACLE_COLLECTION", "ORACLE_RAG_DB_DIR", "ORACLE_EXPLICIT_COLLECTION"]:
         os.environ.pop(k, None)
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory() as raw_tmpdir:
+        tmpdir = os.path.realpath(raw_tmpdir)
         coll_dir = os.path.join(tmpdir, "Tilde_Corpus")
         sub_lancedb = os.path.join(coll_dir, "lancedb")
         os.makedirs(sub_lancedb, exist_ok=True)
@@ -139,7 +140,7 @@ def test_oracle_cli_collection_tilde_and_relative_path_expansion():
             _extract_overrides(args)
             assert os.environ.get("ORACLE_EXPLICIT_COLLECTION") == "1"
             assert os.environ.get("ORACLE_COLLECTION") == "Tilde_Corpus"
-            assert os.environ.get("ORACLE_RAG_DB_DIR") == os.path.abspath(sub_lancedb)
+            assert os.path.realpath(os.environ.get("ORACLE_RAG_DB_DIR", "")) == os.path.realpath(sub_lancedb)
         finally:
             os.chdir(orig_cwd)
     print("  ✅ --collection correctly expands relative paths and resolves lancedb/ directory.")

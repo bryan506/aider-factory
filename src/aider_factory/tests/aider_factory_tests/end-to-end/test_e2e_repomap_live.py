@@ -15,7 +15,12 @@ class TestE2ERepoMapLive(unittest.TestCase):
     """Zero-Mock Live E2E Smoke Tests for Repo Map generation (--repo-map, --repo-map-tests, --repo-map-all, --global)."""
 
     def setUp(self):
-        self.test_dir = tempfile.mkdtemp()
+        self.real_home = os.path.expanduser("~")
+        self.test_dir = os.path.realpath(tempfile.mkdtemp())
+        pw_cache = os.path.join(self.test_dir, ".cache", "ms-playwright")
+        os.makedirs(pw_cache, exist_ok=True)
+        with open(os.path.join(pw_cache, ".seeded"), "w", encoding="utf-8") as f:
+            f.write("ok\n")
         self.old_cwd = os.getcwd()
         os.chdir(self.test_dir)
 
@@ -34,9 +39,11 @@ class TestE2ERepoMapLive(unittest.TestCase):
         env["HOME"] = self.test_dir
         env["XDG_CONFIG_HOME"] = os.path.join(self.test_dir, ".config")
         env["OPENAI_API_KEY"] = "sk-dummy"
-        local_bin = os.path.expanduser("~/.local/bin")
+        env["AIDER_YES"] = "1"
+        env["AIDER_NO_GITIGNORE"] = "1"
+        local_bin = os.path.join(self.real_home, ".local", "bin")
         if os.path.exists(local_bin):
-            env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
+            env["PATH"] = f"{local_bin}{os.pathsep}{env.get('PATH', '')}"
         if extra_env:
             env.update(extra_env)
         return env

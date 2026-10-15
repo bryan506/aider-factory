@@ -48,8 +48,12 @@ def _write_fake_binary(path, content):
 
 class TestE2EWorkspaceIsolation(unittest.TestCase):
     def setUp(self):
+        real_local_bin = os.path.expanduser("~/.local/bin")
         self.temp_root = tempfile.TemporaryDirectory()
-        self.root_path = Path(self.temp_root.name)
+        self.root_path = Path(os.path.realpath(self.temp_root.name))
+        pw_cache = self.root_path / ".cache" / "ms-playwright"
+        pw_cache.mkdir(parents=True, exist_ok=True)
+        (pw_cache / ".seeded").write_text("ok\n", encoding="utf-8")
         self.ws_a = self.root_path / "Workspace_Alpha"
         self.ws_b = self.root_path / "Workspace_Beta"
         self.config_dir = self.root_path / "global_config"
@@ -57,11 +61,18 @@ class TestE2EWorkspaceIsolation(unittest.TestCase):
         self.ws_b.mkdir()
         self.config_dir.mkdir()
 
+        base_path = os.environ.get("PATH", "")
+        if os.path.exists(real_local_bin) and real_local_bin not in base_path.split(os.pathsep):
+            base_path = f"{real_local_bin}{os.pathsep}{base_path}"
+
         self.env = _get_clean_env({
+            "PATH": base_path,
             "XDG_CONFIG_HOME": str(self.config_dir),
             "HOME": str(self.root_path),
             "AIDER_HELPER_API_BASE": "http://127.0.0.1:9999/v1",
             "OPENAI_API_KEY": "sk-dummy",
+            "AIDER_YES": "1",
+            "AIDER_NO_GITIGNORE": "1",
         })
 
     def tearDown(self):

@@ -205,8 +205,10 @@ class TestOracleKVPersistence(unittest.TestCase):
             f.write("phases:\n  - enabled: true\n    files:\n      target_files: ['file_A.py']\n")
         os.environ["ORACLE_CONFIG_FILE"] = cfg_path
 
-        with patch("deliberate.consensus_state", return_value="agreed"):
-            with patch("litellm.completion", return_value=FakeResponse("VERDICT: AGREE")):
+        with patch("orchestrate.AiderFactory._aider_ask_turn", return_value="PROPOSAL: Fix applied."):
+            with patch("deliberate.consensus_state", return_value="agreed"), patch(
+                "litellm.completion", return_value=FakeResponse("VERDICT: AGREE")
+            ):
                 # Run 1: establishes session with file_A.py
                 oracle_agent._run_cli_debate("Turn 1", mode="code", max_turns=1, rounds=1)
                 with open(debate_session_file, "r", encoding="utf-8") as sf:

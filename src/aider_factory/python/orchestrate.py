@@ -100,6 +100,7 @@ class Task:
     detect_urls: Optional[bool] = None
     disable_playwright: Optional[bool] = None
     history_stem: Optional[str] = None
+    testing_context: Optional[dict] = None
 
 
 class AiderFactory:
@@ -119,6 +120,7 @@ class AiderFactory:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.tasks: dict[str, Task] = {}
         self.last_test_result: dict[str, bool] = {}
+        self._impl_baselines: dict[str, dict] = {}
 
     def _get_state_files(self) -> list[str]:
         d = str(self.session_dir)
@@ -184,6 +186,281 @@ class AiderFactory:
                         os.remove(vault_path)
                     except OSError:
                         pass
+
+    def _targets_aider_factory(self, task: "Task") -> bool:
+        """Return True if any editable file in task.files resides inside .aider_factory/."""
+        root = str(self.project_dir)
+        for f in task.files or []:
+            rel = os.path.normpath(f).replace("\\", "/")
+            if os.path.isabs(rel):
+                try:
+                    rel = os.path.relpath(rel, root).replace("\\", "/")
+                except ValueError:
+                    pass
+            if rel.startswith(".aider_factory/") or "/.aider_factory/" in f"/{rel}":
+                return True
+        return False
+
+    def _resolve_task_aiderignore(
+        self, task: "Task", ask_mode: bool = False
+    ) -> Optional[str]:
+        """Return path to --aiderignore file for this Aider invocation.
+        Headless tasks that do not edit .aider_factory/ files receive a strict ignore
+        file that blocks all of .aider_factory/ from entering Aider's live RepoMap."""
+        root = str(self.project_dir)
+        root_ignore = os.path.join(root, ".aiderignore")
+        task_ignore = os.path.join(str(self.session_dir), ".aiderignore_task")
+
+        edits_af = (not ask_mode) and self._targets_aider_factory(task)
+
+        if (task.pair_programming and not ask_mode) or edits_af:
+            return root_ignore if os.path.isfile(root_ignore) else None
+
+        try:
+            try:
+                from cli import _read_user_aiderignore
+            except ImportError:
+                from aider_factory.cli import _read_user_aiderignore
+            rules = _read_user_aiderignore(root)
+        except Exception:
+            rules = [".aider_factory/"]
+
+        try:
+            with open(task_ignore, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(rules) + "\n")
+            return task_ignore
+        except Exception:
+            return root_ignore if os.path.isfile(root_ignore) else None
+
+    def _capture_impl_baseline(
+        self,
+        baseline_key: str,
+        tracked_files: list[str],
+        test_file: Optional[str] = None,
+    ) -> None:
+        """Capture pre-implementation HEAD SHA and file snapshots in RAM (idempotent per key)."""
+        if not baseline_key or baseline_key in self._impl_baselines:
+            return
+
+        root = str(self.project_dir)
+        head_sha = None
+        try:
+            res = subprocess.run(
+                ["git", "rev-parse", "--verify", "HEAD"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                head_sha = res.stdout.strip()
+        except Exception:
+            pass
+
+        def _norm_rel(p: str) -> str:
+            clean = os.path.normpath(p).replace("\\", "/")
+            if os.path.isabs(clean):
+                try:
+                    clean = os.path.relpath(clean, root).replace("\\", "/")
+                except ValueError:
+                    pass
+            return clean.lstrip("./")
+
+        norm_tracked = [_norm_rel(f) for f in (tracked_files or []) if f]
+        if isinstance(test_file, (list, tuple, set)):
+            norm_tests = {_norm_rel(tf) for tf in test_file if tf}
+        elif test_file:
+            norm_tests = {_norm_rel(test_file)}
+        else:
+            norm_tests = set()
+        norm_test = next(iter(norm_tests), None)
+
+        dirty_paths = []
+        if not norm_tracked:
+            try:
+                st = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if st.returncode == 0 and st.stdout:
+                    for line in st.stdout.splitlines():
+                        if len(line) < 4:
+                            continue
+                        raw_p = line[3:].strip()
+                        if " -> " in raw_p:
+                            raw_p = raw_p.split(" -> ", 1)[1].strip()
+                        raw_p = raw_p.strip('"')
+                        rel_p = _norm_rel(raw_p)
+                        if (
+                            rel_p
+                            and not rel_p.startswith((".git/", ".aider_factory/"))
+                            and rel_p not in norm_tests
+                        ):
+                            dirty_paths.append(rel_p)
+            except Exception:
+                pass
+
+        snapshots: dict[str, Optional[str]] = {}
+        for rel_p in dict.fromkeys(norm_tracked + dirty_paths):
+            abs_p = os.path.join(root, rel_p)
+            if os.path.isfile(abs_p):
+                try:
+                    with open(abs_p, "r", encoding="utf-8", errors="replace") as fh:
+                        snapshots[rel_p] = fh.read()
+                except Exception:
+                    snapshots[rel_p] = None
+            else:
+                snapshots[rel_p] = None
+
+        self._impl_baselines[baseline_key] = {
+            "head_sha": head_sha,
+            "tracked_files": norm_tracked,
+            "test_file": norm_test,
+            "test_files": sorted(norm_tests),
+            "snapshots": snapshots,
+        }
+
+    def _compute_impl_diff(
+        self,
+        baseline_key: str,
+        tracked_files: list[str],
+        test_file: Optional[str] = None,
+    ) -> str:
+        """Compute net unified git diff across tracked and modified workspace files since baseline."""
+        import difflib
+
+        root = str(self.project_dir)
+        baseline = self._impl_baselines.get(baseline_key) or {}
+        head_sha = baseline.get("head_sha")
+        snapshots = baseline.get("snapshots") or {}
+
+        def _norm_rel(p: str) -> str:
+            clean = os.path.normpath(p).replace("\\", "/")
+            if os.path.isabs(clean):
+                try:
+                    clean = os.path.relpath(clean, root).replace("\\", "/")
+                except ValueError:
+                    pass
+            return clean.lstrip("./")
+
+        if isinstance(test_file, (list, tuple, set)):
+            norm_tests = {_norm_rel(tf) for tf in test_file if tf}
+        elif test_file:
+            norm_tests = {_norm_rel(test_file)}
+        else:
+            norm_tests = set(baseline.get("test_files") or [])
+            if baseline.get("test_file"):
+                norm_tests.add(baseline["test_file"])
+        candidates = [
+            _norm_rel(f)
+            for f in (tracked_files or baseline.get("tracked_files") or [])
+            if f
+        ]
+
+        if not candidates:
+            if head_sha:
+                try:
+                    df = subprocess.run(
+                        ["git", "diff", "--name-only", head_sha],
+                        cwd=root,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if df.returncode == 0 and df.stdout:
+                        for ln in df.stdout.splitlines():
+                            rel_p = _norm_rel(ln.strip())
+                            if (
+                                rel_p
+                                and not rel_p.startswith((".git/", ".aider_factory/"))
+                                and rel_p not in norm_tests
+                                and rel_p not in candidates
+                            ):
+                                candidates.append(rel_p)
+                except Exception:
+                    pass
+
+            try:
+                st = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if st.returncode == 0 and st.stdout:
+                    for line in st.stdout.splitlines():
+                        if len(line) < 4:
+                            continue
+                        raw_p = line[3:].strip()
+                        if " -> " in raw_p:
+                            raw_p = raw_p.split(" -> ", 1)[1].strip()
+                        raw_p = raw_p.strip('"')
+                        rel_p = _norm_rel(raw_p)
+                        if (
+                            rel_p
+                            and not rel_p.startswith((".git/", ".aider_factory/"))
+                            and rel_p not in norm_tests
+                            and rel_p not in candidates
+                        ):
+                            candidates.append(rel_p)
+            except Exception:
+                pass
+
+        diff_chunks = []
+        for rel_p in dict.fromkeys(candidates):
+            if not rel_p or rel_p in norm_tests:
+                continue
+            if rel_p in snapshots:
+                before_text = snapshots[rel_p]
+            elif head_sha:
+                try:
+                    sh = subprocess.run(
+                        ["git", "show", f"{head_sha}:{rel_p}"],
+                        cwd=root,
+                        capture_output=True,
+                        text=True,
+                        errors="replace",
+                        check=False,
+                    )
+                    before_text = sh.stdout if sh.returncode == 0 else None
+                except Exception:
+                    before_text = None
+            else:
+                before_text = None
+
+            abs_p = os.path.join(root, rel_p)
+            if os.path.isfile(abs_p):
+                try:
+                    with open(abs_p, "r", encoding="utf-8", errors="replace") as fh:
+                        after_text = fh.read()
+                except Exception:
+                    after_text = None
+            else:
+                after_text = None
+
+            if before_text == after_text:
+                continue
+
+            before_lines = (before_text or "").splitlines(keepends=True)
+            after_lines = (after_text or "").splitlines(keepends=True)
+            from_file = "/dev/null" if before_text is None else f"a/{rel_p}"
+            to_file = "/dev/null" if after_text is None else f"b/{rel_p}"
+            udiff = list(
+                difflib.unified_diff(
+                    before_lines,
+                    after_lines,
+                    fromfile=from_file,
+                    tofile=to_file,
+                )
+            )
+            if udiff:
+                diff_chunks.append("".join(udiff).rstrip("\n"))
+
+        return "\n\n".join(diff_chunks).strip()
 
     def add_task(self, task: Task):
         self.tasks[task.id] = task
@@ -461,7 +738,6 @@ class AiderFactory:
                 "--no-pretty",
                 "--no-suggest-shell-commands",
                 "--no-detect-urls",
-                "--yes-always",
                 "--auto-accept-architect",
                 "--map-tokens",
                 "0",
@@ -488,6 +764,9 @@ class AiderFactory:
                 cmd.extend(["--weak-model", task.weak_model])
             if aider_settings:
                 cmd.extend(["--model-settings-file", aider_settings])
+            task_aiderignore = self._resolve_task_aiderignore(task, ask_mode=True)
+            if task_aiderignore:
+                cmd.extend(["--aiderignore", task_aiderignore])
 
             # Auto-discover CONVENTIONS.md if not explicitly passed
             conventions_cand = [
@@ -508,6 +787,7 @@ class AiderFactory:
                     cmd.extend(["--read", rf])
             env = os.environ.copy()
             env["AIDER_ARCHITECT"] = "false"  # override config architect:true for this turn
+            env["AIDER_YES_ALWAYS"] = "false"
             env["PYTHONHASHSEED"] = (
                 "0"  # Ensure deterministic set iteration for perfect prefix caching
             )
@@ -547,7 +827,7 @@ class AiderFactory:
                     cmd,
                     cwd=self.project_dir,
                     env=env,
-                    stdin=subprocess.DEVNULL,
+                    stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -557,6 +837,14 @@ class AiderFactory:
             except Exception as e:
                 print(f"└──{_RESET}", flush=True)
                 return f"PROPOSAL: (architect turn failed: {e})"
+
+            try:
+                if proc.stdin:
+                    proc.stdin.write("n\n" * 50)
+                    proc.stdin.flush()
+                    proc.stdin.close()
+            except Exception:
+                pass
 
             import threading
             try:
@@ -664,14 +952,22 @@ class AiderFactory:
             else:
                 cmd_base = ["aider-oracle"]
         env = {**os.environ, **(task.rag_env or {})}
+        if d.get("read_files"):
+            env.pop("ORACLE_CONTEXT_FILES", None)
         if task.editor_model and "ORACLE_AGENT_MODEL" not in env:
             env["ORACLE_AGENT_MODEL"] = task.editor_model
-        if task.editor_api_base and "ORACLE_AGENT_API_BASE" not in env:
-            env["ORACLE_AGENT_API_BASE"] = task.editor_api_base
+        if is_local_model(env.get("ORACLE_AGENT_MODEL")):
+            if task.editor_api_base and "ORACLE_AGENT_API_BASE" not in env:
+                env["ORACLE_AGENT_API_BASE"] = task.editor_api_base
+        else:
+            env.pop("ORACLE_AGENT_API_BASE", None)
         if task.model and "ORACLE_ARCHITECT_MODEL" not in env:
             env["ORACLE_ARCHITECT_MODEL"] = task.model
-        if task.architect_api_base and "ORACLE_ARCHITECT_API_BASE" not in env:
-            env["ORACLE_ARCHITECT_API_BASE"] = task.architect_api_base
+        if is_local_model(env.get("ORACLE_ARCHITECT_MODEL")):
+            if task.architect_api_base and "ORACLE_ARCHITECT_API_BASE" not in env:
+                env["ORACLE_ARCHITECT_API_BASE"] = task.architect_api_base
+        else:
+            env.pop("ORACLE_ARCHITECT_API_BASE", None)
 
         # Route the oracle to a debate-specific session file (survives apply-phase cleanup).
         _sf = d.get("oracle_session_file")
@@ -909,12 +1205,18 @@ class AiderFactory:
                     os.environ[k] = str(task.rag_env[k])
         if task.editor_model and "ORACLE_AGENT_MODEL" not in os.environ:
             os.environ["ORACLE_AGENT_MODEL"] = task.editor_model
-        if task.editor_api_base and "ORACLE_AGENT_API_BASE" not in os.environ:
-            os.environ["ORACLE_AGENT_API_BASE"] = task.editor_api_base
+        if is_local_model(os.environ.get("ORACLE_AGENT_MODEL")):
+            if task.editor_api_base and "ORACLE_AGENT_API_BASE" not in os.environ:
+                os.environ["ORACLE_AGENT_API_BASE"] = task.editor_api_base
+        else:
+            os.environ.pop("ORACLE_AGENT_API_BASE", None)
         if task.model and "ORACLE_ARCHITECT_MODEL" not in os.environ:
             os.environ["ORACLE_ARCHITECT_MODEL"] = task.model
-        if task.architect_api_base and "ORACLE_ARCHITECT_API_BASE" not in os.environ:
-            os.environ["ORACLE_ARCHITECT_API_BASE"] = task.architect_api_base
+        if is_local_model(os.environ.get("ORACLE_ARCHITECT_MODEL")):
+            if task.architect_api_base and "ORACLE_ARCHITECT_API_BASE" not in os.environ:
+                os.environ["ORACLE_ARCHITECT_API_BASE"] = task.architect_api_base
+        else:
+            os.environ.pop("ORACLE_ARCHITECT_API_BASE", None)
 
         template, issue = d.get("template"), d.get("issue")
         verdict_path, ledger_path = d.get("verdict"), d.get("ledger")
@@ -978,6 +1280,24 @@ class AiderFactory:
             if p and os.path.isfile(p):
                 with open(p, encoding="utf-8") as f:
                     seed += f.read() + "\n\n"
+
+        if d.get("editable_files"):
+            _ed_list = list(dict.fromkeys(d.get("editable_files") or []))
+            _ro_list = [
+                f
+                for f in (d.get("read_files") or [])
+                if f not in _ed_list and f != issue and f != template
+            ]
+            seed += (
+                "## JOB FILE SCOPE BOUNDARY\n"
+                f"- **Editable Target File(s) for This Job**: {', '.join(f'`{f}`' for f in _ed_list)}\n"
+                + (
+                    f"- **Read-Only Reference Context (DO NOT PROPOSE EDITS)**: {', '.join(f'`{f}`' for f in _ro_list)}\n"
+                    if _ro_list
+                    else ""
+                )
+                + "- **Strict Scoping Rule**: Only formulate `### [Task ID: ...]` blocks for the Editable Target File(s) listed above. Do NOT propose edits or tasks for Read-Only Reference Context files.\n\n"
+            )
 
         # If a prior round's verdict was passed, extract its full # Resolution to seed this round.
         if prior_verdict_path and os.path.isfile(prior_verdict_path):
@@ -1420,6 +1740,35 @@ class AiderFactory:
                     )
                 return True
 
+        t_ctx = getattr(task, "testing_context", None) or {}
+        t_role = t_ctx.get("role")
+        if t_role == "capture_baseline":
+            self._capture_impl_baseline(
+                t_ctx.get("baseline_key", ""),
+                t_ctx.get("tracked_files") or [],
+                t_ctx.get("test_file"),
+            )
+        elif t_role == "render_testing_exec":
+            try:
+                try:
+                    from run_workflow import _render_testing_template
+                except ImportError:
+                    from aider_factory.python.run_workflow import _render_testing_template
+                diff_text = self._compute_impl_diff(
+                    t_ctx.get("baseline_key", ""),
+                    t_ctx.get("tracked_files") or [],
+                    t_ctx.get("test_file"),
+                )
+                _render_testing_template(
+                    t_ctx.get("template_path", ""),
+                    t_ctx.get("strategy_content", ""),
+                    t_ctx.get("output_path", ""),
+                    git_diff_text=diff_text,
+                    include_diff=True,
+                )
+            except Exception as e:
+                log.warning(f"⚠️ Could not render testing context for [{task.id}]: {e}")
+
         # Invalidate cached gate evaluations when mutating tasks run
         is_mutating_aider = bool(task.files and not task.skip_aider and not task.deliberate and not task.validate)
         is_mutating_oracle = bool(task.oracle and task.oracle.get("out"))
@@ -1605,12 +1954,17 @@ class AiderFactory:
             if task.weak_model is not None:
                 conf_data["weak-model"] = task.weak_model
 
+            edits_af_files = self._targets_aider_factory(task)
+            effective_auto_commits = (
+                False if edits_af_files else task.auto_commits
+            )
+
             if task.yes_always is not None:
                 conf_data["yes-always"] = bool(task.yes_always)
             if task.auto_accept_architect is not None:
                 conf_data["auto-accept-architect"] = bool(task.auto_accept_architect)
-            if task.auto_commits is not None:
-                conf_data["auto-commits"] = bool(task.auto_commits)
+            if effective_auto_commits is not None:
+                conf_data["auto-commits"] = bool(effective_auto_commits)
             if task.auto_lint is not None:
                 conf_data["auto-lint"] = bool(task.auto_lint)
             if task.lint_cmd is not None:
@@ -1722,6 +2076,9 @@ class AiderFactory:
                 cmd.extend(["--config", aider_conf])
             if aider_settings:
                 cmd.extend(["--model-settings-file", aider_settings])
+            task_aiderignore = self._resolve_task_aiderignore(task, ask_mode=False)
+            if task_aiderignore:
+                cmd.extend(["--aiderignore", task_aiderignore])
 
             # Runtime & KV-cache flags (overrides .aider.conf.yml defaults)
             if task.map_tokens is not None:
@@ -1737,9 +2094,9 @@ class AiderFactory:
                     ["--max-chat-history-tokens", str(task.max_chat_history_tokens)]
                 )
 
-            if task.auto_commits is not None:
+            if effective_auto_commits is not None:
                 cmd.append(
-                    "--auto-commits" if task.auto_commits else "--no-auto-commits"
+                    "--auto-commits" if effective_auto_commits else "--no-auto-commits"
                 )
             if task.auto_lint is not None:
                 cmd.append(
@@ -1978,8 +2335,8 @@ class AiderFactory:
                 env["AIDER_AUTO_ACCEPT_ARCHITECT"] = (
                     "true" if task.auto_accept_architect else "false"
                 )
-            if task.auto_commits is not None:
-                env["AIDER_AUTO_COMMITS"] = "true" if task.auto_commits else "false"
+            if effective_auto_commits is not None:
+                env["AIDER_AUTO_COMMITS"] = "true" if effective_auto_commits else "false"
             if task.auto_lint is not None:
                 env["AIDER_AUTO_LINT"] = "true" if task.auto_lint else "false"
             if task.lint_cmd is not None:

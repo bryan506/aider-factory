@@ -273,7 +273,7 @@ When `sticky_phases.editable: true` or `sticky_phases.readonly: true` is enabled
 Code ingestion utilizes Tree-Sitter language grammars:
 - Language parsers recursively traverse the concrete syntax tree. Chunks are extracted at structural node boundaries (classes, functions, methods) annotated with symbol identifiers and 1-based line ranges (`line_start`, `line_end`).
 - If an individual AST node exceeds `code_chunk_size` (default: 2,000 characters), `_text_split_fallback()` divides the node at line boundaries with 3 lines of overlap. Single oversized lines are split at character boundaries with 20% overlap.
-- Markdown documents use `MarkdownHeaderTextSplitter` (`#`, `##`, `###`) combined with recursive character splitting, while atomic code blocks (```` ``` ````) are preserved without mid-block division.
+- Markdown documents use `MarkdownHeaderTextSplitter` (`#`, `##`, `###`) combined with recursive character splitting, while atomic code blocks (``` ``` ```) are preserved without mid-block division.
 
 #### 3.2.4 Document Ingestion & Vision OCR Pipeline
 1. **Docling Extraction**: Clean digital documents (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.html`) are converted directly to structured markdown via `docling_runner.py`.

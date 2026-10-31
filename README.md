@@ -1,6 +1,10 @@
 # aider-factory 🏭
 
-⚠️ **Active Development:** This package is fully usable right now and has been tested in active workflows with great results! Currently, it is still undergoing some cleanup and demos made before its considered 'stable'. Feel free to explore, use it, and star the repo!
+I would like to thank Paul Gauthier (Creator and Maintainer of Aider) for creating what we can call a 'no-frills' harness, which ended up being the back bone of Aider-Factory. Also Quantstrat (company I work for) for many of the ideas and funding of this package (running tests with live agents costs $). Both Aider and Quantstrat adhere to core open source philosophilies, which is why every single feature of aider-factory is open source. Note, since the most valuable features of Aider-Factory are CLI tools, they can be used with any harness (Opencode, Codex, Claude, etc). I use many of the features (like aider-research, aider-oracle, and aider-validate) with Opencode frequently.
+
+CLI tool support for aider was inspired by https://www.wearewarp.com/agents/mcp/aider since aider does not have native MCP support.
+
+⚠️ **Stable:** This package is fully usable right now and has been tested in active workflows with great results! Currently, features will continue to be added if useful and are pareto improvements to the package. As of commit 3c6ad34, the package is stable and all features included pass the 600+ tests. Feel free to explore, use it, and star the repo. If there is a desired feature or model usage problems, start an issue and I'll look into it -- as the AI space changes, I'm sure there will be some housekeeping involved on my end. If there is a great idea you want to add then fork it, implement it, and request a merge request. Refer to the package philosophies in the documentation directory for how/what type of code should be added so that merge requests are quickly accepted.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python: 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/downloads/)
@@ -38,6 +42,7 @@ You do not have to buy into a monolithic ecosystem. Each component of `aider-fac
 - **`aider-clean-lancedb`**: Cross-platform cleanup of ephemeral RAG artifacts.
 
 For deep dives into the system's architecture, load-bearing rules, and cross-platform matrix:
+
 - **[Core Philosophies & Invariants](src/aider_factory/markdown/docs/core_philosophies.md)**
 - **[Cross-Platform OS Support Guide](src/aider_factory/markdown/docs/cross_platform_os_support.md)**
 
@@ -90,6 +95,7 @@ A deterministic validator designed for CI/CD. It audits generated text against s
 ### 4. 🔍 `aider-research` (The Private Search Agent)
 
 A vendor-free metasearch CLI. It auto-provisions a local, rootless **SearXNG** container via Podman/Docker, aggregates search engines, applies academic filters, and generates clean Markdown research reports.
+
 - **Note on Rate Limiting:** Because this tool scrapes upstream engines directly to preserve your privacy, aggressive automated queries may trigger IP rate limits (CAPTCHAs). If you see "0 results" or "Unresponsive engines", simply turn on a VPN or rotate your VPN server to get a fresh IP address.
 
 ---

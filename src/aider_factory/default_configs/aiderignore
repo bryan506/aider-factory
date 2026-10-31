@@ -1,17 +1,59 @@
-# Ignore RAG database, logs, and caches
-.aider_factory/
-
 # Ignore temp folders
 temp/
+tmp/
 
 # Ignore package-level build, documentation, and installation folders
+docs/
+doc/
 man/
 inst/
+site/
+_site/
 
-# Ignore any large data, media, or document folders
-docs/strategy_papers/
+# Ignore binaries, media, and heavy data files
 *.pdf
 *.png
 *.jpg
 *.jpeg
 *.gif
+*.svg
+*.ico
+*.mp4
+*.wasm
+*.woff
+*.woff2
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.h5
+*.bin
+*.exe
+*.zip
+*.tar.gz
+*.lock
+package-lock.json
+Cargo.lock
+*.log
+*.map
+
+# Ignore RAG database, logs, and caches (except editable configs, templates, session artifacts, and scratchpad)
+!.aider_factory/
+.aider_factory/*
+!.aider_factory/CONVENTIONS.md
+!.aider_factory/.env.yml
+!.aider_factory/.env_*.yml
+!.aider_factory/temp/
+!.aider_factory/markdown/
+.aider_factory/markdown/*
+!.aider_factory/markdown/oracle_pre_plan/
+.aider_factory/markdown/oracle_pre_plan/*
+!.aider_factory/markdown/oracle_pre_plan/strategy_template.md
+!.aider_factory/markdown/templates/
+!.aider_factory/sessions/
+.aider_factory/sessions/*
+!.aider_factory/sessions/*/
+.aider_factory/sessions/*/*
+!.aider_factory/sessions/*/session.yml
+!.aider_factory/sessions/*/feature_adr/
+!.aider_factory/sessions/*/templates/

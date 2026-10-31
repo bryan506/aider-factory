@@ -456,12 +456,15 @@ def test_env_plan_do_workflow_topology():
         # Scaffold physical files in the temporary project directory
         os.makedirs(os.path.join(tmpdir, "src"), exist_ok=True)
         os.makedirs(os.path.join(tmpdir, "tests", "unit"), exist_ok=True)
+        os.makedirs(os.path.join(tmpdir, "docs"), exist_ok=True)
         os.makedirs(
             os.path.join(tmpdir, ".aider_factory", "markdown", "oracle_pre_plan"),
             exist_ok=True,
         )
 
         open(os.path.join(tmpdir, "src", "feature.py"), "a").close()
+        open(os.path.join(tmpdir, "docs", "spec.md"), "a").close()
+        open(os.path.join(tmpdir, "docs", "test_spec.md"), "a").close()
         strat_md_path = os.path.join(
             tmpdir,
             ".aider_factory",
@@ -478,8 +481,10 @@ files:
     - "src/feature.py"
   extra_editable_files: []
   test_files: []
-  context_files_job: []
-  context_files_test: []
+  context_files_job:
+    - "docs/spec.md"
+  context_files_test:
+    - "docs/test_spec.md"
 ```
 """)
 
@@ -564,22 +569,33 @@ files:
             assert j2.message_file.endswith("feature.job2_verdict_r2.md")
 
             # 5. Phase 2 Job 3 Debate Invariants (2 Rounds: Pure AST no_retrieve)
+            assert p1_j1.yes_always is False
+            assert p1_j1.auto_accept_architect is True
+            assert p1_j1.testing_context["role"] == "capture_baseline"
+            assert j2.testing_context["role"] == "capture_baseline"
+
             j3_d_r1 = tasks["p1_job3_debate_feature_r1"]
             assert j3_d_r1.depends_on == ["p1_job2_feature"]
             assert j3_d_r1.deliberate["retrieve_mode"] == "no_retrieve"
             assert j3_d_r1.deliberate["template"].endswith("testing_debate.md")
-            assert j3_d_r1.deliberate["issue"].endswith("testing_exec.md")
+            assert j3_d_r1.deliberate["issue"].endswith("feature_testing_exec_rendered.md")
+            assert j3_d_r1.testing_context["role"] == "render_testing_exec"
+            assert "docs/test_spec.md" in j3_d_r1.rag_env["ORACLE_CONTEXT_FILES"]
+            assert "docs/spec.md" not in j3_d_r1.rag_env["ORACLE_CONTEXT_FILES"]
 
             j3_d_r2 = tasks["p1_job3_debate_feature_r2"]
             assert j3_d_r2.depends_on == ["p1_job3_debate_feature_r1"]
             assert j3_d_r2.deliberate["retrieve_mode"] == "no_retrieve"
             assert j3_d_r2.deliberate["prior_verdict"].endswith("feature.job3_verdict_r1.md")
+            assert j3_d_r2.testing_context["role"] == "render_testing_exec"
 
             j3 = tasks["p1_job3_feature"]
             assert j3.depends_on == ["p1_job3_debate_feature_r2"]
             assert j3.message_file.endswith("feature.job3_verdict_r2.md")
             assert any(f.endswith("test_feature.py") for f in j3.files)
             assert any(f.endswith("feature.py") for f in j3.files)
+            assert any(f.endswith("feature_testing_exec_rendered.md") for f in j3.read_files)
+            assert j3.testing_context["role"] == "render_testing_exec"
 
             # 6. Phase 2 Verification & Escalation Chain
             verify = tasks["p1_verify_feature"]
@@ -587,6 +603,12 @@ files:
             assert "pytest tests/unit/test_feature.py" in verify.test_cmd
             assert verify.iterate_test is True
             assert verify.soft_fail is True
+            assert verify.iterate_file.endswith("feature_testing_iterate_rendered.md")
+            assert any(f.endswith("feature_testing_iterate_rendered.md") for f in verify.read_files)
+            with open(verify.iterate_file, "r", encoding="utf-8") as vif:
+                vi_txt = vif.read()
+            assert "<completed_strategy_specification>" in vi_txt
+            assert "<implementation_git_diff>" not in vi_txt
 
             delib_r1 = tasks["p1_deliberate_feature_r1"]
             apply_r1 = tasks["p1_apply_feature_r1"]
@@ -600,13 +622,33 @@ files:
             assert delib_r1.deliberate["loops"] == 4
             assert delib_r1.deliberate["pass_history"] is True
 
-            # 7. Phase 3 (Review & Follow-up) Invariants
+            # 7. Phase 3 (Review & Follow-up) Invariants & Cross-Phase Context Hygiene
             p2_job1 = tasks["p2_job1_feature"]
             assert p2_job1.depends_on == ["p1_apply_feature_r2"]
             assert p2_job1.pair_programming is True
             assert p2_job1.yes_always is False
             assert p2_job1.message_file is not None and os.path.isfile(p2_job1.message_file)
             assert p2_job1.message_file.endswith("post_test_validation.md")
+
+            # Phase 2 Job 1 & Job 2 role segregation: no test files or test-only contexts
+            assert not any(f.endswith("test_feature.py") for f in p1_j1.files)
+            assert not any(f.endswith("docs/test_spec.md") for f in p1_j1.read_files)
+            assert any(f.endswith("docs/spec.md") for f in p1_j1.read_files)
+            assert not any(f.endswith("test_feature.py") for f in j2.files)
+            assert not any(f.endswith("docs/test_spec.md") for f in j2.read_files)
+
+            # Phase 2 Job 3 & Verify context hygiene: no strategy_template.md bloat
+            assert not any(f.endswith("strategy_template.md") for f in j3.read_files)
+            assert not any(f.endswith("strategy_template.md") for f in verify.read_files)
+            assert any(f.endswith("docs/test_spec.md") for f in j3.read_files)
+            assert any(f.endswith("docs/test_spec.md") for f in verify.read_files)
+
+            # Phase 3 Post-Test Review receives target + <stem> test file + all contexts, but NOT strategy_template.md
+            assert "src/feature.py" in p2_job1.files
+            assert "tests/unit/test_feature.py" in p2_job1.files
+            assert any(f.endswith("docs/spec.md") for f in p2_job1.read_files)
+            assert any(f.endswith("docs/test_spec.md") for f in p2_job1.read_files)
+            assert not any(f.endswith("strategy_template.md") for f in p2_job1.read_files)
 
             print("  ✅ env_plan_do 3-phase DAG topology PASS")
         finally:

@@ -12,18 +12,40 @@ import yaml
 from aider_factory.python.apply_agent import run_apply
 
 
-def _probe_endpoint(url: str, timeout: float = 1.5) -> bool:
+def _probe_endpoint(url: str, model: str = None, timeout: float = 15.0) -> bool:
     if not url:
         return False
     clean = url.rstrip("/")
-    models_url = f"{clean}/models" if not clean.endswith("/v1") else f"{clean}/models"
+    models_url = f"{clean}/models"
     try:
         req = urllib.request.Request(
             models_url,
             headers={"User-Agent": "AI-Factory/1.0", "Authorization": "Bearer sk-dummy"},
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status == 200
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            if resp.status != 200:
+                return False
+        if model:
+            bare_model = model.split("/", 1)[-1] if "/" in model else model
+            chat_req = urllib.request.Request(
+                f"{clean}/chat/completions",
+                data=json.dumps(
+                    {
+                        "model": bare_model,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "max_tokens": 1,
+                    }
+                ).encode("utf-8"),
+                headers={
+                    "User-Agent": "AI-Factory/1.0",
+                    "Authorization": "Bearer sk-dummy",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(chat_req, timeout=timeout) as c_resp:
+                return c_resp.status == 200
+        return True
     except Exception:
         return False
 
@@ -55,18 +77,22 @@ class TestE2EApplyAgentLiveCluster(unittest.TestCase):
     ARCH_API_BASE = os.environ.get("ARCHITECT_API_BASE", "http://192.168.100.1:8080/v1")
     ARCH_MODEL = "lm_studio/qwen3.6-27B-90k-udq4kxl:LATEST"
 
-    EDITOR_API_BASE = os.environ.get("EDITOR_API", "http://192.168.100.2:8081/v1")
-    EDITOR_MODEL = "openai/qwen3.6-27B-90k-udq4kxl-rag:LATEST"
+    EDITOR_API_BASE = os.environ.get("EDITOR_API", "http://192.168.100.2:8080/v1")
+    EDITOR_MODEL = "openai/qwen3.8-27B-90k-q5think:LATEST"
 
     @classmethod
     def setUpClass(cls):
-        arch_online = _probe_endpoint(cls.ARCH_API_BASE)
-        editor_online = _probe_endpoint(cls.EDITOR_API_BASE)
+        arch_online = _probe_endpoint(cls.ARCH_API_BASE, cls.ARCH_MODEL)
+        editor_online = _probe_endpoint(cls.EDITOR_API_BASE, cls.EDITOR_MODEL)
 
         if not arch_online:
-            raise unittest.SkipTest(f"Architect endpoint {cls.ARCH_API_BASE} unreachable.")
+            raise unittest.SkipTest(f"Architect endpoint {cls.ARCH_API_BASE} ({cls.ARCH_MODEL}) unreachable.")
         if not editor_online:
-            raise unittest.SkipTest(f"Editor endpoint {cls.EDITOR_API_BASE} unreachable.")
+            if _probe_endpoint(cls.ARCH_API_BASE, cls.ARCH_MODEL):
+                cls.EDITOR_API_BASE = cls.ARCH_API_BASE
+                cls.EDITOR_MODEL = cls.ARCH_MODEL
+            else:
+                raise unittest.SkipTest(f"Editor endpoint {cls.EDITOR_API_BASE} ({cls.EDITOR_MODEL}) unreachable.")
 
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()

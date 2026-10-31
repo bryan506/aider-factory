@@ -25,17 +25,17 @@ Produce a single, self-contained **source-of-truth template** at
 `.aider_factory/markdown/oracle_pre_plan/strategy_template.md` that downstream implementation phases
 will read automatically (via `sticky_phases` and `sticky_context`).
 
-Under `## Scope Analysis`, you must define the exact file manifest block so the autonomous pipeline knows which files to edit, test, and reference:
+Under `## Scope Analysis`, you must populate the YAML file manifest block so the autonomous pipeline knows which files to edit, test, and reference (if `target_files` is left empty or points to non-existent paths, Phase 2 will halt and require redoing Phase 1 planning):
 
 ```yaml
 files:
   target_files:
-    - "src/module.py"
-  extra_editable_files: []
-  test_files: []
+    - "src/module.py"       # Specify EXACTLY ONE existing primary anchor file (drives <stem> naming)
+  extra_editable_files: []  # Additional existing files to edit alongside the anchor file in this pass
+  test_files: []            # Leave empty ([]) to auto-assign unit test file via <stem>, or specify 1 test file
   context_files_job:
-    - "docs/spec.md"
-  context_files_test: []
+    - "docs/spec.md"        # Read-only reference files for implementation (Job 1 & Job 2)
+  context_files_test: []    # Read-only reference files for unit testing (Job 3 & Verify)
 ```
 
 It must also contain:

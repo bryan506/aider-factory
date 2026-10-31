@@ -62,7 +62,10 @@ class TestE2EBootstrapWorkspace:
         assert proc.returncode == 0, f"bootstrap exited {proc.returncode}"
 
         # Find generated YAML
-        yaml_files = list((project / ".aider_factory").glob(".env_*.yml"))
+        yaml_files = [
+            p for p in (project / ".aider_factory").glob(".env_*.yml")
+            if p.name != ".env_plan_do.yml"
+        ]
         assert yaml_files, "No .env_*.yml generated"
         content = yaml_files[0].read_text()
 
@@ -84,6 +87,14 @@ class TestE2EBootstrapWorkspace:
 
         # context_files_test must remain empty
         assert "context_files_test: []" in content
+        assert 'test_runner: "uv run --with pytest pytest {file}"' in content
+
+        plan_do_file = project / ".aider_factory" / ".env_plan_do.yml"
+        assert plan_do_file.is_file(), "No .env_plan_do.yml generated"
+        plan_do_content = plan_do_file.read_text()
+        assert "strategy_template.md" in plan_do_content
+        assert 'test_naming_and_path: "tests/test_{stem}.py"' in plan_do_content
+        assert 'test_runner: "uv run --with pytest pytest {file}"' in plan_do_content
 
     def test_rag_ocr_endpoints_not_overwritten(self, tmp_path):
         project = _make_sandbox(tmp_path)
@@ -102,7 +113,10 @@ class TestE2EBootstrapWorkspace:
             timeout=30,
         )
 
-        yaml_files = list((project / ".aider_factory").glob(".env_*.yml"))
+        yaml_files = [
+            p for p in (project / ".aider_factory").glob(".env_*.yml")
+            if p.name != ".env_plan_do.yml"
+        ]
         content = yaml_files[0].read_text()
 
         # Architect SHOULD get router URL
@@ -114,6 +128,11 @@ class TestE2EBootstrapWorkspace:
             assert f'{key}: "{router_url}"' not in content, (
                 f"{key} was overwritten with router URL — local auto-resolve broken"
             )
+
+        plan_do_content = (project / ".aider_factory" / ".env_plan_do.yml").read_text()
+        assert f'architect_api_base: "{router_url}"' in plan_do_content
+        assert f'weak_model_api_base: "{router_url}"' in plan_do_content
+        assert f'rag_agent_api: "{router_url}"' not in plan_do_content
 
     def test_bootstrap_r_package_discovers_R_sources(self, tmp_path):
         """Zero-mock: R package with R/*.R files gets populated target_files."""
@@ -143,7 +162,10 @@ class TestE2EBootstrapWorkspace:
         print(f"[stderr]\n{proc.stderr}")
         assert proc.returncode == 0
 
-        yaml_files = list((tmp_path / ".aider_factory").glob(".env_*.yml"))
+        yaml_files = [
+            p for p in (tmp_path / ".aider_factory").glob(".env_*.yml")
+            if p.name != ".env_plan_do.yml"
+        ]
         assert yaml_files, "No .env_*.yml generated"
         content = yaml_files[0].read_text()
 
@@ -166,6 +188,10 @@ class TestE2EBootstrapWorkspace:
         # Context must include README
         assert "README.md" in content
 
+        plan_do_content = (tmp_path / ".aider_factory" / ".env_plan_do.yml").read_text()
+        assert 'test_naming_and_path: "tests/testthat/test-{stem}.R"' in plan_do_content
+        assert "Rscript" in plan_do_content
+
     def test_bootstrap_no_router_still_produces_valid_yaml(self, tmp_path):
         """With no LITELLM_BASE_URL, bootstrap must still write a valid YAML
         with discovered files (endpoints stay as template placeholders)."""
@@ -184,9 +210,14 @@ class TestE2EBootstrapWorkspace:
             timeout=30,
         )
         assert proc.returncode == 0
-        yaml_files = list((project / ".aider_factory").glob(".env_*.yml"))
+        yaml_files = [
+            p for p in (project / ".aider_factory").glob(".env_*.yml")
+            if p.name != ".env_plan_do.yml"
+        ]
         assert yaml_files
         content = yaml_files[0].read_text()
         # Files still discovered even without router
         assert "engine.py" in content
         assert "README.md" in content
+
+        assert (project / ".aider_factory" / ".env_plan_do.yml").is_file()

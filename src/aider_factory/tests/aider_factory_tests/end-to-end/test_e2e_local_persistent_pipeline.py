@@ -26,7 +26,7 @@ if python_dir not in sys.path:
     sys.path.insert(0, python_dir)
 
 
-def _probe_local_endpoint(url):
+def _probe_local_endpoint(url, verify_chat=True):
     try:
         req = urllib.request.Request(
             f"{url.rstrip('/')}/models",
@@ -36,10 +36,45 @@ def _probe_local_endpoint(url):
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
                 models = data.get("data", [])
-                m_ids = [m["id"] for m in models if "id" in m]
-                favored = [m for m in m_ids if "27b" in m.lower()]
-                model_id = favored[0] if favored else (m_ids[0] if m_ids else None)
-                return True, model_id
+                m_ids = [
+                    m["id"]
+                    for m in models
+                    if "id" in m
+                    and not (isinstance(m.get("status"), dict) and m["status"].get("failed"))
+                    and not ("192.168.100.2" in url and "qwen3.6" in m["id"].lower())
+                    and not any(
+                        x in m["id"].lower()
+                        for x in ("embed", "rerank", "ocr", "minicheck", "bge", "jina")
+                    )
+                ]
+                q38_27b = [m for m in m_ids if "qwen3.8" in m.lower() and "27b" in m.lower()]
+                favored = q38_27b or [m for m in m_ids if "27b" in m.lower()]
+                if not verify_chat:
+                    model_id = favored[0] if favored else (m_ids[0] if m_ids else None)
+                    return True, model_id
+                candidates = favored + [m for m in m_ids if m not in favored]
+                for cand in candidates[:3]:
+                    chat_req = urllib.request.Request(
+                        f"{url.rstrip('/')}/chat/completions",
+                        data=json.dumps(
+                            {
+                                "model": cand,
+                                "messages": [{"role": "user", "content": "ping"}],
+                                "max_tokens": 1,
+                            }
+                        ).encode("utf-8"),
+                        headers={
+                            "Authorization": "Bearer sk-dummy",
+                            "Content-Type": "application/json",
+                        },
+                        method="POST",
+                    )
+                    try:
+                        with urllib.request.urlopen(chat_req, timeout=15) as c_resp:
+                            if c_resp.status == 200:
+                                return True, cand
+                    except Exception:
+                        continue
     except Exception:
         pass
     return False, None
@@ -66,7 +101,7 @@ class TestE2ELocalPersistentPipeline(unittest.TestCase):
         cls.arch_model = (
             (m_id if "/" in m_id else f"openai/{m_id}")
             if ok and m_id
-            else "openai/qwen3.6-27b-90k:LATEST"
+            else "openai/qwen3.8-27B-90k-q5think:LATEST"
         )
 
         # 2. Editor Endpoint
@@ -104,14 +139,14 @@ class TestE2ELocalPersistentPipeline(unittest.TestCase):
         cls.rag_model = (
             (m_id if "/" in m_id else f"openai/{m_id}")
             if ok and m_id
-            else "openai/qwen3.6-27B-90k-udq4kxl-rag:LATEST"
+            else "openai/qwen3.8-27B-90k-q5think:LATEST"
         )
 
         # 4. OCR / Embedder Endpoint
         cls.ocr_embed_api = os.environ.get(
             "OCR_API_BASE", "http://192.168.100.2:8081/v1"
         )
-        ok, _ = _probe_local_endpoint(cls.ocr_embed_api)
+        ok, _ = _probe_local_endpoint(cls.ocr_embed_api, verify_chat=False)
         if not ok:
             for fallback in [cls.editor_api, cls.arch_api]:
                 ok, _ = _probe_local_endpoint(fallback)
@@ -250,6 +285,11 @@ class TestE2ELocalPersistentPipeline(unittest.TestCase):
 
         logs_dir = os.path.join(".aider_factory", "logs")
         self.assertTrue(os.path.exists(logs_dir))
+        self.assertNotIn(
+            "failed to load",
+            (proc.stdout or "") + (proc.stderr or ""),
+            "Local cluster model failed to load during pipeline execution.",
+        )
         print("✅ Live Local Pipeline E2E Smoke Test completed.")
 
 

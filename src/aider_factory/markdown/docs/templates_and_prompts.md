@@ -217,7 +217,7 @@ To guarantee specification continuity between implementation and audit phases, `
 When `sticky_phases.editable: true` or `sticky_phases.readonly: true` is configured, `run_workflow.py` parses file assignments directly from the strategy markdown artifact:
 
 1. **Scoped Search Space**: Restricts search space to `## Scope Analysis` if present to avoid false positives in conversational prose.
-2. **YAML Priority**: Extracts embedded ````yaml ... ```` blocks containing a `files:` mapping:
+2. **YAML Priority**: Extracts embedded ```yaml ... ``` blocks containing a `files:` mapping:
    ```yaml
    files:
      target_files: ["src/core.py"]

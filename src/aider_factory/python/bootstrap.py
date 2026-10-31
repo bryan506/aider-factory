@@ -196,7 +196,7 @@ def _detect_framework(cwd: str) -> tuple:
     """
     checks = [
         ("py",
-         "uv run --with pytest pytest",
+         "uv run --with pytest pytest {file}",
          "tests/test_{stem}.py",
          ""),
         ("R",
@@ -249,6 +249,32 @@ def _detect_framework(cwd: str) -> tuple:
     return "py", checks[0][1], checks[0][2], ""
 
 
+def _ensure_test_dir_and_path(cwd: str, fw_name: str, default_path: str) -> str:
+    """Discover the first top-level test directory in cwd (or create tests/) and return test_naming_and_path."""
+    if fw_name == "R":
+        os.makedirs(os.path.join(cwd, "tests", "testthat"), exist_ok=True)
+        return "tests/testthat/test-{stem}.R"
+    if fw_name == "rs":
+        os.makedirs(os.path.join(cwd, "tests"), exist_ok=True)
+        return "tests/{stem}.rs"
+
+    discovered_dir = None
+    for cand in ("tests/unit", "tests", "test", "spec"):
+        if os.path.isdir(os.path.join(cwd, cand)):
+            discovered_dir = cand
+            break
+    if not discovered_dir:
+        discovered_dir = "tests"
+        os.makedirs(os.path.join(cwd, "tests"), exist_ok=True)
+
+    patterns = {
+        "py": f"{discovered_dir}/test_{{stem}}.py",
+        "js": f"{discovered_dir}/{{stem}}.test.js",
+        "go": f"{discovered_dir}/{{stem}}_test.go",
+    }
+    return patterns.get(fw_name, default_path)
+
+
 def _select_models(available: list) -> dict:
     """Pick architect, editor, weak, embed, and reranker from a router model list.
 
@@ -292,6 +318,7 @@ def run_bootstrap(target_dir: str) -> None:
 
     # --- Step 2: Detect framework ---
     fw_name, fw_runner, fw_path, fw_prefix = _detect_framework(cwd)
+    fw_path = _ensure_test_dir_and_path(cwd, fw_name, fw_path)
 
     # --- Step 3: Select models ---
     available_models = None
@@ -445,6 +472,118 @@ def run_bootstrap(target_dir: str) -> None:
     target_yaml_path = local_aider_factory_dir / f".env_{repo_name}.yml"
     with open(target_yaml_path, "w", encoding="utf-8") as f:
         f.write(content)
+
+    plan_do_template_path = os.path.join(
+        pkg_dir, "default_configs", "sample_yaml_config", "env_plan_do.yml"
+    )
+    if os.path.exists(plan_do_template_path):
+        with open(plan_do_template_path, "r", encoding="utf-8") as f:
+            plan_do_content = f.read()
+
+        sensible_plan_name = (
+            f"{repo_name.replace('_', ' ').replace('-', ' ').title()} Plan-Do Pipeline"
+        )
+        plan_do_content = re.sub(
+            r'name:\s*".*?"',
+            lambda _: f'name: "{sensible_plan_name}"',
+            plan_do_content,
+            count=1,
+        )
+        plan_do_content = re.sub(
+            r'working_directory:\s*".*?"',
+            lambda _: f'working_directory: "{cwd_forward}"',
+            plan_do_content,
+            count=1,
+        )
+        plan_do_content = re.sub(
+            r'test_command_prefix:\s*".*?"',
+            lambda _: f'test_command_prefix: "{fw_prefix}"',
+            plan_do_content,
+        )
+        plan_do_content = re.sub(
+            r'test_runner:\s*".*?"',
+            lambda _: f'test_runner: "{fw_runner}"',
+            plan_do_content,
+        )
+        plan_do_content = re.sub(
+            r'test_naming_and_path:\s*".*?"',
+            lambda _: f'test_naming_and_path: "{fw_path}"',
+            plan_do_content,
+        )
+
+        if router_base:
+            for ep_key in (
+                "architect_api_base",
+                "editor_api",
+                "editor_api_fallback",
+                "weak_model_api_base",
+            ):
+                plan_do_content = re.sub(
+                    rf'{ep_key}:\s*".*?"',
+                    lambda _, k=ep_key: f'{k}: "{router_base}"',
+                    plan_do_content,
+                )
+
+        if model_choices.get("architect"):
+            arch = model_choices["architect"]
+            editor = model_choices["editor"]
+            plan_do_content = re.sub(
+                r'architect_agent:\s*".*?"',
+                lambda _: f'architect_agent: "{arch}"',
+                plan_do_content,
+            )
+            plan_do_content = re.sub(
+                r'editor_agent:\s*".*?"',
+                lambda _: f'editor_agent: "{editor}"',
+                plan_do_content,
+            )
+            plan_do_content = re.sub(
+                r'editor_agent_test:\s*".*?"',
+                lambda _: f'editor_agent_test: "{editor}"',
+                plan_do_content,
+            )
+            plan_do_content = re.sub(
+                r'editor_agent_test_fallback:\s*".*?"',
+                lambda _: f'editor_agent_test_fallback: "{editor}"',
+                plan_do_content,
+            )
+        if model_choices.get("weak"):
+            weak = model_choices["weak"]
+            plan_do_content = re.sub(
+                r'weak_model:\s*".*?"',
+                lambda _: f'weak_model: "{weak}"',
+                plan_do_content,
+            )
+        if model_choices.get("embed"):
+            _embed_m = model_choices["embed"]
+            plan_do_content = re.sub(
+                r'embed_model:\s*".*?"',
+                lambda _: f'embed_model: "{_embed_m}"',
+                plan_do_content,
+            )
+            _eb = (
+                "openai"
+                if any(
+                    x in _embed_m.lower()
+                    for x in ("gemini", "openai", "embedding", "qwen")
+                )
+                else "sentence-transformers"
+            )
+            plan_do_content = re.sub(
+                r'embed_backend:\s*".*?"',
+                lambda _: f'embed_backend: "{_eb}"',
+                plan_do_content,
+            )
+        if model_choices.get("reranker"):
+            plan_do_content = re.sub(
+                r'ranking_agent:\s*".*?"',
+                lambda _: f'ranking_agent: "{model_choices["reranker"]}"',
+                plan_do_content,
+            )
+
+        plan_do_yaml_path = local_aider_factory_dir / ".env_plan_do.yml"
+        with open(plan_do_yaml_path, "w", encoding="utf-8") as f:
+            f.write(plan_do_content)
 
     # --- Step 5: Provision + report ---
     _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

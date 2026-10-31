@@ -497,6 +497,119 @@ def test_yaml_dag_routing():
             sys.argv = old_argv
             os.chdir(orig_cwd)
 
+        # 9. Single Target with Multiple test_files: 1 Pre-Edit Debate + Sequential Job 3 / Verify / Escalation + Phase 3 Handoff
+        config_9 = {
+            "working_directory": base_dir,
+            "test_runner": "uv run --with pytest pytest",  # Intentionally omit {file} to test auto-append guard
+            "phases": [
+                {
+                    "name": "CodePhase",
+                    "enabled": True,
+                    "rag": {"collection_name": "", "batch": True, "run_ocr_rag": False},
+                    "oracle": {
+                        "start_job": False,
+                        "pre_edit_debate": {
+                            "enabled": True,
+                            "insert_debate": [0, 0, 1],
+                            "loops": 2,
+                            "rounds": 2,
+                        },
+                    },
+                    "toggles": {
+                        "run_job_one": True,
+                        "run_job_two": False,
+                        "run_job_three": True,
+                        "iterate_test": True,
+                    },
+                    "escalation_debate": {"loops": 2, "rounds": 1},
+                    "models": {
+                        "architect_agent": "mock",
+                        "editor_agent": "mock",
+                        "editor_agent_test": "mock",
+                    },
+                    "files": {
+                        "target_files": ["R/a.R"],
+                        "test_files": ["tests/test_a.R", "tests/test_b.R"],
+                        "context_files_test": ["tests/global.R"],
+                    },
+                },
+                {
+                    "name": "ReviewPhase",
+                    "enabled": True,
+                    "sticky_phases": {"editable": True, "readonly": True},
+                    "rag": {"collection_name": "", "batch": True, "run_ocr_rag": False},
+                    "toggles": {"run_job_one": True, "pair_programming": True},
+                    "models": {"architect_agent": "mock", "editor_agent": "mock"},
+                    "files": {"target_files": ["R/a.R"]},
+                },
+            ],
+        }
+
+        yaml_path_9 = os.path.join(base_dir, "test9.yml")
+        with open(yaml_path_9, "w") as f:
+            yaml.dump(config_9, f)
+
+        old_argv = sys.argv
+        os.chdir(base_dir)
+        sys.argv = ["run_workflow.py", "mock_routing_session_9", yaml_path_9]
+        namespace_9 = {
+            "__name__": "__test__",
+            "__file__": run_workflow_path,
+        }
+        with open(run_workflow_path, "r") as f:
+            code_9 = f.read()
+        try:
+            for k in list(sys.modules.keys()):
+                if "orchestrate" in k:
+                    del sys.modules[k]
+            exec(code_9, namespace_9)
+            tasks_9 = namespace_9["factory"].tasks
+
+            # Only 1 pair of Job 3 Pre-Edit Debate rounds created (not duplicated per test file)
+            j3_debate_ids = [tid for tid in tasks_9 if "job3_debate" in tid]
+            assert j3_debate_ids == ["p0_job3_debate_a_r1", "p0_job3_debate_a_r2"], j3_debate_ids
+            d_r1 = tasks_9["p0_job3_debate_a_r1"].deliberate
+            assert d_r1["editable_files"] == ["tests/test_a.R", "tests/test_b.R"]
+            assert "tests/global.R" in d_r1["read_files"]
+            assert "tests/global.R" not in d_r1["editable_files"]
+
+            # Pass 1: test_a.R
+            j3_1 = tasks_9["p0_job3_a"]
+            v_1 = tasks_9["p0_verify_a"]
+            delib_1 = tasks_9["p0_deliberate_a"]
+            apply_1 = tasks_9["p0_apply_a"]
+            assert j3_1.depends_on == ["p0_job3_debate_a_r2"]
+            assert j3_1.files == ["tests/test_a.R", "R/a.R"]
+            assert v_1.depends_on == ["p0_job3_a"]
+            assert v_1.test_cmd == "uv run --with pytest pytest tests/test_a.R"
+            assert delib_1.depends_on == ["p0_verify_a"]
+            assert apply_1.depends_on == ["p0_deliberate_a"]
+
+            # Pass 2: test_b.R chained sequentially after Pass 1's terminal task, reusing the same debate verdict
+            j3_2 = tasks_9["p0_job3_a_t2"]
+            v_2 = tasks_9["p0_verify_a_t2"]
+            delib_2 = tasks_9["p0_deliberate_a_t2"]
+            apply_2 = tasks_9["p0_apply_a_t2"]
+            assert j3_2.depends_on == ["p0_apply_a"]
+            assert j3_2.message_file == j3_1.message_file
+            assert j3_2.files == ["tests/test_b.R", "R/a.R"]
+            assert "tests/test_a.R" in j3_2.read_files
+            assert v_2.depends_on == ["p0_job3_a_t2"]
+            assert v_2.test_cmd == "uv run --with pytest pytest tests/test_b.R"
+            assert delib_2.depends_on == ["p0_verify_a_t2"]
+            assert apply_2.depends_on == ["p0_deliberate_a_t2"]
+
+            # Phase 2 Review receives target + both test files
+            p1_review = tasks_9["p1_job1_a"]
+            assert p1_review.depends_on == ["p0_apply_a_t2"]
+            assert p1_review.files == ["R/a.R", "tests/test_a.R", "tests/test_b.R"]
+            print(
+                "Test 9: Sequential Multi-test_files with Single Pre-Edit Debate:\n  ✅ Single debate, sequential Job 3/Verify/Escalation, and Phase 3 handoff verified\n  🎉 PASS\n"
+            )
+        finally:
+            sys.argv = old_argv
+            os.chdir(orig_cwd)
+
     finally:
         os.chdir(orig_cwd)
         _safe_rmtree(base_dir)

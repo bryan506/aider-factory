@@ -94,15 +94,23 @@ _resolve_api_key = resolve_api_key
 
 def _build_llm_kwargs(model, messages, api_base=None, api_key=None):
     """Build kwargs for litellm.completion embodying model settings and reasoning parameters."""
-    resolved_key = _resolve_api_key(model, api_base, api_key)
+    effective_api_base = (
+        api_base
+        if (api_base and is_local_model(model) and is_valid_endpoint(api_base))
+        else None
+    )
+    effective_api_key = (
+        None if (api_base and not effective_api_base) else api_key
+    )
+    resolved_key = _resolve_api_key(model, effective_api_base, effective_api_key)
     kwargs = {
         "model": model,
         "messages": messages,
         "custom_headers": {"x-litellm-session-id": _PIPELINE_SESSION_ID},
         "drop_params": True,
     }
-    if api_base:
-        kwargs["api_base"] = api_base
+    if effective_api_base:
+        kwargs["api_base"] = effective_api_base
     if resolved_key:
         kwargs["api_key"] = resolved_key
 
@@ -2828,7 +2836,7 @@ def _ensure_oracle_config():
         )
         if is_local_model(rag_agent) and is_valid_endpoint(raw_rag_agent_api):
             os.environ["ORACLE_AGENT_API_BASE"] = raw_rag_agent_api
-        elif "ORACLE_AGENT_API_BASE" not in os.environ:
+        else:
             os.environ.pop("ORACLE_AGENT_API_BASE", None)
 
         raw_arch_api = (
@@ -2837,7 +2845,7 @@ def _ensure_oracle_config():
         )
         if is_local_model(arch_agent) and is_valid_endpoint(raw_arch_api):
             os.environ["ORACLE_ARCHITECT_API_BASE"] = raw_arch_api
-        elif "ORACLE_ARCHITECT_API_BASE" not in os.environ:
+        else:
             os.environ.pop("ORACLE_ARCHITECT_API_BASE", None)
     except Exception:
         pass

@@ -24,10 +24,44 @@ _load_env_files = load_env_files
 
 import re
 
-BASELINE_AIDERIGNORE = """# Ignore RAG database, logs, and caches
-.aider_factory/
+AIDERIGNORE_STRATEGY_NEGATION = """# Ignore RAG database, logs, and caches (except editable configs, templates, session artifacts, and scratchpad)
+!.aider_factory/
+.aider_factory/*
+!.aider_factory/CONVENTIONS.md
+!.aider_factory/.env.yml
+!.aider_factory/.env_*.yml
+!.aider_factory/temp/
+!.aider_factory/markdown/
+.aider_factory/markdown/*
+!.aider_factory/markdown/oracle_pre_plan/
+.aider_factory/markdown/oracle_pre_plan/*
+!.aider_factory/markdown/oracle_pre_plan/strategy_template.md
+!.aider_factory/markdown/templates/
+!.aider_factory/sessions/
+.aider_factory/sessions/*
+!.aider_factory/sessions/*/
+.aider_factory/sessions/*/*
+!.aider_factory/sessions/*/session.yml
+!.aider_factory/sessions/*/feature_adr/
+!.aider_factory/sessions/*/templates/"""
 
-# Ignore temp folders
+BASELINE_GITIGNORE = f"""# Ephemeral and Local Workspace Files
+temp/
+logs/
+
+# Local virtual environments and python caches
+.venv/
+__pycache__/
+*.pyc
+
+# Local system files
+.DS_Store
+.aider*
+
+{AIDERIGNORE_STRATEGY_NEGATION}
+"""
+
+BASELINE_AIDERIGNORE = f"""# Ignore temp folders
 temp/
 tmp/
 
@@ -65,6 +99,8 @@ package-lock.json
 Cargo.lock
 *.log
 *.map
+
+{AIDERIGNORE_STRATEGY_NEGATION}
 """
 
 TEST_DIR_NAMES = frozenset(
@@ -169,6 +205,13 @@ def _read_user_aiderignore(cwd: str) -> list[str]:
             s = line.strip()
             if s and not s.startswith("#"):
                 rules.append(s)
+    rules = [
+        r
+        for r in rules
+        if not r.startswith("!.aider_factory")
+        and not r.startswith(".aider_factory")
+        and r != "!.aiderignore"
+    ]
     # Always guarantee AI Factory internal directory is ignored
     if ".aider_factory/" not in rules:
         rules.insert(0, ".aider_factory/")
@@ -234,12 +277,81 @@ def _scan_repo_files(cwd: str) -> list[str]:
     return sorted(list(dict.fromkeys(files)))
 
 
+def _strip_aider_factory_ignore_lines(content: str) -> list[str]:
+    """Remove all existing .aider_factory / !.aider_factory rules and their header comments."""
+    cleaned: list[str] = []
+    for line in content.splitlines():
+        s = line.strip()
+        if s.startswith("# Ignore RAG database, logs, and caches"):
+            continue
+        if (
+            s in (".aider_factory", "!.aider_factory", "!.aiderignore")
+            or s.startswith((".aider_factory/", "!.aider_factory/", ".aider_factory\\"))
+        ):
+            continue
+        cleaned.append(line)
+    return cleaned
+
+
 def _ensure_baseline_aiderignore(cwd):
-    """Ensure the root .aiderignore exists and matches the baseline standard if missing."""
+    """Ensure the root .aiderignore exists and cleanly un-ignores designated .aider_factory paths."""
     local_aider_ignore = os.path.join(cwd, ".aiderignore")
     if not os.path.exists(local_aider_ignore):
         with open(local_aider_ignore, "w", encoding="utf-8") as f:
             f.write(BASELINE_AIDERIGNORE)
+        return
+
+    try:
+        with open(local_aider_ignore, "r", encoding="utf-8") as f:
+            content = f.read()
+        cleaned_lines = _strip_aider_factory_ignore_lines(content)
+        while cleaned_lines and not cleaned_lines[0].strip():
+            cleaned_lines.pop(0)
+        while cleaned_lines and not cleaned_lines[-1].strip():
+            cleaned_lines.pop()
+        body = "\n".join(cleaned_lines)
+        updated = (
+            (body + "\n\n" if body else "")
+            + AIDERIGNORE_STRATEGY_NEGATION
+            + "\n"
+        )
+        if updated != content:
+            with open(local_aider_ignore, "w", encoding="utf-8") as f:
+                f.write(updated)
+    except Exception:
+        pass
+
+
+def _ensure_baseline_gitignore(cwd):
+    """Ensure the root .gitignore exists and un-ignores strategy_template.md after any .aider* rules."""
+    local_git_ignore = os.path.join(cwd, ".gitignore")
+    if not os.path.exists(local_git_ignore):
+        with open(local_git_ignore, "w", encoding="utf-8") as f:
+            f.write(BASELINE_GITIGNORE)
+        return
+
+    try:
+        with open(local_git_ignore, "r", encoding="utf-8") as f:
+            content = f.read()
+        has_af_or_wildcard = any(
+            ln.strip().startswith((".aider_factory", "!.aider_factory", ".aider*"))
+            for ln in content.splitlines()
+        )
+        if has_af_or_wildcard:
+            cleaned_lines = _strip_aider_factory_ignore_lines(content)
+            while cleaned_lines and not cleaned_lines[-1].strip():
+                cleaned_lines.pop()
+            body = "\n".join(cleaned_lines)
+            updated = (
+                (body + "\n\n" if body else "")
+                + AIDERIGNORE_STRATEGY_NEGATION
+                + "\n"
+            )
+            if updated != content:
+                with open(local_git_ignore, "w", encoding="utf-8") as f:
+                    f.write(updated)
+    except Exception:
+        pass
 
 
 def _build_repomap_ignore_content(cwd, mode="source", all_files=None):
@@ -379,6 +491,7 @@ def _generate_repo_maps(cwd, map_tokens=2048, target="all", is_global=False):
                     except OSError:
                         pass
             _ensure_baseline_aiderignore(proj)
+            _ensure_baseline_gitignore(proj)
 
 
 def ensure_searxng_service():
@@ -650,6 +763,7 @@ def init_user_project(cwd=None):
         pass  # Playwright not installed in this environment; skip
 
     local_env_yaml = os.path.join(local_aider_factory_dir, ".env.yml")
+    local_env_plan_do_yaml = os.path.join(local_aider_factory_dir, ".env_plan_do.yml")
     local_aider_ignore = os.path.join(cwd, ".aiderignore")
     local_aider_conf = os.path.join(local_aider_factory_dir, ".aider.conf.yml")
     local_aider_settings = os.path.join(
@@ -804,10 +918,113 @@ def init_user_project(cwd=None):
         with open(local_env_yaml, "w", encoding="utf-8") as f:
             f.write(content)
 
-    # 2. Create .aiderignore at root if missing
+    # 1b. Discover or create top-level test directory and provision .env_plan_do.yml if missing
+    try:
+        python_dir = os.path.join(pkg_dir, "python")
+        if python_dir not in sys.path:
+            sys.path.insert(0, python_dir)
+        from bootstrap import _detect_framework, _ensure_test_dir_and_path
+
+        fw_name, fw_runner, fw_path, fw_prefix = _detect_framework(cwd)
+        resolved_test_path = _ensure_test_dir_and_path(cwd, fw_name, fw_path)
+    except Exception:
+        os.makedirs(os.path.join(cwd, "tests"), exist_ok=True)
+        fw_name, fw_runner, resolved_test_path, fw_prefix = (
+            "py",
+            "uv run --with pytest pytest {file}",
+            "tests/test_{stem}.py",
+            "",
+        )
+
+    plan_do_template = os.path.join(
+        default_configs_dir, "sample_yaml_config", "env_plan_do.yml"
+    )
+    if not os.path.exists(local_env_plan_do_yaml) and os.path.exists(plan_do_template):
+        sensible_plan_name = f"{os.path.basename(cwd).replace('_', ' ').replace('-', ' ').title()} Plan-Do Pipeline"
+        with open(plan_do_template, "r", encoding="utf-8") as f:
+            plan_do_content = f.read()
+
+        plan_do_content = re.sub(
+            r'name:\s*".*?"',
+            lambda _: f'name: "{sensible_plan_name}"',
+            plan_do_content,
+            count=1,
+        )
+        cwd_forward = cwd.replace("\\", "/")
+        plan_do_content = re.sub(
+            r'working_directory:\s*".*?"',
+            lambda _: f'working_directory: "{cwd_forward}"',
+            plan_do_content,
+            count=1,
+        )
+        plan_do_content = re.sub(
+            r'test_command_prefix:\s*".*?"',
+            lambda _: f'test_command_prefix: "{fw_prefix}"',
+            plan_do_content,
+        )
+        plan_do_content = re.sub(
+            r'test_runner:\s*".*?"',
+            lambda _: f'test_runner: "{fw_runner}"',
+            plan_do_content,
+        )
+        plan_do_content = re.sub(
+            r'test_naming_and_path:\s*".*?"',
+            lambda _: f'test_naming_and_path: "{resolved_test_path}"',
+            plan_do_content,
+        )
+
+        try:
+            from bootstrap import _discover_cluster_config
+
+            cluster_config = _discover_cluster_config()
+            if cluster_config:
+                plan_do_content = re.sub(
+                    r'architect_api_base:\s*".*?"',
+                    lambda _: f'architect_api_base: "{cluster_config["architect_api_base"]}"',
+                    plan_do_content,
+                )
+                plan_do_content = re.sub(
+                    r'editor_api:\s*".*?"',
+                    lambda _: f'editor_api: "{cluster_config["editor_api"]}"',
+                    plan_do_content,
+                )
+                plan_do_content = re.sub(
+                    r'rag_agent_api:\s*".*?"',
+                    lambda _: f'rag_agent_api: "{cluster_config["rag_agent_api"]}"',
+                    plan_do_content,
+                )
+                if "architect_agent" in cluster_config:
+                    plan_do_content = re.sub(
+                        r'architect_agent:\s*".*?"',
+                        lambda _: f'architect_agent: "{cluster_config["architect_agent"]}"',
+                        plan_do_content,
+                    )
+                    plan_do_content = re.sub(
+                        r'editor_agent:\s*".*?"',
+                        lambda _: f'editor_agent: "{cluster_config["editor_agent"]}"',
+                        plan_do_content,
+                    )
+                    plan_do_content = re.sub(
+                        r'editor_agent_test:\s*".*?"',
+                        lambda _: f'editor_agent_test: "{cluster_config["editor_agent"]}"',
+                        plan_do_content,
+                    )
+                    plan_do_content = re.sub(
+                        r'editor_agent_test_fallback:\s*".*?"',
+                        lambda _: f'editor_agent_test_fallback: "{cluster_config["architect_agent"]}"',
+                        plan_do_content,
+                    )
+        except Exception:
+            pass
+
+        with open(local_env_plan_do_yaml, "w", encoding="utf-8") as f:
+            f.write(plan_do_content)
+
+    # 2. Create or upgrade .aiderignore and .gitignore at root
     if not os.path.exists(local_aider_ignore):
         print(f"📦 Initializing default '.aiderignore' in {cwd}...")
-        _ensure_baseline_aiderignore(cwd)
+    _ensure_baseline_aiderignore(cwd)
+    _ensure_baseline_gitignore(cwd)
 
     # 3. Create .aider.conf.yml inside .aider_factory/ if missing
     if not os.path.exists(local_aider_conf):

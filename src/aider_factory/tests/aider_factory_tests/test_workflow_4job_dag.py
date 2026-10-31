@@ -5,6 +5,7 @@ from pathlib import Path
 
 from aider_factory.python.run_workflow import (
     _parse_insert_debate,
+    _render_testing_template,
     _render_validate_template,
     _resolve_job_debate_collection,
     _resolve_job_debate_template,
@@ -1226,6 +1227,259 @@ PROPOSAL: fix all bugs immediately.
         self.assertEqual(tags[0], "module_a_session_123_20250518_120000")
         self.assertEqual(tags[1], "module_b_session_123_20250518_120000")
         self.assertNotEqual(tags[0], tags[1])
+
+    def test_render_testing_template_diff_and_iterate_modes(self):
+        """Validates _render_testing_template for Job 3 (with diff, idempotent replace) and Job 4 (strategy only)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpl_path = os.path.join(tmpdir, "testing_exec.md")
+            out_exec = os.path.join(tmpdir, "rendered", "calc_testing_exec_rendered.md")
+            out_iter = os.path.join(tmpdir, "rendered", "calc_testing_iterate_rendered.md")
+
+            with open(tmpl_path, "w", encoding="utf-8") as f:
+                f.write("# Testing Exec Template\nExecute matrix.")
+
+            strat = "# Strategy\n- Edge case: x == 0"
+            diff1 = "--- a/src/calc.py\n+++ b/src/calc.py\n@@ -1 +1 @@\n-pass\n+return 1"
+            res_exec = _render_testing_template(
+                tmpl_path, strat, out_exec, git_diff_text=diff1, include_diff=True
+            )
+            self.assertEqual(res_exec, out_exec)
+            txt_exec = Path(out_exec).read_text(encoding="utf-8")
+            self.assertIn("## COMPLETED IMPLEMENTATION CONTEXT (READ-ONLY REFERENCE FOR TESTING)", txt_exec)
+            self.assertIn("<completed_strategy_specification>", txt_exec)
+            self.assertIn("Edge case: x == 0", txt_exec)
+            self.assertIn("<implementation_git_diff>", txt_exec)
+            self.assertIn("+return 1", txt_exec)
+
+            # Idempotent re-render onto already-rendered file replaces section without duplication
+            diff2 = "--- a/src/calc.py\n+++ b/src/calc.py\n@@ -1 +1 @@\n-pass\n+return 2"
+            _render_testing_template(
+                out_exec, strat, out_exec, git_diff_text=diff2, include_diff=True
+            )
+            txt_exec_2 = Path(out_exec).read_text(encoding="utf-8")
+            self.assertEqual(
+                txt_exec_2.count("## COMPLETED IMPLEMENTATION CONTEXT (READ-ONLY REFERENCE FOR TESTING)"),
+                1,
+            )
+            self.assertIn("+return 2", txt_exec_2)
+            self.assertNotIn("+return 1", txt_exec_2)
+
+            # Iterate mode (include_diff=False) omits <implementation_git_diff>
+            res_iter = _render_testing_template(
+                tmpl_path, strat, out_iter, include_diff=False
+            )
+            self.assertEqual(res_iter, out_iter)
+            txt_iter = Path(out_iter).read_text(encoding="utf-8")
+            self.assertIn("<completed_strategy_specification>", txt_iter)
+            self.assertIn("Edge case: x == 0", txt_iter)
+            self.assertNotIn("<implementation_git_diff>", txt_iter)
+
+    def test_capture_baseline_and_compute_impl_diff_matrix(self):
+        """Validates multi-commit collapse, pre-existing dirty file isolation, out-of-scope discovery, and test_file exclusion."""
+        import subprocess
+        from orchestrate import AiderFactory
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            subprocess.run(["git", "init"], cwd=tmpdir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=tmpdir, check=True)
+            subprocess.run(["git", "config", "user.email", "t@test.local"], cwd=tmpdir, check=True)
+
+            os.makedirs(os.path.join(tmpdir, "src"), exist_ok=True)
+            os.makedirs(os.path.join(tmpdir, "tests"), exist_ok=True)
+
+            target_p = os.path.join(tmpdir, "src", "target.py")
+            extra_p = os.path.join(tmpdir, "src", "extra.py")
+            dirty_p = os.path.join(tmpdir, "src", "dirty.py")
+            test_p = os.path.join(tmpdir, "tests", "test_target.py")
+
+            with open(target_p, "w", encoding="utf-8") as f:
+                f.write("def f():\n    return 0\n")
+            with open(extra_p, "w", encoding="utf-8") as f:
+                f.write("CONST = 1\n")
+            with open(dirty_p, "w", encoding="utf-8") as f:
+                f.write("DIRTY = 'initial'\n")
+            with open(test_p, "w", encoding="utf-8") as f:
+                f.write("def test_f(): pass\n")
+
+            subprocess.run(["git", "add", "."], cwd=tmpdir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir, check=True)
+
+            # Dirty a file BEFORE Job 1 baseline is captured
+            with open(dirty_p, "w", encoding="utf-8") as f:
+                f.write("DIRTY = 'pre_job1_uncommitted'\n")
+
+            factory = AiderFactory(tmpdir, session_name="diff_matrix_sess")
+            factory._capture_impl_baseline(
+                "p1_target",
+                ["src/target.py", "src/extra.py"],
+                test_file="tests/test_target.py",
+            )
+
+            # Simulate Job 1: edit target.py and extra.py and commit
+            with open(target_p, "w", encoding="utf-8") as f:
+                f.write("def f():\n    return 10\n")
+            with open(extra_p, "w", encoding="utf-8") as f:
+                f.write("CONST = 2\n")
+            subprocess.run(["git", "add", "src/target.py", "src/extra.py"], cwd=tmpdir, check=True)
+            subprocess.run(["git", "commit", "-m", "Job 1 edits"], cwd=tmpdir, check=True)
+
+            # Calling _capture_impl_baseline again before Job 2 must be idempotent
+            factory._capture_impl_baseline(
+                "p1_target",
+                ["src/target.py", "src/extra.py"],
+                test_file="tests/test_target.py",
+            )
+
+            # Simulate Job 2: second edit on target.py + out-of-scope file + test file edit
+            with open(target_p, "w", encoding="utf-8") as f:
+                f.write("def f():\n    return 42\n")
+            uninvited_p = os.path.join(tmpdir, "src", "unexpected.py")
+            with open(uninvited_p, "w", encoding="utf-8") as f:
+                f.write("UNEXPECTED = True\n")
+            with open(test_p, "w", encoding="utf-8") as f:
+                f.write("def test_f(): assert True\n")
+            subprocess.run(["git", "add", "src/target.py"], cwd=tmpdir, check=True)
+            subprocess.run(["git", "commit", "-m", "Job 2 edits"], cwd=tmpdir, check=True)
+
+            diff_text = factory._compute_impl_diff(
+                "p1_target",
+                ["src/target.py", "src/extra.py"],
+                test_file=["tests/test_target.py", "tests/test_extra.py"],
+            )
+
+            self.assertIn("--- a/src/target.py", diff_text)
+            self.assertIn("+++ b/src/target.py", diff_text)
+            self.assertIn("+    return 42", diff_text)
+            self.assertNotIn("+    return 10", diff_text)
+            self.assertIn("--- a/src/extra.py", diff_text)
+            self.assertIn("+CONST = 2", diff_text)
+            self.assertNotIn("unexpected.py", diff_text)
+            self.assertNotIn("dirty.py", diff_text)
+            self.assertNotIn("test_target.py", diff_text)
+
+            # Fallback mode (tracked_files=[]): discovers git-modified / untracked files
+            diff_fallback = factory._compute_impl_diff(
+                "p1_untracked_fallback",
+                [],
+                test_file=["tests/test_target.py"],
+            )
+            self.assertIn("+++ b/src/unexpected.py", diff_fallback)
+            self.assertIn("+UNEXPECTED = True", diff_fallback)
+            self.assertNotIn("test_target.py", diff_fallback)
+
+    def test_oracle_turn_pops_oracle_context_files_when_read_files_present(self):
+        """Validates _oracle_turn removes ORACLE_CONTEXT_FILES from env when d['read_files'] is set."""
+        from unittest.mock import MagicMock, patch
+        from orchestrate import AiderFactory, Task
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            factory = AiderFactory(tmpdir, session_name="orc_env_sess")
+            task = Task(
+                id="debate_task",
+                rag_env={"ORACLE_CONTEXT_FILES": "docs/job_only.md"},
+            )
+            d = {"mode": "code", "read_files": ["src/target.py"]}
+
+            mock_res = MagicMock()
+            mock_res.returncode = 0
+            mock_res.stdout = "VERDICT: AGREE"
+            mock_res.stderr = ""
+
+            with patch("subprocess.run", return_value=mock_res) as mock_run:
+                factory._oracle_turn(task, d, "PROPOSAL: ok", turn=0, pre_assess_prompt="Assess")
+                passed_env = mock_run.call_args[1]["env"]
+                self.assertNotIn("ORACLE_CONTEXT_FILES", passed_env)
+
+    def test_aider_ask_turn_disables_yes_always_and_pipes_no_to_stdin(self):
+        """Validates _aider_ask_turn omits --yes-always, sets AIDER_YES_ALWAYS=false, and writes 'n\\n'*50 to stdin."""
+        from unittest.mock import MagicMock, patch
+        import io
+        from orchestrate import AiderFactory, Task
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            factory = AiderFactory(tmpdir, session_name="ask_stdin_sess")
+            task = Task(id="ask_task", model="openai/mock-model")
+
+            mock_proc = MagicMock()
+            mock_proc.returncode = 0
+            mock_proc.stdout = io.StringIO("PROPOSAL: Scoped plan.\n")
+            mock_proc.stdin = MagicMock()
+            mock_proc.wait.return_value = 0
+
+            with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+                out = factory._aider_ask_turn(task, "Test prompt", ["src/a.py"], label="turn 1/1")
+                self.assertIn("PROPOSAL: Scoped plan.", out)
+                called_cmd = mock_popen.call_args[0][0]
+                called_kwargs = mock_popen.call_args[1]
+                self.assertNotIn("--yes-always", called_cmd)
+                self.assertEqual(called_kwargs["env"].get("AIDER_YES_ALWAYS"), "false")
+                mock_proc.stdin.write.assert_called_once_with("n\n" * 50)
+                mock_proc.stdin.close.assert_called_once()
+
+    def test_run_deliberation_injects_job_file_scope_boundary(self):
+        """Validates _run_deliberation injects ## JOB FILE SCOPE BOUNDARY separating editable_files from read_files."""
+        from unittest.mock import patch
+        from orchestrate import AiderFactory, Task
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            factory = AiderFactory(tmpdir, session_name="scope_boundary_sess")
+            verdict_p = os.path.join(tmpdir, "verdict.md")
+            ledger_p = os.path.join(tmpdir, "ledger.json")
+            task = Task(
+                id="delib_scope_task",
+                deliberate={
+                    "template": None,
+                    "issue": None,
+                    "verdict": verdict_p,
+                    "ledger": ledger_p,
+                    "gate_cmd": None,
+                    "loops": 1,
+                    "mode": "code",
+                    "draft_mode": True,
+                    "read_files": ["src/calc.py", "tests/test_a.py", "tests/test_b.py", "docs/spec.md"],
+                    "editable_files": ["tests/test_a.py", "tests/test_b.py"],
+                },
+            )
+
+            captured_orc_prompts = []
+            captured_arch_prompts = []
+
+            def fake_oracle_turn(t, d, arch_text, turn, label="", pre_assess_prompt=None):
+                captured_orc_prompts.append(pre_assess_prompt or arch_text)
+                return "VERDICT: AGREE"
+
+            def fake_arch_turn(t, message, read_files, label="", history_file=None):
+                captured_arch_prompts.append(message)
+                return "### [Task ID: 001] - Test A\nPROPOSAL: Add unit and e2e tests."
+
+            with patch.object(factory, "_oracle_turn", side_effect=fake_oracle_turn), \
+                 patch.object(factory, "_aider_ask_turn", side_effect=fake_arch_turn):
+                ok = factory._run_deliberation(task)
+                self.assertTrue(ok)
+
+            self.assertTrue(captured_orc_prompts)
+            self.assertTrue(captured_arch_prompts)
+            for p_txt in (captured_orc_prompts[0], captured_arch_prompts[0]):
+                self.assertIn("## JOB FILE SCOPE BOUNDARY", p_txt)
+                self.assertIn("`tests/test_a.py`, `tests/test_b.py`", p_txt)
+                self.assertIn("`src/calc.py`, `docs/spec.md`", p_txt)
+
+    def test_detect_framework_python_runner_includes_file_placeholder(self):
+        """Validates bootstrap._detect_framework always includes {file} in the Python pytest runner."""
+        from bootstrap import _detect_framework
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 1. Default fallback
+            fw, runner, _, _ = _detect_framework(tmpdir)
+            self.assertEqual(fw, "py")
+            self.assertEqual(runner, "uv run --with pytest pytest {file}")
+
+            # 2. pyproject.toml with [tool.pytest.ini_options]
+            with open(os.path.join(tmpdir, "pyproject.toml"), "w", encoding="utf-8") as f:
+                f.write("[tool.pytest.ini_options]\ntestpaths = ['tests']\n")
+            fw2, runner2, _, _ = _detect_framework(tmpdir)
+            self.assertEqual(fw2, "py")
+            self.assertEqual(runner2, "uv run --with pytest pytest {file}")
 
 
 if __name__ == "__main__":

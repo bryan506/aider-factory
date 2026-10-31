@@ -8,7 +8,7 @@ colors:
 
 test_command_prefix: ""
 test_runner: "uv run --with pytest pytest {file}"
-test_naming_and_path: "tests/test_{stem}.py"
+test_naming_and_path: "tests/unit/test_{stem}.py"
 lint_cmd: null
 auto_lint: true
 loop_aider_test: 3
@@ -20,6 +20,7 @@ endpoints: # set multiple local endpoints, ignored when cloud model chosen
     architect_api_base: "http://192.168.100.2:8080/v1"
     editor_api: "http://192.168.100.1:8080/v1"
     editor_api_fallback: "http://192.168.100.1:8080/v1"
+    weak_model_api_base: "http://192.168.100.2:8080/v1"
     rag_agent_api: "http://192.168.100.1:8080/v1"
     grounding_agent_api: "http://192.168.100.2:8090/v1"
     ranking_api_base: "http://192.168.100.1:8080/v1"
@@ -35,10 +36,11 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         editor_agent: "gemini/gemini-3.7-flash"
         editor_agent_test: "gemini/gemini-3.7-flash"
         editor_agent_test_fallback: "gemini/gemini-3.7-flash"
+        weak_model: "gemini/gemini-3.5-flash-lite"
         rag_agent: "gemini/gemini-3.7-flash"
         ranking_agent: "jinaai/jina-reranker-v3.5"
         ocr_agent: "gemini/gemini-3.7-flash"
-        embed_model: "gemini/text-embedding-004"
+        embed_model: "BAAI/bge-m3"
         grounding_agent: "openai/minicheck-flan-t5-large"
 
     rag:
@@ -68,7 +70,7 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         max_chat_history_tokens: 40000 # Chat token budget before truncation
         yes_always: false # Auto-confirm all prompts
         auto_accept_architect: false # Auto-apply architect proposal to editor
-        auto_commits: true # Auto-commit git changes after each edit
+        auto_commits: false # Auto-commit git changes after each edit
         suggest_shell_commands: true # Allow model to propose shell commands
         detect_urls: false # Scrape URLs found in model responses
         disable_playwright: false # Prevent automated headless browser installs
@@ -101,10 +103,11 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         editor_agent: "gemini/gemini-3.7-flash"
         editor_agent_test: "gemini/gemini-3.7-flash"
         editor_agent_test_fallback: "gemini/gemini-3.7-flash"
+        weak_model: "gemini/gemini-3.5-flash-lite"
         rag_agent: "gemini/gemini-3.7-flash"
         ranking_agent: "jinaai/jina-reranker-v3.5"
         ocr_agent: "gemini/gemini-3.7-flash"
-        embed_model: "gemini/text-embedding-004"
+        embed_model: "BAAI/bge-m3"
         grounding_agent: "openai/minicheck-flan-t5-large"
 
     rag:
@@ -121,7 +124,7 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         pre_edit_debate:
             enabled: true
             insert_debate: [0, 1, 1]              # Pre-job debate triggered before Job 2 and Job 3
-            loops: 3                              # 3 turns to reach consensus per round
+            loops: 8                              # 3 turns to reach consensus per round
             rounds: 2                             # 2 outer debate rounds (cycles personas & collections)
             pass_history: true                    # Carry debate context and KV cache to next round
             persist: false                        # Conclude once consensus is reached
@@ -160,7 +163,7 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         map_refresh: "manual"
         map_multiplier_no_files: 0
         max_chat_history_tokens: 100000
-        yes_always: true
+        yes_always: false
         auto_accept_architect: true
         auto_commits: true
         suggest_shell_commands: true
@@ -202,10 +205,11 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
         editor_agent: "gemini/gemini-3.8-flash"
         editor_agent_test: "gemini/gemini-3.8-flash"
         editor_agent_test_fallback: "gemini/gemini-3.8-flash"
+        weak_model: "gemini/gemini-3.5-flash-lite"
         rag_agent: "gemini/gemini-3.7-flash"
         ranking_agent: "jinaai/jina-reranker-v3.5"
         ocr_agent: "gemini/gemini-3.7-flash"
-        embed_model: "gemini/text-embedding-004"
+        embed_model: "BAAI/bge-m3"
         grounding_agent: "openai/minicheck-flan-t5-large"
 
     rag:

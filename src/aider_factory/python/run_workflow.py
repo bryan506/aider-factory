@@ -260,6 +260,94 @@ def _render_validate_template(
     return output_path
 
 
+def _render_testing_template(
+    template_path: str,
+    strategy_content: str,
+    output_path: str,
+    git_diff_text: Optional[str] = None,
+    include_diff: bool = False,
+) -> str:
+    """Inject read-only strategy specification and optional implementation git diff into a testing template."""
+    if not template_path or not os.path.exists(template_path):
+        return template_path
+
+    with open(template_path, "r", encoding="utf-8") as tf:
+        base_text = tf.read()
+
+    header = "## COMPLETED IMPLEMENTATION CONTEXT (READ-ONLY REFERENCE FOR TESTING)"
+    parts = [
+        header,
+        "",
+        "> **STRICT ROLE DIRECTIVE**: The specification and code changes below were **already executed** in Job 1 (Implementation) and Job 2 (Validation).",
+        "> - Do **NOT** re-execute the implementation plan below as a builder task list.",
+        "> - Use `<completed_strategy_specification>` as the **Normative Oracle** to identify required invariants, formulas, boundary conditions, edge cases, and acceptance criteria—including any requirements the implementation may have missed.",
+    ]
+    if include_diff:
+        parts.append(
+            "> - Use `<implementation_git_diff>` to inspect the **Exact Net Code Delta** applied to the editable files during Job 1 & Job 2."
+        )
+    parts.append(
+        "> - Only modify source files (`target_files` / `extra_editable_files`) if your tests uncover a genuine bug, contract discrepancy, or missing edge case in the implementation."
+    )
+
+    clean_strategy = (strategy_content or "").strip()
+    if clean_strategy:
+        clean_strategy = re.sub(
+            r"```ya?ml[^\n]*\n(?:(?!```).)*?\bfiles\s*:.*?```\s*",
+            "",
+            clean_strategy,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        clean_strategy = re.sub(
+            r"(?i)(?:^|\n)#{2,3}\s*Scope Analysis[ \t]*\r?\n(?=\s*(?:#{1,3}\s|\Z))",
+            "\n",
+            clean_strategy,
+        ).strip()
+
+    if clean_strategy:
+        parts.extend(
+            [
+                "",
+                "<completed_strategy_specification>",
+                clean_strategy,
+                "</completed_strategy_specification>",
+            ]
+        )
+
+    if include_diff:
+        clean_diff = (git_diff_text or "").strip()
+        diff_body = (
+            f"```diff\n{clean_diff}\n```"
+            if clean_diff
+            else "(No net code changes detected in Job 1 / Job 2.)"
+        )
+        parts.extend(
+            [
+                "",
+                "<implementation_git_diff>",
+                diff_body,
+                "</implementation_git_diff>",
+            ]
+        )
+
+    injection = "\n".join(parts) + "\n"
+    if header in base_text:
+        final_text = re.sub(
+            rf"{re.escape(header)}.*\Z",
+            lambda _: injection,
+            base_text,
+            flags=re.DOTALL,
+        )
+    else:
+        final_text = base_text.rstrip() + "\n\n---\n\n" + injection
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as rf:
+        rf.write(final_text)
+
+    return output_path
+
+
 def resolve_template_path(path_val, project_directory=None):
     """Resolves a template path, prioritizing local workspace paths (.aider_factory/ and project root)
     before falling back to package bundled resources."""
@@ -653,14 +741,21 @@ Options:
         shutil.copy2(explicit_config, session_yaml)
     elif not os.path.exists(session_yaml):
         default_config = None
-        local_std = os.path.join(base_cwd, ".aider_factory", ".env.yml")
-        if os.path.exists(local_std):
-            default_config = local_std
-        else:
+        repo_stem = os.path.basename(base_cwd.rstrip("/\\")).strip().replace(" ", "_")
+        candidates = [
+            os.path.join(base_cwd, ".aider_factory", ".env.yml"),
+            os.path.join(base_cwd, ".aider_factory", f".env_{repo_stem}.yml"),
+            os.path.join(base_cwd, ".aider_factory", ".env_plan_do.yml"),
+        ]
+        for cand in candidates:
+            if os.path.exists(cand):
+                default_config = cand
+                break
+        if not default_config:
             aider_factory_dir = os.path.join(base_cwd, ".aider_factory")
             if os.path.exists(aider_factory_dir):
-                for f in os.listdir(aider_factory_dir):
-                    if f.endswith(".yml") and not f.startswith("."):
+                for f in sorted(os.listdir(aider_factory_dir)):
+                    if f.endswith(".yml") and not f.startswith(".aider"):
                         default_config = os.path.join(aider_factory_dir, f)
                         break
         if default_config and os.path.exists(default_config):
@@ -707,6 +802,7 @@ Options:
         session_dir=session_dir,
     )
     file_last_tasks = {}
+    file_test_files = {}
     completed_files = []
     prior_phase_terminal_tasks = []
     pipeline_discovered_targets = []
@@ -1441,27 +1537,45 @@ Options:
                     return None if shared_history else f"{job_prefix}_{base_name}"
 
                 # Specific test file (broadcast if 1, index-matched if many; else auto-generate).
+                # When 1 target_file is paired with multiple test_files, preserve all test_files
+                # for sequential execution in Job 3 / Verify.
                 test_files_list = phase.get("files", {}).get("test_files")
                 if test_files_list:
-                    if len(test_files_list) == 1:
+                    if len(target_files) == 1 and len(test_files_list) > 1:
+                        specific_test_files = list(dict.fromkeys(test_files_list))
+                        specific_test_file = specific_test_files[0]
+                    elif len(test_files_list) == 1:
                         specific_test_file = test_files_list[0]
+                        specific_test_files = [specific_test_file]
                     elif len(test_files_list) > target_files.index(current_file):
                         specific_test_file = test_files_list[
                             target_files.index(current_file)
                         ]
+                        specific_test_files = [specific_test_file]
                     else:
                         specific_test_file = phase_test_convention.replace(
                             "{stem}", base_name
                         )
+                        specific_test_files = [specific_test_file]
                 else:
                     specific_test_file = phase_test_convention.replace(
                         "{stem}", base_name
                     )
+                    specific_test_files = [specific_test_file]
+
+                def _build_test_cmd(tf_path: str) -> str:
+                    if "{file}" in phase_test_runner:
+                        runner_resolved = phase_test_runner.replace("{file}", tf_path)
+                    elif "{stem}" in phase_test_runner:
+                        tf_stem = os.path.splitext(os.path.basename(tf_path))[0]
+                        runner_resolved = phase_test_runner.replace("{stem}", tf_stem)
+                    else:
+                        runner_resolved = f"{phase_test_runner.rstrip()} {tf_path}"
+                    return f"{phase_cmd_prefix}{runner_resolved}"
+
                 # Language-agnostic execution: {prefix} {test_runner with {file} filled}.
                 cmd_prefix = phase_cmd_prefix
-                test_cmd = (
-                    f"{phase_cmd_prefix}{phase_test_runner.replace('{file}', specific_test_file)}"
-                )
+                test_cmd = _build_test_cmd(specific_test_file)
 
                 last_task_for_file = file_last_tasks.get(current_file)
                 initial_phase_deps = [last_task_for_file] if last_task_for_file else list(prior_phase_terminal_tasks)
@@ -1709,16 +1823,91 @@ Options:
                             d.append(phase_ingest_owner_id)
                         return d
 
+                    strategy_content = ""
+                    strategy_file = plans.get("validate_strategy_file")
+                    if not strategy_file and completed_files:
+                        strategy_file = next(
+                            (f for f in reversed(completed_files) if f.endswith(".md")),
+                            completed_files[0],
+                        )
+
+                    if not strategy_file and (
+                        sticky_editable
+                        or sticky_readonly
+                        or (j1_val and "strategy_template.md" in str(j1_val))
+                    ):
+                        default_strat = resolve_template_path(
+                            "markdown/oracle_pre_plan/strategy_template.md",
+                            project_directory=project_directory,
+                        )
+                        if (
+                            default_strat
+                            and os.path.exists(default_strat)
+                            and os.path.getsize(default_strat) > 0
+                        ):
+                            strategy_file = default_strat
+
+                    if strategy_file:
+                        strat_abs = (
+                            strategy_file
+                            if os.path.isabs(strategy_file)
+                            else os.path.join(str(project_directory), strategy_file)
+                        )
+                        if os.path.exists(strat_abs):
+                            with open(strat_abs, "r", encoding="utf-8") as sf:
+                                raw_strat = sf.read()
+                            if (
+                                plans.get("validate_strategy_file")
+                                or "[Define implementation/refactoring scope and objectives]"
+                                not in raw_strat
+                            ):
+                                strategy_content = raw_strat
+
+                    session_tmpl_dir = os.path.join(session_dir, "templates")
+                    baseline_key = f"{env_prefix}_{base_name}"
+                    tracked_impl_files = [current_file] + list(extra_editable_files)
+                    baseline_capture_ctx = {
+                        "role": "capture_baseline",
+                        "baseline_key": baseline_key,
+                        "tracked_files": tracked_impl_files,
+                        "test_file": specific_test_files,
+                    }
+                    test_rag_env = dict(file_rag_env)
+                    test_rag_env["ORACLE_CONTEXT_FILES"] = (
+                        "\x1e".join(initial_context_test_files)
+                        if initial_context_test_files
+                        else ""
+                    )
+
                     # =================================================================
                     # JOB 1: IMPLEMENTATION
                     # =================================================================
                     if run_job_one:
                         job1_id = f"{env_prefix}_job1_{base_name}"
+                        is_post_test_sticky_review = bool(
+                            sticky_editable
+                            and not run_job_two
+                            and not run_job_three
+                            and not iterate_test
+                            and current_file in file_test_files
+                        )
                         job1_reads = list(initial_context_files)
+                        if is_post_test_sticky_review and sticky_readonly:
+                            for cft in initial_context_test_files:
+                                if cft not in job1_reads:
+                                    job1_reads.append(cft)
                         if sticky_context:
                             for cf in completed_files:
                                 if cf not in job1_reads:
                                     job1_reads.append(cf)
+                        job1_files = [current_file] + list(extra_editable_files)
+                        if is_post_test_sticky_review:
+                            prior_tfs = file_test_files[current_file]
+                            if isinstance(prior_tfs, str):
+                                prior_tfs = [prior_tfs]
+                            for prior_tf in prior_tfs:
+                                if prior_tf and prior_tf not in job1_files:
+                                    job1_files.append(prior_tf)
                         job1_depends = _ingest_deps(
                             initial_phase_deps
                         )
@@ -1792,6 +1981,7 @@ Options:
                                     "mode": "code",
                                     "draft_mode": True,
                                     "read_files": _debate_reads,
+                                    "editable_files": list(job1_files),
                                     "round_idx": r_idx,
                                     "pass_history": _job1_pass_history,
                                     "persist": _job1_persist,
@@ -1843,7 +2033,7 @@ Options:
                                 message_file=job1_msg_file,
                                 verdict_gate=job1_msg_file if debate_j1 else None,
                                 read_files=job1_reads,
-                                files=[current_file] + extra_editable_files,
+                                files=job1_files,
                                 model=ARCHITECT_AGENT,
                                 editor_model=EDITOR_AGENT,
                                 architect_api_base=ARCHITECT_API_BASE,
@@ -1852,6 +2042,7 @@ Options:
                                 ocr_ingest=task_ocr_ingest,
                                 pair_programming=pair_programming,
                                 history_stem=_h_stem("job1"),
+                                testing_context=baseline_capture_ctx,
                                 **task_aider_flags,
                             )
                         )
@@ -1869,37 +2060,6 @@ Options:
                             [last_task_for_file] if last_task_for_file else list(initial_phase_deps)
                         )
 
-                        strategy_content = ""
-                        strategy_file = plans.get("validate_strategy_file")
-                        if not strategy_file and completed_files:
-                            strategy_file = next(
-                                (f for f in reversed(completed_files) if f.endswith(".md")),
-                                completed_files[0],
-                            )
-
-                        if not strategy_file:
-                            default_strat = resolve_template_path(
-                                "markdown/oracle_pre_plan/strategy_template.md",
-                                project_directory=project_directory,
-                            )
-                            if (
-                                default_strat
-                                and os.path.exists(default_strat)
-                                and os.path.getsize(default_strat) > 0
-                            ):
-                                strategy_file = default_strat
-
-                        if strategy_file:
-                            strat_abs = (
-                                strategy_file
-                                if os.path.isabs(strategy_file)
-                                else os.path.join(str(project_directory), strategy_file)
-                            )
-                            if os.path.exists(strat_abs):
-                                with open(strat_abs, "r", encoding="utf-8") as sf:
-                                    strategy_content = sf.read()
-
-                        session_tmpl_dir = os.path.join(session_dir, "templates")
                         if job_two_plan:
                             if (
                                 strategy_content
@@ -1986,6 +2146,7 @@ Options:
                                     "mode": "code",
                                     "draft_mode": True,
                                     "read_files": _debate_reads,
+                                    "editable_files": [current_file] + list(extra_editable_files),
                                     "round_idx": r_idx,
                                     "pass_history": _job2_pass_history,
                                     "persist": _job2_persist,
@@ -2054,6 +2215,7 @@ Options:
                                 rag_env=file_rag_env,
                                 ocr_ingest=task_ocr_ingest,
                                 history_stem=_h_stem("job2"),
+                                testing_context=baseline_capture_ctx,
                                 **task_aider_flags,
                             )
                         )
@@ -2066,21 +2228,58 @@ Options:
                     # JOB 3: WRITE TESTS & JOB 4: ITERATE TESTS
                     # =================================================================
                     if run_job_three or iterate_test:
-                        job3_depends = _ingest_deps(
-                            [last_task_for_file] if last_task_for_file else list(initial_phase_deps)
-                        )
+                        file_test_files[current_file] = list(specific_test_files)
+                        effective_iterate_plan = iterate_plan
+                        if (
+                            iterate_plan
+                            and os.path.exists(iterate_plan)
+                            and strategy_content
+                        ):
+                            rendered_iterate_plan = os.path.join(
+                                session_tmpl_dir,
+                                f"{base_name}_testing_iterate_rendered.md",
+                            )
+                            effective_iterate_plan = _render_testing_template(
+                                iterate_plan,
+                                strategy_content,
+                                rendered_iterate_plan,
+                                include_diff=False,
+                            )
+
+                        effective_job3_plan = job_three_plan
+                        render_job3_ctx = None
+                        debated_job3_msg_file = None
 
                         if run_job_three:
-                            job3_id = f"{env_prefix}_job3_{base_name}"
-                            job3_reads = [current_file] + list(initial_context_test_files)
-                            if sticky_context:
-                                for cf in completed_files:
-                                    if cf not in job3_reads:
-                                        job3_reads.append(cf)
-                            if job_three_plan and job_three_plan not in job3_reads:
-                                job3_reads.append(job_three_plan)
-
-                            job3_msg_file = job_three_plan
+                            if (
+                                job_three_plan
+                                and os.path.exists(job_three_plan)
+                                and (
+                                    strategy_content
+                                    or os.path.basename(job_three_plan)
+                                    in ("testing_exec.md", "testing.md")
+                                )
+                            ):
+                                rendered_job3_plan = os.path.join(
+                                    session_tmpl_dir,
+                                    f"{base_name}_testing_exec_rendered.md",
+                                )
+                                effective_job3_plan = _render_testing_template(
+                                    job_three_plan,
+                                    strategy_content,
+                                    rendered_job3_plan,
+                                    git_diff_text="",
+                                    include_diff=True,
+                                )
+                                render_job3_ctx = {
+                                    "role": "render_testing_exec",
+                                    "baseline_key": baseline_key,
+                                    "tracked_files": tracked_impl_files,
+                                    "test_file": specific_test_files,
+                                    "template_path": job_three_plan,
+                                    "strategy_content": strategy_content,
+                                    "output_path": rendered_job3_plan,
+                                }
 
                             if debate_j3:
                                 _pre_loops = pre_edit_cfg.get("loops")
@@ -2100,13 +2299,14 @@ Options:
                                 )
 
                                 _debate_reads = list(dict.fromkeys(
-                                    [current_file, specific_test_file]
+                                    [current_file]
+                                    + list(specific_test_files)
                                     + list(extra_editable_files)
                                     + list(initial_context_test_files)
                                     + (completed_files if sticky_context else [])
                                 ))
-                                if job_three_plan and job_three_plan not in _debate_reads:
-                                    _debate_reads.append(job_three_plan)
+                                if effective_job3_plan and effective_job3_plan not in _debate_reads:
+                                    _debate_reads.append(effective_job3_plan)
 
                                 prev_debate_id = None
                                 for r_idx in range(1, _job3_rounds + 1):
@@ -2115,11 +2315,11 @@ Options:
                                         job_num=3,
                                         default_collection=_table,
                                         rag_context_root=rag_context_root,
-                                        default_db=file_rag_env.get("ORACLE_RAG_DB_DIR", ""),
+                                        default_db=test_rag_env.get("ORACLE_RAG_DB_DIR", ""),
                                         project_directory=project_directory,
                                         round_num=r_idx,
                                     )
-                                    _j3_rag_env = dict(file_rag_env)
+                                    _j3_rag_env = dict(test_rag_env)
                                     if (
                                         pre_edit_cfg.get("job_debate_collection") is not None
                                         or pre_edit_cfg.get("job_debate_db") is not None
@@ -2143,7 +2343,7 @@ Options:
                                     )
                                     _r_deliberate = {
                                         "template": _debate_template,
-                                        "issue": job_three_plan,
+                                        "issue": effective_job3_plan,
                                         "verdict": _verdict_job3_abs,
                                         "ledger": _ledger_job3_abs,
                                         "gate_cmd": None,
@@ -2152,6 +2352,7 @@ Options:
                                         "mode": "code",
                                         "draft_mode": True,
                                         "read_files": _debate_reads,
+                                        "editable_files": list(specific_test_files),
                                         "round_idx": r_idx,
                                         "pass_history": _job3_pass_history,
                                         "persist": _job3_persist,
@@ -2186,6 +2387,7 @@ Options:
                                             ocr_ingest=task_ocr_ingest if r_idx == 1 else None,
                                             deliberate=_r_deliberate,
                                             history_stem=_h_stem("job3"),
+                                            testing_context=render_job3_ctx,
                                         )
                                     )
                                     if task_ocr_ingest is not None and r_idx == 1:
@@ -2193,84 +2395,203 @@ Options:
                                         task_ocr_ingest = None
                                     prev_debate_id = job3_debate_id
 
-                                job3_depends = [prev_debate_id]
-                                job3_msg_file = _verdict_job3_abs
+                                last_task_for_file = prev_debate_id
+                                debated_job3_msg_file = _verdict_job3_abs
 
-                            _add_task(
-                                Task(
-                                    id=job3_id,
-                                    depends_on=job3_depends,
-                                    message_file=job3_msg_file,
-                                    verdict_gate=job3_msg_file if debate_j3 else None,
-                                    read_files=job3_reads,
-                                    files=[specific_test_file, current_file]
-                                    + extra_editable_files,
-                                    model=ARCHITECT_AGENT,
-                                    editor_model=EDITOR_AGENT_TEST,
-                                    architect_api_base=ARCHITECT_API_BASE,
-                                    editor_api_base=EDITOR_API_FALLBACK,
-                                    pair_programming=pair_programming,
-                                    rag_env=file_rag_env,
-                                    ocr_ingest=task_ocr_ingest,
-                                    history_stem=_h_stem("job3"),
-                                    **task_aider_flags,
-                                )
+                        for tf_idx, cur_test_file in enumerate(specific_test_files):
+                            tf_suf = "" if tf_idx == 0 else f"_t{tf_idx + 1}"
+                            cur_test_cmd = _build_test_cmd(cur_test_file)
+                            job3_depends = _ingest_deps(
+                                [last_task_for_file] if last_task_for_file else list(initial_phase_deps)
                             )
-                            if task_ocr_ingest is not None:
-                                phase_ingest_owner_id = job3_id
-                                task_ocr_ingest = None
-                            last_task_for_file = job3_id
 
-                            job3_depends = [job3_id]
+                            if run_job_three:
+                                job3_id = f"{env_prefix}_job3_{base_name}{tf_suf}"
+                                job3_reads = [current_file] + list(specific_test_files[:tf_idx]) + list(initial_context_test_files)
+                                if sticky_context:
+                                    for cf in completed_files:
+                                        if cf not in job3_reads:
+                                            job3_reads.append(cf)
+                                if effective_job3_plan and effective_job3_plan not in job3_reads:
+                                    job3_reads.append(effective_job3_plan)
 
-                        if iterate_test:
-                            verify_id = f"{env_prefix}_verify_{base_name}"
-                            verify_reads = [current_file] + list(initial_context_test_files)
-                            if iterate_plan and iterate_plan not in verify_reads:
-                                verify_reads.append(iterate_plan)
+                                job3_msg_file = debated_job3_msg_file if debate_j3 else effective_job3_plan
 
-                            _add_task(
-                                Task(
-                                    id=verify_id,
-                                    depends_on=job3_depends,
-                                    message_file=None,
-                                    iterate_file=iterate_plan,
-                                    read_files=verify_reads,
-                                    files=[specific_test_file, current_file]
-                                    + extra_editable_files,
-                                    model=ARCHITECT_AGENT,
-                                    editor_model=EDITOR_AGENT_TEST,
-                                    fallback_editor_model=EDITOR_AGENT_TEST_FALLBACK,
-                                    architect_api_base=ARCHITECT_API_BASE,
-                                    editor_api_base=EDITOR_API_FALLBACK,
-                                    test_cmd=test_cmd,
-                                    iterate_test=True,
+                                _add_task(
+                                    Task(
+                                        id=job3_id,
+                                        depends_on=job3_depends,
+                                        message_file=job3_msg_file,
+                                        verdict_gate=job3_msg_file if debate_j3 else None,
+                                        read_files=job3_reads,
+                                        files=[cur_test_file, current_file]
+                                        + extra_editable_files,
+                                        model=ARCHITECT_AGENT,
+                                        editor_model=EDITOR_AGENT_TEST,
+                                        architect_api_base=ARCHITECT_API_BASE,
+                                        editor_api_base=EDITOR_API_FALLBACK,
+                                        pair_programming=pair_programming,
+                                        rag_env=test_rag_env,
+                                        ocr_ingest=task_ocr_ingest,
+                                        history_stem=_h_stem(f"job3{tf_suf}"),
+                                        testing_context=render_job3_ctx if tf_idx == 0 else None,
+                                        **task_aider_flags,
+                                    )
+                                )
+                                if task_ocr_ingest is not None:
+                                    phase_ingest_owner_id = job3_id
+                                    task_ocr_ingest = None
+                                last_task_for_file = job3_id
+                                job3_depends = [job3_id]
+
+                            if iterate_test:
+                                verify_id = f"{env_prefix}_verify_{base_name}{tf_suf}"
+                                verify_reads = [current_file] + list(specific_test_files[:tf_idx]) + list(initial_context_test_files)
+                                if effective_iterate_plan and effective_iterate_plan not in verify_reads:
+                                    verify_reads.append(effective_iterate_plan)
+
+                                _add_task(
+                                    Task(
+                                        id=verify_id,
+                                        depends_on=job3_depends,
+                                        message_file=None,
+                                        iterate_file=effective_iterate_plan,
+                                        read_files=verify_reads,
+                                        files=[cur_test_file, current_file]
+                                        + extra_editable_files,
+                                        model=ARCHITECT_AGENT,
+                                        editor_model=EDITOR_AGENT_TEST,
+                                        fallback_editor_model=EDITOR_AGENT_TEST_FALLBACK,
+                                        architect_api_base=ARCHITECT_API_BASE,
+                                        editor_api_base=EDITOR_API_FALLBACK,
+                                        test_cmd=cur_test_cmd,
+                                        iterate_test=True,
+                                        max_aider_loops=global_max_aider_loops,
+                                        auto_test=auto_test,
+                                        pair_programming=pair_programming,
+                                        rag_env=test_rag_env,
+                                        ocr_ingest=task_ocr_ingest,
+                                        soft_fail=escalate,
+                                        final_check=True,
+                                        history_stem=_h_stem(f"verify{tf_suf}"),
+                                        **task_aider_flags,
+                                    )
+                                )
+                                if task_ocr_ingest is not None:
+                                    phase_ingest_owner_id = verify_id
+                                    task_ocr_ingest = None
+                                last_task_for_file = verify_id
+
+                            if escalate and iterate_test:
+                                _ct = resolve_template_path(
+                                    _oa.get("template"), project_directory=project_directory
+                                )
+                                _esc_debate_reads = []
+                                for _rf in (
+                                    [current_file, cur_test_file]
+                                    + list(extra_editable_files)
+                                    + list(initial_context_test_files)
+                                ):
+                                    if _rf and _rf not in _esc_debate_reads:
+                                        _esc_debate_reads.append(_rf)
+                                _esc_base_debate = {
+                                    "template": _ct or analyze_bugs_plan,
+                                    "issue": None,
+                                    "verdict": _verdict_abs,
+                                    "ledger": _dledger_abs,
+                                    "gate_cmd": cur_test_cmd,
+                                    "loops": debate_loops,
+                                    "retrieve_mode": phase_retrieval_mode,
+                                    "mode": "code",
+                                    "read_files": _esc_debate_reads,
+                                    "editable_files": [cur_test_file, current_file]
+                                    + list(extra_editable_files),
+                                }
+                                _esc_apply_kwargs = dict(
+                                    test_cmd=cur_test_cmd,
+                                    iterate_file=effective_iterate_plan,
+                                    read_files=list(initial_context_test_files)
+                                    + ([effective_iterate_plan] if effective_iterate_plan else []),
                                     max_aider_loops=global_max_aider_loops,
-                                    auto_test=auto_test,
                                     pair_programming=pair_programming,
-                                    rag_env=file_rag_env,
-                                    ocr_ingest=task_ocr_ingest,
-                                    soft_fail=escalate,
+                                    rag_env=test_rag_env,
+                                    soft_fail=False,
                                     final_check=True,
-                                    history_stem=_h_stem("verify"),
                                     **task_aider_flags,
                                 )
-                            )
-                            if task_ocr_ingest is not None:
-                                phase_ingest_owner_id = verify_id
-                                task_ocr_ingest = None
-                            last_task_for_file = verify_id
+                                for round_idx in range(1, debate_rounds + 1):
+                                    round_suf = f"_r{round_idx}" if debate_rounds > 1 else ""
+                                    _r_verdict = os.path.join(
+                                        _ddir, f"{base_name}{tf_suf}{round_suf}.verdict.md"
+                                    )
+                                    _r_ledger = os.path.join(
+                                        _ddir, f"{base_name}{tf_suf}{round_suf}.debate.json"
+                                    )
+                                    _round_debate = dict(_esc_base_debate)
+                                    _round_debate["verdict"] = _r_verdict
+                                    _round_debate["ledger"] = _r_ledger
+                                    _round_debate["round_idx"] = round_idx
+                                    _round_debate["pass_history"] = pass_history
+                                    _round_debate["persist"] = bool(esc_cfg.get("persist", False))
+                                    _round_debate["oracle_persona"] = esc_cfg.get("oracle_persona", "")
+                                    _round_debate["architect_persona"] = esc_cfg.get("architect_persona", "")
+                                    _round_debate["oracle_file"] = esc_cfg.get("oracle_file", "")
+                                    _round_debate["architect_file"] = esc_cfg.get("architect_file", "")
+                                    if round_idx > 1:
+                                        _round_debate["prior_ledger"] = os.path.join(
+                                            _ddir, f"{base_name}{tf_suf}_r{round_idx - 1}.debate.json"
+                                        )
+                                        _round_debate["prior_verdict"] = os.path.join(
+                                            _ddir, f"{base_name}{tf_suf}_r{round_idx - 1}.verdict.md"
+                                        )
+                                    _r_apply_kwargs = dict(_esc_apply_kwargs)
+                                    if debate_rounds > 1 and round_idx < debate_rounds:
+                                        _r_apply_kwargs["soft_fail"] = True
 
-                    # escalation params (code): the test suite IS the gate; the failure log +
-                    # retrieved corpus chunks are the debate's evidence; apply re-iterates the suite.
-                    if escalate and iterate_test:
+                                    delib_id = f"{env_prefix}_deliberate_{base_name}{tf_suf}{round_suf}"
+                                    _add_task(
+                                        Task(
+                                            id=delib_id,
+                                            depends_on=[last_task_for_file]
+                                            if last_task_for_file
+                                            else [],
+                                            model=ARCHITECT_AGENT,
+                                            editor_model=EDITOR_AGENT,
+                                            weak_model=weak_model,
+                                            weak_model_api_base=weak_model_api_base,
+                                            architect_api_base=ARCHITECT_API_BASE,
+                                            editor_api_base=EDITOR_API,
+                                            rag_env=test_rag_env,
+                                            deliberate=_round_debate,
+                                            history_stem=_h_stem(f"escalate{tf_suf}"),
+                                        )
+                                    )
+
+                                    apply_id = f"{env_prefix}_apply_{base_name}{tf_suf}{round_suf}"
+                                    apply_files = [cur_test_file, current_file] + extra_editable_files
+                                    _add_task(
+                                        Task(
+                                            id=apply_id,
+                                            depends_on=[delib_id],
+                                            message_file=_r_verdict,
+                                            verdict_gate=_r_verdict,
+                                            files=apply_files,
+                                            model=ARCHITECT_AGENT,
+                                            editor_model=EDITOR_AGENT_TEST,
+                                            fallback_editor_model=EDITOR_AGENT_TEST_FALLBACK,
+                                            architect_api_base=ARCHITECT_API_BASE,
+                                            editor_api_base=EDITOR_API_FALLBACK,
+                                            iterate_test=True,
+                                            auto_test=auto_test,
+                                            history_stem=_h_stem(f"escalate{tf_suf}"),
+                                            **_r_apply_kwargs,
+                                        )
+                                    )
+                                    last_task_for_file = apply_id
+                    elif escalate:
                         _ct = resolve_template_path(
                             _oa.get("template"), project_directory=project_directory
                         )
-                        # Both the architect AND the oracle need the real code context to reason:
-                        # target + test + editable helpers + context files (deduped, existing only).
-                        # (In grounding mode this is deliberately NOT done — the paper table is the
-                        # oracle's source of truth there.)
                         _debate_reads = []
                         for _rf in (
                             [current_file, specific_test_file]
@@ -2289,6 +2610,8 @@ Options:
                             "retrieve_mode": phase_retrieval_mode,
                             "mode": "code",
                             "read_files": _debate_reads,
+                            "editable_files": [specific_test_file, current_file]
+                            + list(extra_editable_files),
                         }
                         _apply_kwargs = dict(
                             test_cmd=test_cmd,
@@ -2297,14 +2620,11 @@ Options:
                             + ([iterate_plan] if iterate_plan else []),
                             max_aider_loops=global_max_aider_loops,
                             pair_programming=pair_programming,
-                            rag_env=file_rag_env,
+                            rag_env=test_rag_env,
                             soft_fail=False,
-                            # Code mode has no finalize authority: after the iterate loop, re-run the
-                            # test suite ONCE to verify the last edit and report honest pass/fail.
                             final_check=True,
                             **task_aider_flags,
                         )
-                        _build_finalize = False
 
                 # Ingest-only fallback: if nothing above carried the ingest, add a pure setup node
                 # (movable, file-coupled) so a run_ocr_rag-only phase still builds the table.
@@ -2377,7 +2697,7 @@ Options:
                                 weak_model_api_base=weak_model_api_base,
                                 architect_api_base=ARCHITECT_API_BASE,
                                 editor_api_base=EDITOR_API,
-                                rag_env=file_rag_env,
+                                rag_env=test_rag_env if code_mode else file_rag_env,
                                 deliberate=_round_debate,
                                 history_stem=_h_stem("escalate"),
                             )

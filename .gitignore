@@ -1,5 +1,4 @@
 # Ephemeral and Local Workspace Files
-.aider_factory/
 .ai_factory/
 temp/
 logs/
@@ -24,3 +23,24 @@ __pycache__/
 # Local system files
 .DS_Store
 .aider*
+
+# Ignore RAG database, logs, and caches (except editable configs, templates, session artifacts, and scratchpad)
+!.aider_factory/
+.aider_factory/*
+!.aider_factory/CONVENTIONS.md
+!.aider_factory/.env.yml
+!.aider_factory/.env_*.yml
+!.aider_factory/temp/
+!.aider_factory/markdown/
+.aider_factory/markdown/*
+!.aider_factory/markdown/oracle_pre_plan/
+.aider_factory/markdown/oracle_pre_plan/*
+!.aider_factory/markdown/oracle_pre_plan/strategy_template.md
+!.aider_factory/markdown/templates/
+!.aider_factory/sessions/
+.aider_factory/sessions/*
+!.aider_factory/sessions/*/
+.aider_factory/sessions/*/*
+!.aider_factory/sessions/*/session.yml
+!.aider_factory/sessions/*/feature_adr/
+!.aider_factory/sessions/*/templates/

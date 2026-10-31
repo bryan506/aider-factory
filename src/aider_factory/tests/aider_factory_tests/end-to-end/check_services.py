@@ -25,7 +25,8 @@ def probe_post(name, url, payload, expected_key, timeout=25):
                     dim = len(res_data["data"][0]["embedding"])
                     print(f"  ✅ {name} is ONLINE. Embedding dimension: {dim}")
                 elif expected_key == "choices" and len(res_data["choices"]) > 0:
-                    reply = res_data["choices"][0]["message"]["content"].strip()
+                    msg = res_data["choices"][0].get("message", {})
+                    reply = (msg.get("content") or msg.get("reasoning_content") or "").strip()
                     reply_display = reply if len(reply) < 30 else reply[:27] + "..."
                     print(f"  ✅ {name} is ONLINE. Reply: '{reply_display}'")
                 elif expected_key == "results" and len(res_data["results"]) > 0:
@@ -37,6 +38,15 @@ def probe_post(name, url, payload, expected_key, timeout=25):
             else:
                 print(f"  ❌ {name} returned unexpected response: {res_data}", file=sys.stderr)
                 return False
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            pass
+        detail = f" — {body}" if body else ""
+        print(f"  ❌ {name} is OFFLINE or unreachable: {e}{detail}", file=sys.stderr)
+        return False
     except Exception as e:
         print(f"  ❌ {name} is OFFLINE or unreachable: {e}", file=sys.stderr)
         return False
@@ -64,7 +74,7 @@ def probe_get(name, url, expected_key, timeout=25):
 
 # Models
 chat_model = "qwen3.6-27B-90k-udq4kxl:LATEST"
-node2_chat_model = "qwen3.6-27b-90k:LATEST"
+node2_chat_model = "qwen3.8-27B-90k-q5think:LATEST"
 node1_embed_model = "qwen3-embedding-8b-8k-gpu:LATEST"
 embed_model = "qwen3-embedding-8b-8k:LATEST"
 ocr_model = "glm-ocr-f16:LATEST"
@@ -197,12 +207,17 @@ def run_checks():
     )
 
     # 2. Node 2 (192.168.100.2:8080) - Chat Only
-    results.append(
-        probe_post(
-            "Node 2 (Chat)",
+    node2_ok = False
+    for cand_model in (
+        node2_chat_model,
+        "gemma4-12B-90k-halo:LATEST",
+        "qwen3.8-flash-next-111b-90k:LATEST",
+    ):
+        if probe_post(
+            f"Node 2 (Chat: {cand_model})",
             "http://192.168.100.2:8080/v1/chat/completions",
             {
-                "model": node2_chat_model,
+                "model": cand_model,
                 "messages": [
                     {
                         "role": "user",
@@ -212,8 +227,10 @@ def run_checks():
                 "max_tokens": 15,
             },
             "choices",
-        )
-    )
+        ):
+            node2_ok = True
+            break
+    results.append(node2_ok)
 
     # 3. Router (192.168.100.2:8081) - Embed & OCR Only
     results.append(

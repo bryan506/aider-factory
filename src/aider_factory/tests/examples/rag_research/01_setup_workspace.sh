@@ -48,7 +48,29 @@ elif [ ! -f ".aider_factory/.env.yml" ]; then
     fi
 fi
 
-# Sanitize any scaffolded placeholder router host from all env configs
-python3 -c "import glob; [open(p, 'w').write(open(p).read().replace('http://<your-router-host>:4000/v1', '')) for p in glob.glob('.aider_factory/.env*.yml')]" 2>/dev/null || true
+# Sanitize any scaffolded placeholder or router embed_api_base from all env configs for local sentence-transformers
+python3 -c '
+import glob, yaml
+for p in glob.glob(".aider_factory/.env*.yml"):
+    raw = open(p, "r", encoding="utf-8").read().replace("http://<your-router-host>:4000/v1", "")
+    cfg = yaml.safe_load(raw) or {}
+    if isinstance(cfg, dict):
+        if isinstance(cfg.get("endpoints"), dict):
+            cfg["endpoints"].pop("embed_api_base", None)
+        if isinstance(cfg.get("rag"), dict):
+            cfg["rag"]["embed_model"] = "BAAI/bge-m3"
+            cfg["rag"]["embed_backend"] = "sentence-transformers"
+            cfg["rag"].pop("embed_api_base", None)
+        for ph in (cfg.get("phases") or []):
+            if isinstance(ph, dict):
+                if isinstance(ph.get("endpoints"), dict):
+                    ph["endpoints"].pop("embed_api_base", None)
+                pr = ph.setdefault("rag", {})
+                if isinstance(pr, dict):
+                    pr["embed_model"] = "BAAI/bge-m3"
+                    pr["embed_backend"] = "sentence-transformers"
+                    pr.pop("embed_api_base", None)
+        open(p, "w", encoding="utf-8").write(yaml.safe_dump(cfg, sort_keys=False))
+' 2>/dev/null || true
 
 chmod +x 01_setup_workspace.sh 02_research_and_rag.sh 03_draft_and_validate.sh

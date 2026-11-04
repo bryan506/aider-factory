@@ -126,7 +126,7 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
             insert_debate: [0, 1, 1]              # Pre-job debate triggered before Job 2 and Job 3
             loops: 8                              # 3 turns to reach consensus per round
             rounds: 2                             # 2 outer debate rounds (cycles personas & collections)
-            pass_history: true                    # Carry debate context and KV cache to next round
+            pass_history: false                   # Start clean session per round (prior # Resolution passed via prior_verdict)
             persist: false                        # Conclude once consensus is reached
             oracle_persona:
                 - "markdown/templates/agent_persona/critic.md"
@@ -173,7 +173,7 @@ phases: # DAG phases, name multiple phase for multi-stage workflows if requested
     escalation_debate:
         loops: 4
         rounds: 2
-        pass_history: true
+        pass_history: false
         persist: false
         oracle_persona: ""
         architect_persona: ""

@@ -18,11 +18,29 @@
 import hashlib
 import os
 import re
+import sys
+from typing import Optional
 
 from validator import _ledger_save, _normalize  # shared, dependency-free helpers
 
 _STATUS = "STATUS:"
 _GATE = "GATE:"
+
+EVALUATION_CONTRACT = (
+    "\n\n<evaluation_contract>\n"
+    "Critically evaluate the Architect's proposal in accordance with your persona guidelines. "
+    "Structure your response exactly as follows:\n"
+    "<critique>\n"
+    "[Step-by-step analysis of edge cases, logic flaws, and RAG grounding]\n"
+    "</critique>\n"
+    "VERDICT: [AGREE | REVISE | OBJECT - <reason>]\n"
+    "</evaluation_contract>"
+)
+
+PROPOSAL_TERMINAL_ANCHOR = (
+    "Conclude your response with EXACTLY this terminal line:\n"
+    "PROPOSAL: <one-line summary of resolution>"
+)
 
 
 def proposal_hash(text):
@@ -295,3 +313,81 @@ def save_ledger(path, data):
     if not path:
         return
     _ledger_save(path, data)
+
+
+def load_persona_or_instruct_files(
+    raw_val,
+    project_dir: Optional[str] = None,
+    resolve_fn=None,
+    label: str = "Persona",
+    strict: bool = False,
+) -> Optional[list[str]]:
+    """Resolve and load persona or instruction markdown files across debate rounds.
+
+    When strict=True (CLI debate), a missing file prints an error to stderr and returns None.
+    When strict=False (orchestrator), missing files are skipped.
+    """
+    if not raw_val:
+        return []
+    items = (
+        [str(f).strip() for f in raw_val if f is not None and str(f).strip()]
+        if isinstance(raw_val, (list, tuple))
+        else [f.strip() for f in str(raw_val).split(",") if f.strip()]
+    )
+    base_dir = str(project_dir) if project_dir else os.getcwd()
+
+    def _default_resolve(entry: str):
+        expanded = os.path.expanduser(entry)
+        cand_direct = (
+            expanded if os.path.isabs(expanded) else os.path.join(base_dir, expanded)
+        )
+        if os.path.isfile(cand_direct):
+            return os.path.normpath(cand_direct)
+        try:
+            try:
+                from run_workflow import resolve_template_path
+            except ImportError:
+                from aider_factory.python.run_workflow import resolve_template_path
+            cand = resolve_template_path(entry, project_directory=base_dir)
+            if cand and os.path.isfile(cand):
+                return cand
+        except Exception:
+            pass
+        return os.path.normpath(cand_direct)
+
+    resolver = resolve_fn or _default_resolve
+    contents = []
+    for entry in items:
+        resolved = resolver(entry)
+        if not resolved or not os.path.isfile(resolved):
+            if strict:
+                print(
+                    f"[oracle] Error: {label} file not found: {entry}", file=sys.stderr
+                )
+                return None
+            continue
+        try:
+            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+                contents.append(f.read().strip())
+        except Exception:
+            if strict:
+                print(
+                    f"[oracle] Error: {label} file not found: {entry}", file=sys.stderr
+                )
+                return None
+    return contents
+
+
+def has_remaining_round_configs(round_idx: int, *configs) -> bool:
+    """Return True if any multi-round configuration has entries beyond round_idx."""
+    for raw_val in configs:
+        if not raw_val:
+            continue
+        if isinstance(raw_val, (list, tuple)):
+            if len(raw_val) > round_idx:
+                return True
+        elif isinstance(raw_val, str) and "," in raw_val:
+            parts = [p.strip() for p in raw_val.split(",") if p.strip()]
+            if len(parts) > round_idx:
+                return True
+    return False

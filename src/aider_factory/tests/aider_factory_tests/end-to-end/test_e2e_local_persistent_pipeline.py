@@ -239,7 +239,7 @@ class TestE2ELocalPersistentPipeline(unittest.TestCase):
                     },
                     "escalation_debate": {
                         "loops": 3,
-                        "rounds": 1,
+                        "rounds": 2,
                         "pass_history": True,
                     },
                     "files": {
@@ -285,11 +285,32 @@ class TestE2ELocalPersistentPipeline(unittest.TestCase):
 
         logs_dir = os.path.join(".aider_factory", "logs")
         self.assertTrue(os.path.exists(logs_dir))
+        combined_output = (proc.stdout or "") + (proc.stderr or "")
         self.assertNotIn(
             "failed to load",
-            (proc.stdout or "") + (proc.stderr or ""),
+            combined_output,
             "Local cluster model failed to load during pipeline execution.",
         )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"Live pipeline exited with non-zero code {proc.returncode}:\n{combined_output[-2000:]}",
+        )
+
+        # Verify no debate session file duplicated <project_files> across rounds
+        sessions_root = os.path.join(".aider_factory", "sessions")
+        if os.path.isdir(sessions_root):
+            for root_dir, _, files in os.walk(sessions_root):
+                for fname in files:
+                    if fname.startswith(".oracle_debate_session") and fname.endswith(".json"):
+                        fpath = os.path.join(root_dir, fname)
+                        with open(fpath, "r", encoding="utf-8", errors="replace") as sf:
+                            raw_sess = sf.read()
+                        self.assertLessEqual(
+                            raw_sess.count("<project_files>"),
+                            1,
+                            f"Duplicate <project_files> found in {fpath}",
+                        )
         print("✅ Live Local Pipeline E2E Smoke Test completed.")
 
 

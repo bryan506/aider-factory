@@ -142,6 +142,18 @@ sudo apt install -y podman
 uv tool install --force git+https://github.com/bryan506/aider-factory.git
 ```
 
+#### Optional: Google Cloud Vertex AI Support (`vertex_ai/*`)
+
+If you use Google Cloud Vertex AI models, include `google-cloud-aiplatform` when installing or updating `aider-factory` (and `aider-chat` if installed as a standalone tool):
+
+```bash
+# Install or update aider-factory with Vertex AI support
+uv tool install --force --no-cache --with google-cloud-aiplatform git+https://github.com/bryan506/aider-factory.git
+
+# If aider-chat is also installed as a separate uv tool
+uv tool install --force --with google-cloud-aiplatform aider-chat
+```
+
 ### Editable Installation (For Developers)
 
 ```bash

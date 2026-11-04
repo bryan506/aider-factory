@@ -477,8 +477,10 @@ def test_legacy_multiline_aiderignore_and_gitignore_check_ignore():
         assert upgraded_git.index("temp/") < upgraded_git.index("!.aider_factory/temp/")
 
         # K=4 SHA-256 byte-level idempotency check
-        aider_digests = [hashlib.sha256(upgraded_aider.encode("utf-8")).hexdigest()]
-        git_digests = [hashlib.sha256(upgraded_git.encode("utf-8")).hexdigest()]
+        with open(ignore_path, "rb") as f:
+            aider_digests = [hashlib.sha256(f.read()).hexdigest()]
+        with open(gitignore_path, "rb") as f:
+            git_digests = [hashlib.sha256(f.read()).hexdigest()]
         for _ in range(3):
             cli._ensure_baseline_aiderignore(tmp_dir)
             cli._ensure_baseline_gitignore(tmp_dir)
@@ -693,6 +695,193 @@ def test_aiderignore_strip_and_fault_boundaries():
     print("✅ .aiderignore Strip & Fault Boundaries PASS")
 
 
+def test_render_workflow_yaml_template_cluster_config_and_phases():
+    import textwrap
+    from bootstrap import _render_workflow_yaml_template
+
+    sample_yaml = textwrap.dedent("""\
+        name: "Default Template"
+        working_directory: "/placeholder"
+        test_command_prefix: ""
+        test_runner: "pytest {file}"
+        test_naming_and_path: "tests/test_{stem}.py"
+        endpoints:
+            architect_api_base: "http://<your-router-host>:4000/v1"
+            editor_api: "http://<your-router-host>:4000/v1"
+            rag_agent_api: "http://<your-router-host>:4000/v1"
+            grounding_agent_api: "http://<your-router-host>:4000/v1"
+            ranking_api_base: null
+            ocr_api_base: "http://<your-router-host>:4000/v1"
+            embed_api_base: "http://<your-router-host>:4000/v1"
+        models:
+            architect_agent: "default-arch"
+            editor_agent: "default-ed"
+            editor_agent_test: "default-ed-test"
+            editor_agent_test_fallback: "default-ed-fb"
+        phases:
+          - name: "Phase 1: Plan"
+            target_files: []
+            context_files_job: []
+          - name: "Phase 2: Execute"
+            target_files: []
+            context_files_job: []
+    """)
+
+    cluster_cfg = {
+        "architect_api_base": "http://10.10.0.1:4000/v1",
+        "editor_api": "http://10.10.0.2:4000/v1",
+        "rag_agent_api": "http://10.10.0.3:4000/v1",
+        "architect_agent": "openai/deepseek-r1",
+        "editor_agent": "openai/qwen-coder-32b",
+    }
+    rendered = _render_workflow_yaml_template(
+        sample_yaml,
+        name="Cluster Quickstart Pipeline",
+        working_directory="C:\\work\\project",
+        cluster_config=cluster_cfg,
+        target_file="app.py",
+        context_files=["README.md"],
+    )
+
+    assert rendered.count('name: "Cluster Quickstart Pipeline"') == 1
+    assert '- name: "Phase 1: Plan"' in rendered
+    assert '- name: "Phase 2: Execute"' in rendered
+    assert 'working_directory: "C:/work/project"' in rendered
+    assert 'architect_api_base: "http://10.10.0.1:4000/v1"' in rendered
+    assert 'editor_api: "http://10.10.0.2:4000/v1"' in rendered
+    assert 'rag_agent_api: "http://10.10.0.3:4000/v1"' in rendered
+    assert 'grounding_agent_api: "http://<your-router-host>:4000/v1"' in rendered
+    assert 'ocr_api_base: "http://<your-router-host>:4000/v1"' in rendered
+    assert 'embed_api_base: "http://<your-router-host>:4000/v1"' in rendered
+    assert 'architect_agent: "openai/deepseek-r1"' in rendered
+    assert 'editor_agent: "openai/qwen-coder-32b"' in rendered
+    assert 'editor_agent_test: "openai/qwen-coder-32b"' in rendered
+    assert 'editor_agent_test_fallback: "openai/deepseek-r1"' in rendered
+
+    # Verify default editor_agent fallback when editor_agent is omitted from cluster_config
+    rendered_arch_only = _render_workflow_yaml_template(
+        sample_yaml,
+        name="Arch Only Pipeline",
+        working_directory="/work/project",
+        cluster_config={"architect_agent": "openai/qwen3-27b"},
+    )
+    assert 'architect_agent: "openai/qwen3-27b"' in rendered_arch_only
+    assert 'editor_agent: "openai/qwen3-27b"' in rendered_arch_only
+    assert 'editor_agent_test: "openai/qwen3-27b"' in rendered_arch_only
+    assert 'editor_agent_test_fallback: "openai/qwen3-27b"' in rendered_arch_only
+    print("✅ Render Workflow YAML Template Cluster Config & Phases PASS")
+
+
+@patch("cli.ensure_searxng_service")
+@patch("cli.ensure_bash_wrappers")
+@patch("subprocess.run")
+def test_init_cluster_config_exception_resilience_and_test_file_exclusion(
+    mock_sub, mock_bash, mock_searxng
+):
+    import bootstrap
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        original_cwd = os.getcwd()
+        os.chdir(tmp_dir)
+        try:
+            # Create only test harness files at repo root; init_user_project must skip them
+            with open(os.path.join(tmp_dir, "test.py"), "w", encoding="utf-8") as f:
+                f.write("def test_root(): assert True\n")
+            with open(os.path.join(tmp_dir, "conftest.py"), "w", encoding="utf-8") as f:
+                f.write("# pytest conftest\n")
+
+            # First verify run_bootstrap on a directory with only test files leaves target_files: []
+            with patch.object(
+                bootstrap, "detect_api_key", return_value=(None, None)
+            ), patch("cli.init_user_project"):
+                bootstrap.run_bootstrap(tmp_dir)
+
+            repo_name = os.path.basename(tmp_dir).strip().replace(" ", "_")
+            bootstrap_yaml = os.path.join(
+                tmp_dir, ".aider_factory", f".env_{repo_name}.yml"
+            )
+            with open(bootstrap_yaml, "r", encoding="utf-8") as f:
+                boot_content = f.read()
+            assert "target_files: []" in boot_content
+            os.remove(os.path.join(tmp_dir, ".aider_factory", ".env_plan_do.yml"))
+
+            # Now verify init_user_project survives _discover_cluster_config raising an exception
+            # and creates scratchpad.py rather than picking test.py or conftest.py
+            with patch.object(
+                bootstrap,
+                "_discover_cluster_config",
+                side_effect=RuntimeError("router probe failure"),
+            ):
+                cli.init_user_project(tmp_dir)
+
+            assert os.path.isfile(os.path.join(tmp_dir, "scratchpad.py"))
+            env_yaml = os.path.join(tmp_dir, ".aider_factory", ".env.yml")
+            plan_do_yaml = os.path.join(tmp_dir, ".aider_factory", ".env_plan_do.yml")
+            assert os.path.isfile(env_yaml)
+            assert os.path.isfile(plan_do_yaml)
+
+            with open(env_yaml, "r", encoding="utf-8") as f:
+                env_content = f.read()
+            assert 'target_files:\n        - "scratchpad.py"' in env_content
+            assert "test.py" not in env_content
+            assert "conftest.py" not in env_content
+            assert "context_files_job: []" in env_content
+
+            leftover_tmp = [
+                fn
+                for fn in os.listdir(os.path.join(tmp_dir, ".aider_factory"))
+                if fn.endswith(".tmp")
+            ]
+            assert leftover_tmp == []
+        finally:
+            os.chdir(original_cwd)
+    print("✅ Cluster Config Exception Resilience & Test File Exclusion PASS")
+
+
+def test_cli_and_env_utils_is_test_path_superset_parity():
+    from env_utils import atomic_write_text, is_test_path
+
+    parity_vectors = [
+        ("test.py", True),
+        ("tests.py", True),
+        ("src/test.rs", True),
+        ("src/tests.rs", True),
+        ("src/setupTests.ts", True),
+        ("src/setuptests.js", True),
+        ("conftest.py", True),
+        ("app/domain/contest.py", False),
+        ("frontend/lib/latest.ts", False),
+        ("README.md", False),
+        ("", False),
+        (".", False),
+        ("./test.py", True),
+        ("/test.py", True),
+        (None, False),
+    ]
+    for rel_path, expected in parity_vectors:
+        assert is_test_path(rel_path) is expected, f"is_test_path({rel_path!r}) != {expected}"
+        assert cli._is_test_path(rel_path) is expected, f"_is_test_path({rel_path!r}) != {expected}"
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        target_file = os.path.join(tmp_dir, "sub", "atomic.yml")
+        atomic_write_text(target_file, 'name: "ok"\n')
+        with open(target_file, "r", encoding="utf-8") as f:
+            assert f.read() == 'name: "ok"\n'
+
+        with patch("os.replace", side_effect=OSError("simulated replace failure")):
+            try:
+                atomic_write_text(target_file, 'name: "fail"\n')
+                assert False, "Expected OSError from atomic_write_text"
+            except OSError:
+                pass
+
+        leftover_tmp = [
+            fn for fn in os.listdir(os.path.join(tmp_dir, "sub")) if fn.endswith(".tmp")
+        ]
+        assert leftover_tmp == []
+    print("✅ CLI and env_utils is_test_path Superset Parity & Atomic Write PASS")
+
+
 if __name__ == "__main__":
     test_init_empty_dir_creates_scratchpad()
     test_init_discovers_existing_files()
@@ -711,4 +900,7 @@ if __name__ == "__main__":
     test_legacy_multiline_aiderignore_and_gitignore_check_ignore()
     test_orchestrate_task_aiderignore_isolation()
     test_aiderignore_strip_and_fault_boundaries()
+    test_render_workflow_yaml_template_cluster_config_and_phases()
+    test_init_cluster_config_exception_resilience_and_test_file_exclusion()
+    test_cli_and_env_utils_is_test_path_superset_parity()
     print("\n🎉 All CLI Quickstart Unit Tests Passed!")

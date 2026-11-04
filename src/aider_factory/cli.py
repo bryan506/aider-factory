@@ -14,11 +14,15 @@ if python_dir not in sys.path:
     sys.path.insert(0, python_dir)
 
 try:
-    from aider_factory.python.env_utils import load_env_files
+    from aider_factory.python.env_utils import (
+        atomic_write_text,
+        is_test_path,
+        load_env_files,
+    )
 except ImportError:
     # This block handles local development where aider_factory.python might not be a package
     # but env_utils is directly available in the PYTHONPATH.
-    from env_utils import load_env_files
+    from env_utils import atomic_write_text, is_test_path, load_env_files
 
 _load_env_files = load_env_files
 
@@ -103,43 +107,6 @@ Cargo.lock
 {AIDERIGNORE_STRATEGY_NEGATION}
 """
 
-TEST_DIR_NAMES = frozenset(
-    {
-        "test",
-        "tests",
-        "testing",
-        "testthat",
-        "__tests__",
-        "spec",
-        "specs",
-        "e2e",
-        "end-to-end",
-        "fixtures",
-        "testdata",
-        "test_fixtures",
-        "benchmarks",
-        "benches",
-    }
-)
-
-# 1. Delimited test patterns (case-insensitive) - requires delimiter boundary
-TEST_DELIMITED_RE = re.compile(
-    r"(^|/)((tests?|specs?|unit_?tests?)[_\-\.][^/]+|.+[_\-\.](tests?|specs?|unit_?tests?)\.[^/]+)$",
-    re.IGNORECASE,
-)
-
-# 2. Exact test harness & fixture files (case-insensitive)
-TEST_EXACT_RE = re.compile(
-    r"(^|/)(conftest\.py|tests?\.py|tests?\.rs|test_helper\.rb|setupTests\.[^/]+)$",
-    re.IGNORECASE,
-)
-
-# 3. CamelCase test classes (case-sensitive to avoid matching contest.java, latest.ts, etc.)
-TEST_CAMEL_RE = re.compile(
-    r"(^|/)[a-zA-Z0-9_]*(Test|Tests|TestCase|Spec)\.[a-zA-Z0-9]+$"
-)
-
-
 def _ensure_git_repo(cwd: str):
     """Ensure git repository is initialized with default user config for Aider."""
     git_dir = os.path.join(cwd, ".git")
@@ -167,24 +134,7 @@ def _ensure_git_repo(cwd: str):
 
 def _is_test_path(rel_path: str) -> bool:
     """Classify whether a normalized relative path is a test file or inside a test directory."""
-    clean_path = rel_path.replace("\\", "/").strip("/")
-    if not clean_path:
-        return False
-    parts = clean_path.split("/")
-    # 1. Directory component check
-    for p in parts[:-1]:
-        if p.lower() in TEST_DIR_NAMES:
-            return True
-    # 2. Delimited pattern check (test_*.py, *.test.tsx, *-test.R)
-    if TEST_DELIMITED_RE.search(clean_path):
-        return True
-    # 3. Exact filename check (conftest.py, tests.rs)
-    if TEST_EXACT_RE.search(clean_path):
-        return True
-    # 4. CamelCase class check (UserTest.java, AuthSpec.scala)
-    if TEST_CAMEL_RE.search(clean_path):
-        return True
-    return False
+    return is_test_path(rel_path)
 
 
 def _read_user_aiderignore(cwd: str) -> list[str]:
@@ -806,8 +756,33 @@ def init_user_project(cwd=None):
         if os.path.exists(src_runner) and not os.path.exists(dst_runner):
             shutil.copy(src_runner, dst_runner)
 
+    python_dir = os.path.join(pkg_dir, "python")
+    if python_dir not in sys.path:
+        sys.path.insert(0, python_dir)
+    from bootstrap import (
+        _detect_framework,
+        _discover_cluster_config,
+        _ensure_test_dir_and_path,
+        _render_workflow_yaml_template,
+    )
+
+    plan_do_template = os.path.join(
+        default_configs_dir, "sample_yaml_config", "env_plan_do.yml"
+    )
+    need_env_yaml = not os.path.exists(local_env_yaml)
+    need_plan_do_yaml = not os.path.exists(local_env_plan_do_yaml) and os.path.exists(
+        plan_do_template
+    )
+
+    cluster_config = None
+    if need_env_yaml or need_plan_do_yaml:
+        try:
+            cluster_config = _discover_cluster_config()
+        except Exception:
+            cluster_config = None
+
     # 1. Create .env.yml inside .aider_factory/ if missing (zero-clutter workspace)
-    if not os.path.exists(local_env_yaml):
+    if need_env_yaml:
         print(
             f"📦 First run detected! Initializing default '.env.yml' in {local_aider_factory_dir}..."
         )
@@ -817,20 +792,15 @@ def init_user_project(cwd=None):
         ) as f:
             content = f.read()
 
-        # Standardized dynamic instantiation
-        content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{sensible_name}"', content)
-        cwd_forward = cwd.replace("\\", "/")
-        content = re.sub(
-            r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd_forward}"', content
-        )
-
         # Quickstart: Auto-discover a target file and context file
+        cwd_entries = sorted(os.listdir(cwd))
         target_file = None
         for ext in [".py", ".R", ".js", ".ts", ".go", ".rs", ".md", ".txt"]:
-            for f in os.listdir(cwd):
+            for f in cwd_entries:
                 if (
                     f.endswith(ext)
                     and not f.startswith(".")
+                    and not _is_test_path(f)
                     and os.path.isfile(os.path.join(cwd, f))
                 ):
                     target_file = f
@@ -840,16 +810,18 @@ def init_user_project(cwd=None):
 
         if not target_file:
             target_file = "scratchpad.py"
-            with open(os.path.join(cwd, target_file), "w", encoding="utf-8") as f:
-                f.write("# Quickstart scratchpad\n")
+            atomic_write_text(
+                os.path.join(cwd, target_file), "# Quickstart scratchpad\n"
+            )
 
         context_file = None
         for ext in [".md", ".txt", ".py", ".R"]:
-            for f in os.listdir(cwd):
+            for f in cwd_entries:
                 if (
                     f.endswith(ext)
                     and not f.startswith(".")
                     and f != target_file
+                    and not _is_test_path(f)
                     and os.path.isfile(os.path.join(cwd, f))
                 ):
                     context_file = f
@@ -857,74 +829,19 @@ def init_user_project(cwd=None):
             if context_file:
                 break
 
-        content = re.sub(
-            r"target_files:\s*\[\]", lambda _: f'target_files:\n        - "{target_file}"', content
+        content = _render_workflow_yaml_template(
+            content,
+            name=sensible_name,
+            working_directory=cwd,
+            cluster_config=cluster_config,
+            target_file=target_file,
+            context_files=[context_file] if context_file else None,
         )
-        if context_file:
-            content = re.sub(
-                r"context_files_job:\s*\[\]",
-                lambda _: f'context_files_job:\n        - "{context_file}"',
-                content,
-            )
 
-        # Quickstart: Auto-discover cluster configuration
-        try:
-            python_dir = os.path.join(pkg_dir, "python")
-            if python_dir not in sys.path:
-                sys.path.insert(0, python_dir)
-            from bootstrap import _discover_cluster_config
-
-            cluster_config = _discover_cluster_config()
-            if cluster_config:
-                content = re.sub(
-                    r'architect_api_base:\s*".*?"',
-                    lambda _: f'architect_api_base: "{cluster_config["architect_api_base"]}"',
-                    content,
-                )
-                content = re.sub(
-                    r'editor_api:\s*".*?"',
-                    lambda _: f'editor_api: "{cluster_config["editor_api"]}"',
-                    content,
-                )
-                content = re.sub(
-                    r'rag_agent_api:\s*".*?"',
-                    lambda _: f'rag_agent_api: "{cluster_config["rag_agent_api"]}"',
-                    content,
-                )
-                if "architect_agent" in cluster_config:
-                    content = re.sub(
-                        r'architect_agent:\s*".*?"',
-                        lambda _: f'architect_agent: "{cluster_config["architect_agent"]}"',
-                        content,
-                    )
-                    content = re.sub(
-                        r'editor_agent:\s*".*?"',
-                        lambda _: f'editor_agent: "{cluster_config["editor_agent"]}"',
-                        content,
-                    )
-                    content = re.sub(
-                        r'editor_agent_test:\s*".*?"',
-                        lambda _: f'editor_agent_test: "{cluster_config["editor_agent"]}"',
-                        content,
-                    )
-                    content = re.sub(
-                        r'editor_agent_test_fallback:\s*".*?"',
-                        lambda _: f'editor_agent_test_fallback: "{cluster_config["architect_agent"]}"',
-                        content,
-                    )
-        except Exception:
-            pass
-
-        with open(local_env_yaml, "w", encoding="utf-8") as f:
-            f.write(content)
+        atomic_write_text(local_env_yaml, content)
 
     # 1b. Discover or create top-level test directory and provision .env_plan_do.yml if missing
     try:
-        python_dir = os.path.join(pkg_dir, "python")
-        if python_dir not in sys.path:
-            sys.path.insert(0, python_dir)
-        from bootstrap import _detect_framework, _ensure_test_dir_and_path
-
         fw_name, fw_runner, fw_path, fw_prefix = _detect_framework(cwd)
         resolved_test_path = _ensure_test_dir_and_path(cwd, fw_name, fw_path)
     except Exception:
@@ -936,89 +853,22 @@ def init_user_project(cwd=None):
             "",
         )
 
-    plan_do_template = os.path.join(
-        default_configs_dir, "sample_yaml_config", "env_plan_do.yml"
-    )
-    if not os.path.exists(local_env_plan_do_yaml) and os.path.exists(plan_do_template):
+    if need_plan_do_yaml:
         sensible_plan_name = f"{os.path.basename(cwd).replace('_', ' ').replace('-', ' ').title()} Plan-Do Pipeline"
         with open(plan_do_template, "r", encoding="utf-8") as f:
             plan_do_content = f.read()
 
-        plan_do_content = re.sub(
-            r'name:\s*".*?"',
-            lambda _: f'name: "{sensible_plan_name}"',
+        plan_do_content = _render_workflow_yaml_template(
             plan_do_content,
-            count=1,
-        )
-        cwd_forward = cwd.replace("\\", "/")
-        plan_do_content = re.sub(
-            r'working_directory:\s*".*?"',
-            lambda _: f'working_directory: "{cwd_forward}"',
-            plan_do_content,
-            count=1,
-        )
-        plan_do_content = re.sub(
-            r'test_command_prefix:\s*".*?"',
-            lambda _: f'test_command_prefix: "{fw_prefix}"',
-            plan_do_content,
-        )
-        plan_do_content = re.sub(
-            r'test_runner:\s*".*?"',
-            lambda _: f'test_runner: "{fw_runner}"',
-            plan_do_content,
-        )
-        plan_do_content = re.sub(
-            r'test_naming_and_path:\s*".*?"',
-            lambda _: f'test_naming_and_path: "{resolved_test_path}"',
-            plan_do_content,
+            name=sensible_plan_name,
+            working_directory=cwd,
+            test_command_prefix=fw_prefix,
+            test_runner=fw_runner,
+            test_naming_and_path=resolved_test_path,
+            cluster_config=cluster_config,
         )
 
-        try:
-            from bootstrap import _discover_cluster_config
-
-            cluster_config = _discover_cluster_config()
-            if cluster_config:
-                plan_do_content = re.sub(
-                    r'architect_api_base:\s*".*?"',
-                    lambda _: f'architect_api_base: "{cluster_config["architect_api_base"]}"',
-                    plan_do_content,
-                )
-                plan_do_content = re.sub(
-                    r'editor_api:\s*".*?"',
-                    lambda _: f'editor_api: "{cluster_config["editor_api"]}"',
-                    plan_do_content,
-                )
-                plan_do_content = re.sub(
-                    r'rag_agent_api:\s*".*?"',
-                    lambda _: f'rag_agent_api: "{cluster_config["rag_agent_api"]}"',
-                    plan_do_content,
-                )
-                if "architect_agent" in cluster_config:
-                    plan_do_content = re.sub(
-                        r'architect_agent:\s*".*?"',
-                        lambda _: f'architect_agent: "{cluster_config["architect_agent"]}"',
-                        plan_do_content,
-                    )
-                    plan_do_content = re.sub(
-                        r'editor_agent:\s*".*?"',
-                        lambda _: f'editor_agent: "{cluster_config["editor_agent"]}"',
-                        plan_do_content,
-                    )
-                    plan_do_content = re.sub(
-                        r'editor_agent_test:\s*".*?"',
-                        lambda _: f'editor_agent_test: "{cluster_config["editor_agent"]}"',
-                        plan_do_content,
-                    )
-                    plan_do_content = re.sub(
-                        r'editor_agent_test_fallback:\s*".*?"',
-                        lambda _: f'editor_agent_test_fallback: "{cluster_config["architect_agent"]}"',
-                        plan_do_content,
-                    )
-        except Exception:
-            pass
-
-        with open(local_env_plan_do_yaml, "w", encoding="utf-8") as f:
-            f.write(plan_do_content)
+        atomic_write_text(local_env_plan_do_yaml, plan_do_content)
 
     # 2. Create or upgrade .aiderignore and .gitignore at root
     if not os.path.exists(local_aider_ignore):

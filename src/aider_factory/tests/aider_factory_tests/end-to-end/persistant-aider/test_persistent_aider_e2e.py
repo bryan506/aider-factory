@@ -50,6 +50,7 @@ def test_persistent_aider_smoke():
         phase["models"]["rag_agent"] = "gemini/gemini-3.8-flash"
         phase["toggles"]["pair_programming"] = True
         phase["toggles"]["run_job_one"] = True
+        phase["toggles"]["iterate_test"] = True
         phase["escalation_debate"]["loops"] = 1
         phase["escalation_debate"]["rounds"] = 1
 
@@ -57,11 +58,17 @@ def test_persistent_aider_smoke():
             yaml.safe_dump(cfg, f, sort_keys=False)
 
         env = os.environ.copy()
+        for k in list(env.keys()):
+            if k.startswith("AI_FACTORY_") or k.startswith("ORACLE_"):
+                env.pop(k, None)
         python_path = os.pathsep.join(
             [repo_root, src_dir, pkg_dir, os.path.join(pkg_dir, "python")]
         )
         env["PYTHONPATH"] = python_path
         env["AI_FACTORY_SESSION"] = "persistent_smoke"
+        env["AI_FACTORY_CONFIG"] = env_yml_path
+        env["SHELL"] = shutil.which("bash") or "/bin/sh"
+        env["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
         if sys.platform != "win32":
             import pty
@@ -87,6 +94,12 @@ def test_persistent_aider_smoke():
                         if not data:
                             break
                         text = data.decode("utf-8", errors="replace")
+                        if "\x1b[6n" in text:
+                            try:
+                                os.write(master_fd, b"\x1b[1;1R")
+                            except OSError:
+                                pass
+                            text = text.replace("\x1b[6n", "")
                         sys.stdout.write(text)
                         sys.stdout.flush()
                         clean = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", text)
@@ -115,7 +128,7 @@ def test_persistent_aider_smoke():
                 [sys.executable, cli_path, "persistent_smoke"],
                 cwd=tmp_dir,
                 env=env,
-                input="/exit\n/exit\n",
+                input="/exit\n/exit\n/exit\n",
                 text=True,
                 timeout=300,
             )

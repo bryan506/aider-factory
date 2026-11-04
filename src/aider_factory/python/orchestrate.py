@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # orchestrate.py
 
+import contextlib
 import datetime
 import logging
 import os
@@ -31,6 +32,37 @@ log = logging.getLogger(__name__)
 _ARCH_COLOR = os.environ.get("PIPELINE_COLOR_ARCHITECT", "\033[38;2;56;189;248m")
 _ORACLE_COLOR = os.environ.get("PIPELINE_COLOR_ORACLE", "\033[38;2;211;134;155m")
 _RESET = "\033[0m"
+
+
+class _ScopedEnv(contextlib.ContextDecorator):
+    """Context manager and decorator that snapshots and restores ORACLE_* os.environ keys."""
+
+    _ORACLE_ENV_KEYS = (
+        "ORACLE_AGENT_MODEL",
+        "ORACLE_AGENT_API_BASE",
+        "ORACLE_ARCHITECT_MODEL",
+        "ORACLE_ARCHITECT_API_BASE",
+        "ORACLE_REASONING_EFFORT",
+        "ORACLE_TEMPERATURE",
+    )
+
+    def __init__(self, keys: Optional[tuple[str, ...]] = None):
+        self._keys = tuple(keys) if keys is not None else self._ORACLE_ENV_KEYS
+        self._stack: list[dict[str, Optional[str]]] = []
+
+    def __enter__(self):
+        self._stack.append({k: os.environ.get(k) for k in self._keys})
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._stack:
+            saved = self._stack.pop()
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        return False
 
 
 class TaskStatus(Enum):
@@ -699,21 +731,8 @@ class AiderFactory:
                 else (root_aider_conf if os.path.exists(root_aider_conf) else None)
             )
 
-            session_aider_settings = os.path.join(
-                str(self.session_dir), ".aider.model.settings.yml"
-            )
-            local_aider_factory_settings = os.path.join(
-                root, ".aider_factory", ".aider.model.settings.yml"
-            )
-            root_aider_settings = os.path.join(root, ".aider.model.settings.yml")
-            aider_settings = (
-                session_aider_settings
-                if os.path.exists(session_aider_settings)
-                else (
-                    local_aider_factory_settings
-                    if os.path.exists(local_aider_factory_settings)
-                    else (root_aider_settings if os.path.exists(root_aider_settings) else None)
-                )
+            resolved_weak_model, resolved_weak_api_base, aider_settings = (
+                self._resolve_weak_model_settings(task)
             )
 
             chat_hist = os.path.join(str(self.session_dir), ".aider.chat.history.md")
@@ -760,8 +779,8 @@ class AiderFactory:
 
             if aider_conf:
                 cmd.extend(["--config", aider_conf])
-            if task.weak_model:
-                cmd.extend(["--weak-model", task.weak_model])
+            if resolved_weak_model:
+                cmd.extend(["--weak-model", resolved_weak_model])
             if aider_settings:
                 cmd.extend(["--model-settings-file", aider_settings])
             task_aiderignore = self._resolve_task_aiderignore(task, ask_mode=True)
@@ -808,9 +827,14 @@ class AiderFactory:
                     env["LM_STUDIO_API_KEY"] = _router_key
                 elif "LM_STUDIO_API_KEY" not in env:
                     env["LM_STUDIO_API_KEY"] = "sk-dummy"
-            if task.weak_model and is_local_model(task.weak_model) and task.weak_model_api_base and is_valid_endpoint(task.weak_model_api_base):
-                env["WEAK_MODEL_API_BASE"] = task.weak_model_api_base
-                env["AIDER_WEAK_MODEL_API_BASE"] = task.weak_model_api_base
+            if (
+                resolved_weak_model
+                and is_local_model(resolved_weak_model)
+                and resolved_weak_api_base
+                and is_valid_endpoint(resolved_weak_api_base)
+            ):
+                env["WEAK_MODEL_API_BASE"] = resolved_weak_api_base
+                env["AIDER_WEAK_MODEL_API_BASE"] = resolved_weak_api_base
             print(f"\n{_ARCH_COLOR}┌── architect {label} ──", flush=True)
             if sys.platform == "win32":
                 try:
@@ -831,6 +855,7 @@ class AiderFactory:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    errors="replace",
                     bufsize=1,
                     **popen_kwargs,
                 )
@@ -885,6 +910,8 @@ class AiderFactory:
                 raise
             finally:
                 watchdog.cancel()
+                if proc.poll() is None:
+                    kill_proc_tree(proc)
                 print(_RESET, end="", flush=True)
 
             if timed_out.is_set():
@@ -895,8 +922,12 @@ class AiderFactory:
             return self._extract_assistant_text(self._strip_thinking("".join(chars)))
         finally:
             try:
-                if os.path.exists(prompt_file.name):
-                    os.unlink(prompt_file.name)
+                prompt_file.close()
+            except Exception:
+                pass
+            try:
+                if os.path.exists(prompt_file_path):
+                    os.unlink(prompt_file_path)
             except OSError:
                 pass
 
@@ -914,6 +945,7 @@ class AiderFactory:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            errors="replace",
             **popen_kwargs,
         )
         try:
@@ -925,10 +957,33 @@ class AiderFactory:
             kill_proc_tree(proc)
             self.last_test_result[cache_key] = False
             return False, "(gate timed out after 300s)"
+        except KeyboardInterrupt:
+            kill_proc_tree(proc)
+            raise
         except Exception as e:
             kill_proc_tree(proc)
             self.last_test_result[cache_key] = False
             return False, f"(gate error: {e})"
+        finally:
+            if proc.poll() is None:
+                kill_proc_tree(proc)
+
+    def _apply_oracle_model_env(self, task: "Task", target_env) -> None:
+        """Populate ORACLE_AGENT_* and ORACLE_ARCHITECT_* in target_env with local-model guards."""
+        if task.editor_model and "ORACLE_AGENT_MODEL" not in target_env:
+            target_env["ORACLE_AGENT_MODEL"] = task.editor_model
+        if is_local_model(target_env.get("ORACLE_AGENT_MODEL")):
+            if task.editor_api_base and "ORACLE_AGENT_API_BASE" not in target_env:
+                target_env["ORACLE_AGENT_API_BASE"] = task.editor_api_base
+        else:
+            target_env.pop("ORACLE_AGENT_API_BASE", None)
+        if task.model and "ORACLE_ARCHITECT_MODEL" not in target_env:
+            target_env["ORACLE_ARCHITECT_MODEL"] = task.model
+        if is_local_model(target_env.get("ORACLE_ARCHITECT_MODEL")):
+            if task.architect_api_base and "ORACLE_ARCHITECT_API_BASE" not in target_env:
+                target_env["ORACLE_ARCHITECT_API_BASE"] = task.architect_api_base
+        else:
+            target_env.pop("ORACLE_ARCHITECT_API_BASE", None)
 
     def _oracle_turn(
         self,
@@ -954,20 +1009,7 @@ class AiderFactory:
         env = {**os.environ, **(task.rag_env or {})}
         if d.get("read_files"):
             env.pop("ORACLE_CONTEXT_FILES", None)
-        if task.editor_model and "ORACLE_AGENT_MODEL" not in env:
-            env["ORACLE_AGENT_MODEL"] = task.editor_model
-        if is_local_model(env.get("ORACLE_AGENT_MODEL")):
-            if task.editor_api_base and "ORACLE_AGENT_API_BASE" not in env:
-                env["ORACLE_AGENT_API_BASE"] = task.editor_api_base
-        else:
-            env.pop("ORACLE_AGENT_API_BASE", None)
-        if task.model and "ORACLE_ARCHITECT_MODEL" not in env:
-            env["ORACLE_ARCHITECT_MODEL"] = task.model
-        if is_local_model(env.get("ORACLE_ARCHITECT_MODEL")):
-            if task.architect_api_base and "ORACLE_ARCHITECT_API_BASE" not in env:
-                env["ORACLE_ARCHITECT_API_BASE"] = task.architect_api_base
-        else:
-            env.pop("ORACLE_ARCHITECT_API_BASE", None)
+        self._apply_oracle_model_env(task, env)
 
         # Route the oracle to a debate-specific session file (survives apply-phase cleanup).
         _sf = d.get("oracle_session_file")
@@ -979,43 +1021,52 @@ class AiderFactory:
 
         # The oracle's judging role differs by debate mode: grounding cites verbatim source
         # for quotes; code cites reference code/patterns for a fix. Both end with a VERDICT line.
+        import deliberate
+
         custom_persona = d.get("custom_persona_prompt")
-        terminal_contract = (
-            "\n\n<evaluation_contract>\n"
-            "Critically evaluate the Architect's proposal in accordance with your persona guidelines. "
-            "Structure your response exactly as follows:\n"
-            "<critique>\n"
-            "[Step-by-step analysis of edge cases, logic flaws, and RAG grounding]\n"
-            "</critique>\n"
-            "VERDICT: [AGREE | REVISE | OBJECT - <reason>]\n"
-            "</evaluation_contract>"
-        )
+        terminal_contract = deliberate.EVALUATION_CONTRACT
+
+        def _turn0_project_files_xml() -> str:
+            if turn:
+                return ""
+            if _sf and os.path.isfile(_sf):
+                try:
+                    import json
+
+                    with open(_sf, "r", encoding="utf-8", errors="replace") as _sf_fh:
+                        _sess_msgs = json.load(_sf_fh)
+                    if isinstance(_sess_msgs, dict):
+                        _sess_msgs = _sess_msgs.get("messages")
+                    if isinstance(_sess_msgs, list) and len(_sess_msgs) > 1:
+                        return ""
+                except Exception:
+                    pass
+            _files = []
+            for _rf in d.get("read_files") or []:
+                _full = (
+                    _rf
+                    if os.path.isabs(_rf)
+                    else os.path.join(self.project_dir, _rf)
+                )
+                if os.path.isfile(_full):
+                    try:
+                        with open(_full, encoding="utf-8", errors="replace") as _fh:
+                            _files.append(f"File: {_rf}\n```\n{_fh.read()}\n```")
+                    except Exception:
+                        pass
+            if not _files:
+                return ""
+            return "<project_files>\n" + "\n\n".join(_files) + "\n</project_files>"
 
         if pre_assess_prompt:
             prompt = pre_assess_prompt
             # Code mode: append the full file contents to the pre-assessment
             # prompt so the oracle sees the same source files the architect
             # reads via --read.
-            if d.get("mode") == "code" and not turn:
-                _files = []
-                for _rf in d.get("read_files") or []:
-                    _full = (
-                        _rf
-                        if os.path.isabs(_rf)
-                        else os.path.join(self.project_dir, _rf)
-                    )
-                    if os.path.isfile(_full):
-                        try:
-                            with open(_full, encoding="utf-8") as _fh:
-                                _files.append(f"File: {_rf}\n```\n{_fh.read()}\n```")
-                        except Exception:
-                            pass
-                if _files:
-                    prompt += (
-                        "\n\n<project_files>\n"
-                        + "\n\n".join(_files)
-                        + "\n</project_files>"
-                    )
+            if d.get("mode") == "code":
+                _pf_xml = _turn0_project_files_xml()
+                if _pf_xml:
+                    prompt += "\n\n" + _pf_xml
             if custom_persona:
                 prompt = f"## Custom Persona Directives\n{custom_persona}\n\n{prompt}"
         elif d.get("mode") == "code":
@@ -1030,24 +1081,9 @@ class AiderFactory:
                 )
 
             # Pass the full file contents ONLY on Turn 1 to warm up Oracle's KV cache.
-            if not turn:
-                _files = []
-                for _rf in d.get("read_files") or []:
-                    _full = (
-                        _rf
-                        if os.path.isabs(_rf)
-                        else os.path.join(self.project_dir, _rf)
-                    )
-                    if os.path.isfile(_full):
-                        try:
-                            with open(_full, encoding="utf-8") as _fh:
-                                _files.append(f"File: {_rf}\n```\n{_fh.read()}\n```")
-                        except Exception:
-                            pass
-                if _files:
-                    _ctx.append(
-                        "<project_files>\n" + "\n\n".join(_files) + "\n</project_files>"
-                    )
+            _pf_xml = _turn0_project_files_xml()
+            if _pf_xml:
+                _ctx.append(_pf_xml)
             _ctx_block = ("\n\n" + "\n\n".join(_ctx)) if _ctx else ""
 
             base_prompt = (
@@ -1071,27 +1107,10 @@ class AiderFactory:
                     + "\n</architect_proposal>"
                 )
         else:
-            _file_ctx = []
-            if not turn:
-                for _rf in d.get("read_files") or []:
-                    _full = (
-                        _rf
-                        if os.path.isabs(_rf)
-                        else os.path.join(self.project_dir, _rf)
-                    )
-                    if os.path.isfile(_full):
-                        try:
-                            with open(_full, encoding="utf-8") as _fh:
-                                _file_ctx.append(f"File: {_rf}\n```\n{_fh.read()}\n```")
-                        except Exception:
-                            pass
+            _pf_xml = _turn0_project_files_xml()
             _file_block = (
-                (
-                    "\n\n<project_files>\n"
-                    + "\n\n".join(_file_ctx)
-                    + "\n</project_files>"
-                )
-                if _file_ctx
+                ("\n\n" + _pf_xml)
+                if _pf_xml
                 else ""
             )
 
@@ -1146,6 +1165,7 @@ class AiderFactory:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                errors="replace",
                 timeout=300,
             )
         except subprocess.TimeoutExpired:
@@ -1156,8 +1176,12 @@ class AiderFactory:
             return f"VERDICT: OBJECT - oracle error: {e}"
         finally:
             try:
-                if os.path.exists(prompt_file.name):
-                    os.unlink(prompt_file.name)
+                prompt_file.close()
+            except Exception:
+                pass
+            try:
+                if os.path.exists(prompt_file_path):
+                    os.unlink(prompt_file_path)
             except OSError:
                 pass
         if p.returncode != 0:
@@ -1192,6 +1216,7 @@ class AiderFactory:
             )
         return out
 
+    @_ScopedEnv()
     def _run_deliberation(self, task: "Task") -> bool:
         """Two-party debate refereed by the ledger. Writes a verdict + debate ledger.
         Never edits — a downstream (verdict_gate) task applies an actionable verdict."""
@@ -1203,20 +1228,7 @@ class AiderFactory:
             for k in ("ORACLE_AGENT_MODEL", "ORACLE_REASONING_EFFORT", "ORACLE_TEMPERATURE"):
                 if k in task.rag_env:
                     os.environ[k] = str(task.rag_env[k])
-        if task.editor_model and "ORACLE_AGENT_MODEL" not in os.environ:
-            os.environ["ORACLE_AGENT_MODEL"] = task.editor_model
-        if is_local_model(os.environ.get("ORACLE_AGENT_MODEL")):
-            if task.editor_api_base and "ORACLE_AGENT_API_BASE" not in os.environ:
-                os.environ["ORACLE_AGENT_API_BASE"] = task.editor_api_base
-        else:
-            os.environ.pop("ORACLE_AGENT_API_BASE", None)
-        if task.model and "ORACLE_ARCHITECT_MODEL" not in os.environ:
-            os.environ["ORACLE_ARCHITECT_MODEL"] = task.model
-        if is_local_model(os.environ.get("ORACLE_ARCHITECT_MODEL")):
-            if task.architect_api_base and "ORACLE_ARCHITECT_API_BASE" not in os.environ:
-                os.environ["ORACLE_ARCHITECT_API_BASE"] = task.architect_api_base
-        else:
-            os.environ.pop("ORACLE_ARCHITECT_API_BASE", None)
+        self._apply_oracle_model_env(task, os.environ)
 
         template, issue = d.get("template"), d.get("issue")
         verdict_path, ledger_path = d.get("verdict"), d.get("ledger")
@@ -1226,23 +1238,15 @@ class AiderFactory:
         prior_ledger_path = d.get("prior_ledger")
 
         # Check if there are unvisited multi-round configurations remaining
-        has_remaining_rounds = False
         r_idx = int(d.get("round_idx", 1))
-        for raw_val in (
+        has_remaining_rounds = deliberate.has_remaining_round_configs(
+            max(1, r_idx - 1),
             d.get("oracle_persona"),
             d.get("architect_persona"),
             d.get("oracle_file"),
             d.get("architect_file"),
             d.get("job_debate_collection"),
-        ):
-            if isinstance(raw_val, (list, tuple)) and r_idx <= len(raw_val):
-                has_remaining_rounds = True
-                break
-            elif isinstance(raw_val, str) and "," in raw_val:
-                parts = [p.strip() for p in raw_val.split(",") if p.strip()]
-                if r_idx <= len(parts):
-                    has_remaining_rounds = True
-                    break
+        )
 
         # Early exit: when no gate is present and the previous round already reached
         # agreement or was clean, skip this round only if no configurations remain.
@@ -1278,7 +1282,7 @@ class AiderFactory:
         seed = ""
         for p in (template, issue):
             if p and os.path.isfile(p):
-                with open(p, encoding="utf-8") as f:
+                with open(p, encoding="utf-8", errors="replace") as f:
                     seed += f.read() + "\n\n"
 
         if d.get("editable_files"):
@@ -1302,20 +1306,24 @@ class AiderFactory:
         # If a prior round's verdict was passed, extract its full # Resolution to seed this round.
         if prior_verdict_path and os.path.isfile(prior_verdict_path):
             try:
-                with open(prior_verdict_path, "r", encoding="utf-8") as pvf:
-                    pv_text = pvf.read()
-                res_match = re.search(r"(?s)# Resolution\s*\n\n(.*?)(?=\n---\n\n# Oracle Assessment|\Z)", pv_text)
-                if res_match:
-                    full_prior_proposal = res_match.group(1).strip()
-                    if full_prior_proposal:
-                        seed += f"## Context: The PREVIOUS escalation round agreed to attempt this specification:\n{full_prior_proposal}\n\n"
+                if deliberate.verdict_status(prior_verdict_path) == "agreed":
+                    with open(prior_verdict_path, "r", encoding="utf-8", errors="replace") as pvf:
+                        pv_text = pvf.read()
+                    res_match = re.search(r"(?s)# Resolution\s*\n\n(.*?)(?=\n---\n\n# Oracle Assessment|\Z)", pv_text)
+                    if res_match:
+                        full_prior_proposal = deliberate.sanitize_proposal_text(res_match.group(1).strip())
+                        if (
+                            full_prior_proposal
+                            and deliberate.proposal_hash(full_prior_proposal) != deliberate.proposal_hash(seed)
+                        ):
+                            seed += f"## Context: The PREVIOUS escalation round agreed to attempt this specification:\n{full_prior_proposal}\n\n"
             except Exception as e:
                 log.warning(f"⚠️  Could not read prior verdict {prior_verdict_path}: {e}")
         elif prior_ledger_path and os.path.isfile(prior_ledger_path):
             try:
                 import json
 
-                with open(prior_ledger_path, "r", encoding="utf-8") as pf:
+                with open(prior_ledger_path, "r", encoding="utf-8", errors="replace") as pf:
                     _pl = json.load(pf)
                     _pturns = _pl.get("turns", [])
                     if _pturns and _pl.get("state") == "agreed":
@@ -1429,7 +1437,7 @@ class AiderFactory:
                     )
 
         ledger = deliberate.new_ledger(issue_id)
-        last_proposal = seed if d.get("draft_mode") else ""
+        last_proposal = ""
         state = "continue"
         transcript = [f"# Deliberation transcript — {issue_id}\n"]
         # Accumulated debate memory fed to EVERY architect turn (each architect turn is a
@@ -1477,29 +1485,19 @@ class AiderFactory:
         provisional_agreed = False
         round_idx = int(d.get("round_idx", 1))
 
-        def _resolve_persona_files(raw_val) -> list[str]:
-            if not raw_val:
-                return []
-            items = raw_val if isinstance(raw_val, (list, tuple)) else [p.strip() for p in str(raw_val).split(",") if p.strip()]
-            try:
-                from run_workflow import resolve_template_path
-            except ImportError:
-                from aider_factory.python.run_workflow import resolve_template_path
-            contents = []
-            for item in items:
-                cand = resolve_template_path(item, project_directory=str(self.project_dir))
-                if cand and os.path.isfile(cand):
-                    try:
-                        with open(cand, "r", encoding="utf-8", errors="replace") as pf:
-                            contents.append(pf.read().strip())
-                    except Exception:
-                        pass
-            return contents
-
-        oracle_persona_contents = _resolve_persona_files(d.get("oracle_persona"))
-        arch_persona_contents = _resolve_persona_files(d.get("architect_persona"))
-        oracle_file_contents = _resolve_persona_files(d.get("oracle_file"))
-        arch_file_contents = _resolve_persona_files(d.get("architect_file"))
+        # Removed: inline _resolve_persona_files replaced by deliberate.load_persona_or_instruct_files
+        oracle_persona_contents = deliberate.load_persona_or_instruct_files(
+            d.get("oracle_persona"), project_dir=str(self.project_dir), strict=False
+        )
+        arch_persona_contents = deliberate.load_persona_or_instruct_files(
+            d.get("architect_persona"), project_dir=str(self.project_dir), strict=False
+        )
+        oracle_file_contents = deliberate.load_persona_or_instruct_files(
+            d.get("oracle_file"), project_dir=str(self.project_dir), strict=False
+        )
+        arch_file_contents = deliberate.load_persona_or_instruct_files(
+            d.get("architect_file"), project_dir=str(self.project_dir), strict=False
+        )
 
         if oracle_persona_contents:
             p_text = oracle_persona_contents[min(round_idx - 1, len(oracle_persona_contents) - 1)]
@@ -1551,10 +1549,7 @@ class AiderFactory:
                 + "\n\n"
             )
 
-        terminal_anchor = (
-            "Conclude your response with EXACTLY this terminal line:\n"
-            "PROPOSAL: <one-line summary of resolution>"
-        )
+        terminal_anchor = deliberate.PROPOSAL_TERMINAL_ANCHOR
 
         for turn in range(max_turns):
             if turn == 0:
@@ -1593,7 +1588,13 @@ class AiderFactory:
                 history_file=debate_aider_history,
             )
 
-            last_proposal = deliberate.update_high_watermark_proposal(arch_text, last_proposal)
+            _arch_err_prefixes = (
+                "PROPOSAL: (architect turn failed",
+                "PROPOSAL: (architect turn timed out",
+            )
+            _arch_failed = (arch_text or "").strip().startswith(_arch_err_prefixes)
+            if not _arch_failed:
+                last_proposal = deliberate.update_high_watermark_proposal(arch_text, last_proposal)
             pline = deliberate.proposal_line(arch_text) or "(no PROPOSAL line)"
             log.info(f"   turn {turn + 1} architect → {pline[:160]}")
             deliberate.record_turn(
@@ -1601,7 +1602,7 @@ class AiderFactory:
                 turn,
                 "architect",
                 pline,
-                proposal_hash=deliberate.proposal_hash(arch_text),
+                proposal_hash=None if _arch_failed else deliberate.proposal_hash(arch_text),
             )
             transcript.append(
                 f"\n## Turn {turn + 1} — Architect\n\n{(arch_text or '').strip()}\n"
@@ -1639,6 +1640,8 @@ class AiderFactory:
 
         if state == "continue":
             state = "exhausted"
+        if not last_proposal.strip() and d.get("draft_mode"):
+            last_proposal = seed
         ledger["state"] = state
         ledger["quote_baseline"] = quote_baseline
         if ledger_path:
@@ -1710,6 +1713,91 @@ class AiderFactory:
             f"({'ACTIONABLE' if actionable else 'held for human'}) -> {verdict_path}"
         )
         return True
+
+    def _resolve_weak_model_settings(
+        self, task: "Task", conf_weak_model: Optional[str] = None
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Resolve weak_model, weak_api_base, and synthesize session .aider.model.settings.yml."""
+        root = str(self.project_dir)
+        local_aider_factory_settings = os.path.join(
+            root, ".aider_factory", ".aider.model.settings.yml"
+        )
+        root_aider_settings = os.path.join(root, ".aider.model.settings.yml")
+        base_aider_settings = (
+            local_aider_factory_settings
+            if os.path.exists(local_aider_factory_settings)
+            else (
+                root_aider_settings if os.path.exists(root_aider_settings) else None
+            )
+        )
+        session_aider_settings = os.path.join(
+            str(self.session_dir), ".aider.model.settings.yml"
+        )
+        _router_key = os.environ.get("LITELLM_API_KEY", "")
+        _router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
+
+        if conf_weak_model is None and not task.weak_model:
+            local_conf = os.path.join(root, ".aider_factory", ".aider.conf.yml")
+            root_conf = os.path.join(root, ".aider.conf.yml")
+            conf_path = (
+                local_conf
+                if os.path.exists(local_conf)
+                else (root_conf if os.path.exists(root_conf) else None)
+            )
+            if conf_path:
+                try:
+                    with open(conf_path, "r", encoding="utf-8", errors="replace") as f:
+                        _cdata = yaml.safe_load(f) or {}
+                    if isinstance(_cdata, dict):
+                        conf_weak_model = _cdata.get("weak-model") or _cdata.get("weak_model")
+                except Exception:
+                    pass
+
+        resolved_weak_model = (
+            task.weak_model
+            or conf_weak_model
+            or os.environ.get("AIDER_WEAK_MODEL")
+            or os.environ.get("WEAK_MODEL")
+        )
+        raw_weak_api_base = (
+            task.weak_model_api_base
+            or os.environ.get("WEAK_MODEL_API_BASE")
+            or os.environ.get("AIDER_WEAK_MODEL_API_BASE")
+        )
+        if resolved_weak_model and not is_local_model(resolved_weak_model):
+            resolved_weak_api_base = None
+        elif is_valid_endpoint(raw_weak_api_base):
+            resolved_weak_api_base = raw_weak_api_base
+        elif resolved_weak_model and is_local_model(resolved_weak_model):
+            candidate_fallback = task.editor_api_base or task.architect_api_base
+            resolved_weak_api_base = (
+                candidate_fallback if is_valid_endpoint(candidate_fallback) else None
+            )
+        else:
+            resolved_weak_api_base = None
+
+        if resolved_weak_model and resolved_weak_api_base:
+            ensure_model_settings(
+                target_path=session_aider_settings,
+                models_to_configure=[
+                    {
+                        "name": resolved_weak_model,
+                        "api_base": resolved_weak_api_base,
+                        "api_key": _router_key,
+                    }
+                ],
+                base_settings_path=base_aider_settings,
+            )
+            aider_settings = session_aider_settings
+        else:
+            if os.path.exists(session_aider_settings):
+                try:
+                    os.remove(session_aider_settings)
+                except OSError:
+                    pass
+            aider_settings = base_aider_settings
+
+        return resolved_weak_model, resolved_weak_api_base, aider_settings
 
     def run_task(self, task: Task) -> bool:
         if task.history_stem:
@@ -1805,63 +1893,7 @@ class AiderFactory:
             return self._run_validate(task)
 
         # Pre-synthesize session model settings so deliberation ask-turns inherit weak model endpoints
-        local_aider_factory_settings = os.path.join(
-            str(self.project_dir), ".aider_factory", ".aider.model.settings.yml"
-        )
-        root_aider_settings = os.path.join(str(self.project_dir), ".aider.model.settings.yml")
-        base_aider_settings = (
-            local_aider_factory_settings
-            if os.path.exists(local_aider_factory_settings)
-            else (
-                root_aider_settings if os.path.exists(root_aider_settings) else None
-            )
-        )
-        session_aider_settings = os.path.join(
-            str(self.session_dir), ".aider.model.settings.yml"
-        )
-        _router_key = os.environ.get("LITELLM_API_KEY", "")
-        _router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
-
-        resolved_weak_model = (
-            task.weak_model
-            or os.environ.get("AIDER_WEAK_MODEL")
-            or os.environ.get("WEAK_MODEL")
-        )
-        raw_weak_api_base = (
-            task.weak_model_api_base
-            or os.environ.get("WEAK_MODEL_API_BASE")
-            or os.environ.get("AIDER_WEAK_MODEL_API_BASE")
-        )
-        if resolved_weak_model and not is_local_model(resolved_weak_model):
-            resolved_weak_api_base = None
-        elif is_valid_endpoint(raw_weak_api_base):
-            resolved_weak_api_base = raw_weak_api_base
-        elif resolved_weak_model and is_local_model(resolved_weak_model):
-            candidate_fallback = task.editor_api_base or task.architect_api_base
-            resolved_weak_api_base = candidate_fallback if is_valid_endpoint(candidate_fallback) else None
-        else:
-            resolved_weak_api_base = None
-
-        if resolved_weak_model and resolved_weak_api_base:
-            ensure_model_settings(
-                target_path=session_aider_settings,
-                models_to_configure=[
-                    {
-                        "name": resolved_weak_model,
-                        "api_base": resolved_weak_api_base,
-                        "api_key": _router_key,
-                    }
-                ],
-                base_settings_path=base_aider_settings,
-            )
-            aider_settings = session_aider_settings
-        else:
-            if os.path.exists(session_aider_settings):
-                try:
-                    os.remove(session_aider_settings)
-                except OSError:
-                    pass
-            aider_settings = base_aider_settings
+        self._resolve_weak_model_settings(task)
 
         # Two-party deliberation (no Aider edits): ask-mode architect turns + oracle
         # turns, refereed by the ledger; writes a verdict for a downstream edit node.
@@ -1924,7 +1956,7 @@ class AiderFactory:
             conf_data = {}
             if base_aider_conf and os.path.exists(base_aider_conf):
                 try:
-                    with open(base_aider_conf, "r", encoding="utf-8") as f:
+                    with open(base_aider_conf, "r", encoding="utf-8", errors="replace") as f:
                         conf_data = yaml.safe_load(f) or {}
                 except Exception as e:
                     log.warning(f"⚠️ Could not load base config {base_aider_conf}: {e}")
@@ -1986,66 +2018,9 @@ class AiderFactory:
                 )
                 aider_conf = base_aider_conf
 
-            resolved_weak_model = (
-                task.weak_model
-                or conf_data.get("weak-model")
-                or os.environ.get("AIDER_WEAK_MODEL")
-                or os.environ.get("WEAK_MODEL")
+            resolved_weak_model, resolved_weak_api_base, aider_settings = (
+                self._resolve_weak_model_settings(task, conf_data.get("weak-model"))
             )
-            raw_weak_api_base = (
-                task.weak_model_api_base
-                or os.environ.get("WEAK_MODEL_API_BASE")
-                or os.environ.get("AIDER_WEAK_MODEL_API_BASE")
-            )
-
-            # Strict isolation: cloud weak models must NEVER receive a local endpoint
-            if resolved_weak_model and not is_local_model(resolved_weak_model):
-                resolved_weak_api_base = None
-            elif is_valid_endpoint(raw_weak_api_base):
-                resolved_weak_api_base = raw_weak_api_base
-            elif resolved_weak_model and is_local_model(resolved_weak_model):
-                candidate_fallback = task.editor_api_base or task.architect_api_base
-                resolved_weak_api_base = candidate_fallback if is_valid_endpoint(candidate_fallback) else None
-            else:
-                resolved_weak_api_base = None
-
-            local_aider_factory_settings = os.path.join(
-                root, ".aider_factory", ".aider.model.settings.yml"
-            )
-            root_aider_settings = os.path.join(root, ".aider.model.settings.yml")
-            base_aider_settings = (
-                local_aider_factory_settings
-                if os.path.exists(local_aider_factory_settings)
-                else (
-                    root_aider_settings if os.path.exists(root_aider_settings) else None
-                )
-            )
-            session_aider_settings = os.path.join(
-                str(self.session_dir), ".aider.model.settings.yml"
-            )
-            _router_key = os.environ.get("LITELLM_API_KEY", "")
-            _router_key = _router_key if _router_key and not is_dummy_key(_router_key) else "sk-dummy"
-
-            if resolved_weak_model and resolved_weak_api_base:
-                ensure_model_settings(
-                    target_path=session_aider_settings,
-                    models_to_configure=[
-                        {
-                            "name": resolved_weak_model,
-                            "api_base": resolved_weak_api_base,
-                            "api_key": _router_key,
-                        }
-                    ],
-                    base_settings_path=base_aider_settings,
-                )
-                aider_settings = session_aider_settings
-            else:
-                if os.path.exists(session_aider_settings):
-                    try:
-                        os.remove(session_aider_settings)
-                    except OSError:
-                        pass
-                aider_settings = base_aider_settings
 
             cmd = [
                 "aider",
@@ -2150,6 +2125,7 @@ class AiderFactory:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,  # Combine stderr into stdout
                     text=True,
+                    errors="replace",
                     bufsize=1,  # Line-buffered
                     cwd=self.project_dir,
                     env={
@@ -2199,6 +2175,8 @@ class AiderFactory:
                     raise
                 finally:
                     test_watchdog.cancel()
+                    if test_proc.poll() is None:
+                        kill_proc_tree(test_proc)
 
                 if test_timed_out.is_set():
                     log.error(f"❌ Test baseline timed out after {timeout_secs}s for [{task.id}].")
@@ -2208,7 +2186,7 @@ class AiderFactory:
                     out = "".join(output_lines)
                     self.last_test_result[task.test_cmd] = (test_proc.returncode == 0)
 
-                if test_proc.returncode == 0:
+                if not test_timed_out.is_set() and test_proc.returncode == 0:
                     log.info(
                         f"✅ Tests already pass for [{task.id}]. Skipping Aider execution."
                     )
@@ -2221,7 +2199,7 @@ class AiderFactory:
                 )
 
                 if task.iterate_file and os.path.isfile(task.iterate_file):
-                    with open(task.iterate_file, "r", encoding="utf-8") as f:
+                    with open(task.iterate_file, "r", encoding="utf-8", errors="replace") as f:
                         FIX_CONSTRAINTS = f"\n{f.read()}\n"
                 else:
                     FIX_CONSTRAINTS = (
@@ -2251,9 +2229,11 @@ class AiderFactory:
                     delete=False,
                     encoding="utf-8",
                 )
-                msg_file.write(msg)
-                msg_file.close()
                 repair_prompt_path = msg_file.name
+                try:
+                    msg_file.write(msg)
+                finally:
+                    msg_file.close()
                 cmd.extend(["--message-file", repair_prompt_path])
 
             elif task.message_file and os.path.isfile(task.message_file):
@@ -2466,7 +2446,7 @@ class AiderFactory:
                     pass
 
                 try:
-                    process.wait(timeout=600)
+                    process.wait(timeout=900)
                 except subprocess.TimeoutExpired:
                     log.error(
                         f"❌ TASK TIMEOUT [{task.id}]: Aider execution exceeded 600s. Terminating process tree."
@@ -2619,6 +2599,9 @@ class AiderFactory:
                     return True
                 log.error(f"❌ TASK FAILED [{task.id}]: final test check timed out after 300s.")
                 return False
+            except KeyboardInterrupt:
+                kill_proc_tree(proc)
+                raise
             except Exception as e:
                 kill_proc_tree(proc)
                 self.last_test_result[task.test_cmd] = False
@@ -2630,6 +2613,9 @@ class AiderFactory:
                     return True
                 log.error(f"❌ TASK FAILED [{task.id}]: final test check errored: {e}")
                 return False
+            finally:
+                if proc.poll() is None:
+                    kill_proc_tree(proc)
 
         # An apply node's strict gate may not have run after the final edit, so the loop can
         # exhaust even when the document is actually grounded. The downstream finalize step is

@@ -91,7 +91,9 @@ TEST_CAMEL_RE = re.compile(
 
 EXACT_TEST_HARNESS_FILES = {
     "conftest.py",
+    "test.py",
     "tests.py",
+    "test.rs",
     "tests.rs",
     "test_helper.rb",
 }
@@ -101,14 +103,21 @@ DOC_EXTS = {".md", ".markdown", ".txt", ".rst", ".json", ".yaml", ".yml", ".toml
 
 def is_test_path(rel_path: str) -> bool:
     """Classify repository paths to ensure structural isolation between source code and test files."""
-    clean = (rel_path or "").replace("\\", "/").strip().lstrip("./")
+    clean = (rel_path or "").replace("\\", "/").strip()
     if not clean:
         return False
     if os.path.isabs(clean):
         try:
-            clean = os.path.relpath(clean, os.getcwd()).replace("\\", "/")
+            rel = os.path.relpath(clean, os.getcwd()).replace("\\", "/")
+            if not rel.startswith(".."):
+                clean = rel
         except ValueError:
             pass
+    while clean.startswith("./"):
+        clean = clean[2:]
+    clean = clean.lstrip("/")
+    if not clean or clean == ".":
+        return False
     parts = clean.split("/")
     if any(p.lower() in TEST_DIR_NAMES for p in parts[:-1]):
         return True
@@ -116,7 +125,7 @@ def is_test_path(rel_path: str) -> bool:
     _, ext = os.path.splitext(filename)
     if ext.lower() in DOC_EXTS:
         return False
-    if filename.lower() in EXACT_TEST_HARNESS_FILES or filename.startswith("setupTests."):
+    if filename.lower() in EXACT_TEST_HARNESS_FILES or filename.lower().startswith("setuptests."):
         return True
     if TEST_DELIMITED_RE.search(clean) or TEST_CAMEL_RE.search(clean):
         return True
@@ -241,6 +250,27 @@ def get_model_settings(model_name: str, cwd: Optional[str] = None) -> dict:
     except Exception:
         pass
     return {}
+
+
+def atomic_write_text(target_path: str | os.PathLike, content: str) -> None:
+    """Atomically write UTF-8 text to target_path via a sibling temporary file."""
+    abs_target = os.path.abspath(os.fspath(target_path))
+    target_dir = os.path.dirname(abs_target)
+    if target_dir:
+        os.makedirs(target_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=target_dir, suffix=".tmp")
+    os.close(fd)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, abs_target)
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
 
 
 def ensure_model_settings(

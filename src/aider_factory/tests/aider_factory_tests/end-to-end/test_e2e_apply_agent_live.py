@@ -145,6 +145,8 @@ class TestE2EApplyAgentLiveCluster(unittest.TestCase):
             "--no-show-model-warnings",
             "--model", self.ARCH_MODEL,
             "--edit-format", "ask",
+            "--exit",
+            "--no-pretty",
             "--no-auto-commits",
             "--map-tokens", "0",
             "--map-refresh", "manual",
@@ -155,10 +157,19 @@ class TestE2EApplyAgentLiveCluster(unittest.TestCase):
             "--no-suggest-shell-commands",
             "--restore-chat-history",
             "--chat-history-file", chat_hist,
+            "--read", "src/math_service.py",
             "--message", prompt,
         ]
         t0 = time.time()
-        res = subprocess.run(cmd, cwd=self.test_dir, env=env, capture_output=True, text=True, timeout=300)
+        res = subprocess.run(
+            cmd,
+            cwd=self.test_dir,
+            env=env,
+            input="n\n" * 50,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
         elapsed = time.time() - t0
         self.assertEqual(res.returncode, 0, f"Architect {turn_label} failed: {res.stderr}")
         print(f"\n[Timing] {turn_label} completed in {elapsed:.2f}s (rc=0)")

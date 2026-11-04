@@ -81,6 +81,7 @@ def _resolve_live_gemini_key() -> tuple[str, str] | None:
 
 class TestE2EAiderignoreGitignoreLive(unittest.TestCase):
     def setUp(self):
+        cli.ensure_aider_installed()
         if not shutil.which("aider"):
             self.skipTest("Real 'aider' binary not found in PATH.")
         self.tmp_dir = tempfile.mkdtemp(prefix="e2e_aiderignore_live_")
@@ -225,13 +226,14 @@ class TestE2EAiderignoreGitignoreLive(unittest.TestCase):
             timeout=60,
         )
         combined = proc.stdout + proc.stderr
-        combined_unwrapped = combined.replace("\r", "").replace("\n", "")
+        combined_norm = combined.replace("\\", "/")
+        combined_unwrapped = combined_norm.replace("\r", "").replace("\n", "")
         self.assertEqual(proc.returncode, 0, f"Aider interactive run failed:\n{combined}")
 
         for allowed_rel in allowed_rels:
             self.assertIn(
                 f"Added {allowed_rel} to the chat",
-                combined,
+                combined_norm,
                 f"Expected {allowed_rel} to be added to chat:\n{combined}",
             )
 
@@ -239,7 +241,7 @@ class TestE2EAiderignoreGitignoreLive(unittest.TestCase):
             fname = os.path.basename(blocked_rel)
             self.assertNotIn(
                 f"Added {blocked_rel} to the chat",
-                combined,
+                combined_norm,
                 f"Expected {blocked_rel} to be blocked from chat:\n{combined}",
             )
             self.assertTrue(
@@ -291,8 +293,8 @@ class TestE2EAiderignoreGitignoreLive(unittest.TestCase):
         )
         self.assertEqual(proc_map.returncode, 0, f"--repo-map-all failed:\n{proc_map.stderr}")
 
-        src_map = (self.project_dir / ".aider_factory" / "static_repo_map.md").read_text(encoding="utf-8")
-        test_map = (self.project_dir / ".aider_factory" / "static_repo_map_tests.md").read_text(encoding="utf-8")
+        src_map = (self.project_dir / ".aider_factory" / "static_repo_map.md").read_text(encoding="utf-8").replace("\\", "/")
+        test_map = (self.project_dir / ".aider_factory" / "static_repo_map_tests.md").read_text(encoding="utf-8").replace("\\", "/")
 
         self.assertIn("src/app.py", src_map)
         for forbidden in ("strategy_template.md", "CONVENTIONS.md", "scratch.py", "temp_scratch_helper", "session.yml", ".aider_factory"):
@@ -327,9 +329,10 @@ class TestE2EAiderignoreGitignoreLive(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(proc_native.returncode, 0, proc_native.stderr)
-        self.assertIn("src/app.py", proc_native.stdout)
+        native_out = proc_native.stdout.replace("\\", "/")
+        self.assertIn("src/app.py", native_out)
         for forbidden in ("strategy_template.md", "CONVENTIONS.md", "scratch.py", "temp_scratch_helper", "session.yml", ".aider_factory"):
-            self.assertNotIn(forbidden, proc_native.stdout)
+            self.assertNotIn(forbidden, native_out)
 
     def test_live_llm_aider_edits_strategy_template_with_gitignore_active(self):
         """3. Zero-Mock Live LLM test: real 'aider' edits untracked strategy_template.md when .gitignore is active."""
@@ -350,11 +353,12 @@ class TestE2EAiderignoreGitignoreLive(unittest.TestCase):
             [
                 "aider",
                 "--model",
-                "gemini/gemini-3.8-flash",
+                "gemini/gemini-2.5-flash",
                 "--yes-always",
                 "--no-auto-commits",
                 "--no-check-update",
                 "--no-show-model-warnings",
+                "--no-analytics",
                 "--no-pretty",
                 "--exit",
                 "--message",
@@ -368,7 +372,7 @@ class TestE2EAiderignoreGitignoreLive(unittest.TestCase):
             text=True,
             timeout=180,
         )
-        combined = proc.stdout + proc.stderr
+        combined = (proc.stdout + proc.stderr).replace("\\", "/")
         self.assertEqual(proc.returncode, 0, f"Live Aider edit failed:\n{combined}")
         self.assertNotIn("which is in gitignore", combined)
         updated_text = strat_abs.read_text(encoding="utf-8")

@@ -9,10 +9,23 @@ import textwrap
 
 import pytest
 
-# Import the inner functions by running bootstrap in a controlled way.
-# Since they are nested in run_bootstrap, we replicate the logic here
-# as a standalone importable check. Alternatively, we test via the
-# generated YAML output.
+import sys
+
+_TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PKG_DIR = os.path.abspath(os.path.join(_TESTS_DIR, "..", ".."))
+_PYTHON_DIR = os.path.join(_PKG_DIR, "python")
+for _p in (_PYTHON_DIR, _PKG_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from bootstrap import (
+    _ROUTER_ENDPOINTS,
+    _discover_context_files,
+    _discover_target_files,
+    _render_workflow_yaml_template,
+)
+from cli import _is_test_path
+from env_utils import atomic_write_text, is_test_path
 
 
 def _make_project(tmp_path: str) -> str:
@@ -47,46 +60,7 @@ def _make_project(tmp_path: str) -> str:
     return tmp_path
 
 
-# --- Replicate discovery logic for isolated unit testing ---
-
-_SOURCE_EXTS = {".py", ".r", ".rs", ".go", ".js", ".ts", ".jsx", ".tsx"}
-_EXCLUDE_DIRS = frozenset({
-    ".git", ".aider_factory", "node_modules", "__pycache__",
-    ".venv", "venv", "dist", "build", ".cache", ".pytest_cache",
-    "site-packages", ".eggs",
-})
-_EXCLUDE_RE = __import__("re").compile(
-    r"(?:^|[\\/])(?:tests?[\\/]|test_|conftest\.py|setup\.py|__init__\.py$)"
-)
-
-
-def _discover_target_files(base_dir):
-    found = []
-    for root, dirs, files in os.walk(base_dir):
-        dirs[:] = [d for d in dirs if d not in _EXCLUDE_DIRS
-                   and not d.endswith(".egg-info")]
-        for fname in files:
-            if os.path.splitext(fname)[1].lower() not in _SOURCE_EXTS:
-                continue
-            rel = os.path.relpath(os.path.join(root, fname), base_dir).replace("\\", "/")
-            if _EXCLUDE_RE.search(rel):
-                continue
-            found.append(rel)
-    found.sort()
-    return found
-
-
-def _discover_context_files(base_dir):
-    ctx = []
-    for name in ("README.md", "CHANGELOG.md"):
-        if os.path.isfile(os.path.join(base_dir, name)):
-            ctx.append(name)
-    docs_dir = os.path.join(base_dir, "docs")
-    if os.path.isdir(docs_dir):
-        for sub in sorted(os.listdir(docs_dir)):
-            if sub.endswith(".md"):
-                ctx.append(f"docs/{sub}")
-    return ctx
+# Discovery helpers are imported directly from production bootstrap module.
 
 
 class TestTargetFileDiscovery:
@@ -169,3 +143,261 @@ class TestContextFileDiscovery:
         with tempfile.TemporaryDirectory() as tmp:
             ctx = _discover_context_files(tmp)
             assert ctx == []
+
+    def test_finds_changelog_and_ignores_non_md_docs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_project(tmp)
+            with open(os.path.join(tmp, "CHANGELOG.md"), "w", encoding="utf-8") as f:
+                f.write("# Changelog\n")
+            with open(os.path.join(tmp, "docs", "notes.txt"), "w", encoding="utf-8") as f:
+                f.write("ignore me\n")
+            ctx = _discover_context_files(tmp)
+            assert ctx == ["README.md", "CHANGELOG.md", "docs/api.md", "docs/guide.md"]
+
+    def test_target_discovery_excludes_egg_info_and_test_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "mypkg.egg-info"), exist_ok=True)
+            open(os.path.join(tmp, "mypkg.egg-info", "leaked.py"), "w").close()
+            os.makedirs(os.path.join(tmp, "src"), exist_ok=True)
+            open(os.path.join(tmp, "src", "test.py"), "w").close()
+            open(os.path.join(tmp, "src", "test.rs"), "w").close()
+            open(os.path.join(tmp, "src", "setupTests.ts"), "w").close()
+            open(os.path.join(tmp, "src", "Button.test.tsx"), "w").close()
+            os.makedirs(os.path.join(tmp, "app", "domain"), exist_ok=True)
+            open(os.path.join(tmp, "app", "domain", "contest.py"), "w").close()
+            os.makedirs(os.path.join(tmp, "frontend", "lib"), exist_ok=True)
+            open(os.path.join(tmp, "frontend", "lib", "latest.ts"), "w").close()
+
+            targets = _discover_target_files(tmp)
+            assert targets == ["app/domain/contest.py", "frontend/lib/latest.ts"]
+
+
+class TestRenderWorkflowYamlTemplate:
+    _SAMPLE_TEMPLATE = textwrap.dedent("""\
+        name: "Default Template"
+        working_directory: "/placeholder/dir"
+        test_command_prefix: ""
+        test_runner: "pytest {file}"
+        test_naming_and_path: "tests/test_{stem}.py"
+        endpoints:
+            architect_api_base: "http://<your-router-host>:4000/v1"
+            editor_api: "http://<your-router-host>:4000/v1"
+            editor_api_fallback: "http://<your-router-host>:4000/v1"
+            weak_model_api_base: "http://<your-router-host>:4000/v1"
+            rag_agent_api: "http://<your-router-host>:4000/v1"
+            grounding_agent_api: "http://<your-router-host>:4000/v1"
+            ranking_api_base: null
+            ocr_api_base: "http://<your-router-host>:4000/v1"
+            embed_api_base: "http://<your-router-host>:4000/v1"
+        models:
+            architect_agent: "default-arch"
+            editor_agent: "default-ed"
+            editor_agent_test: "default-ed-test"
+            editor_agent_test_fallback: "default-ed-fb"
+            weak_model: "default-weak"
+            embed_model: "default-embed"
+            embed_backend: "sentence-transformers"
+            ranking_agent: "default-rank"
+        phases:
+          - name: "Phase 1: Implementation"
+            template: "../markdown/internal/analyze_bugs.md"
+            target_files: []
+            context_files_job: []
+    """)
+
+    def test_router_base_rewrites_only_router_endpoints(self):
+        router_url = "http://10.0.0.42:4000/v1"
+        assert _ROUTER_ENDPOINTS == (
+            "architect_api_base",
+            "editor_api",
+            "editor_api_fallback",
+            "weak_model_api_base",
+        )
+        rendered = _render_workflow_yaml_template(
+            self._SAMPLE_TEMPLATE,
+            name="My Repo Pipeline",
+            working_directory="C:\\Users\\dev\\my_repo",
+            router_base=router_url,
+        )
+        assert 'name: "My Repo Pipeline"' in rendered
+        assert '- name: "Phase 1: Implementation"' in rendered
+        assert 'working_directory: "C:/Users/dev/my_repo"' in rendered
+
+        for ep in _ROUTER_ENDPOINTS:
+            assert f'{ep}: "{router_url}"' in rendered
+
+        for local_ep in (
+            "rag_agent_api",
+            "grounding_agent_api",
+            "ranking_api_base",
+            "ocr_api_base",
+            "embed_api_base",
+        ):
+            assert f'{local_ep}: "{router_url}"' not in rendered
+
+    def test_multi_phase_template_substitution(self):
+        multi_phase_yaml = textwrap.dedent("""\
+            name: "Plan Do Default"
+            working_directory: "/placeholder"
+            test_command_prefix: ""
+            test_runner: "pytest {file}"
+            test_naming_and_path: "tests/unit/test_{stem}.py"
+            endpoints:
+                architect_api_base: "http://localhost:8080/v1"
+                editor_api: "http://localhost:8080/v1"
+                editor_api_fallback: "http://localhost:8080/v1"
+                weak_model_api_base: "http://localhost:8080/v1"
+                rag_agent_api: "http://localhost:8080/v1"
+            phases:
+              - name: "Architect Planning Phase"
+                models:
+                    architect_agent: "old-arch"
+                    editor_agent: "old-ed"
+                    editor_agent_test: "old-ed"
+                    editor_agent_test_fallback: "old-ed"
+                    weak_model: "old-weak"
+                    ranking_agent: "old-rank"
+                    embed_model: "old-embed"
+                rag:
+                    embed_backend: "sentence-transformers"
+              - name: "Code Implementation Phase"
+                test_naming_and_path: "tests/unit/test_{stem}.py"
+                models:
+                    architect_agent: "old-arch"
+                    editor_agent: "old-ed"
+                    editor_agent_test: "old-ed"
+                    editor_agent_test_fallback: "old-ed"
+                    weak_model: "old-weak"
+                    ranking_agent: "old-rank"
+                    embed_model: "old-embed"
+                rag:
+                    embed_backend: "sentence-transformers"
+        """)
+        router_url = "http://192.168.1.100:4000/v1"
+        models = {
+            "architect": "openai/qwen-27b",
+            "editor": "openai/qwen-coder",
+            "weak": "openai/qwen-7b",
+            "embed": "openai/text-embedding-3-small",
+            "reranker": "openai/bge-reranker",
+        }
+        rendered = _render_workflow_yaml_template(
+            multi_phase_yaml,
+            name="Custom Plan-Do Pipeline",
+            working_directory="/workspace/demo",
+            test_command_prefix="ENV=test",
+            test_runner="cargo test --test {stem}",
+            test_naming_and_path="tests/{stem}.rs",
+            router_base=router_url,
+            model_choices=models,
+        )
+        assert rendered.count('name: "Custom Plan-Do Pipeline"') == 1
+        assert '- name: "Architect Planning Phase"' in rendered
+        assert '- name: "Code Implementation Phase"' in rendered
+        assert rendered.count('test_naming_and_path: "tests/{stem}.rs"') == 2
+        assert rendered.count('architect_agent: "openai/qwen-27b"') == 2
+        assert rendered.count('editor_agent: "openai/qwen-coder"') == 2
+        assert rendered.count('embed_backend: "openai"') == 2
+        assert f'weak_model_api_base: "{router_url}"' in rendered
+        assert f'rag_agent_api: "{router_url}"' not in rendered
+
+    def test_cluster_config_updates_endpoints_and_fallback_to_architect(self):
+        cluster_cfg = {
+            "architect_api_base": "http://cluster:4000/v1",
+            "editor_api": "http://cluster:4000/v1",
+            "rag_agent_api": "http://cluster:4000/v1",
+            "architect_agent": "openai/deepseek-r1",
+            "editor_agent": "openai/qwen-coder-32b",
+        }
+        rendered = _render_workflow_yaml_template(
+            self._SAMPLE_TEMPLATE,
+            name="Cluster Pipeline",
+            working_directory="/tmp/proj",
+            cluster_config=cluster_cfg,
+        )
+        assert 'architect_api_base: "http://cluster:4000/v1"' in rendered
+        assert 'editor_api: "http://cluster:4000/v1"' in rendered
+        assert 'rag_agent_api: "http://cluster:4000/v1"' in rendered
+        assert 'architect_agent: "openai/deepseek-r1"' in rendered
+        assert 'editor_agent: "openai/qwen-coder-32b"' in rendered
+        assert 'editor_agent_test: "openai/qwen-coder-32b"' in rendered
+        assert 'editor_agent_test_fallback: "openai/deepseek-r1"' in rendered
+        assert '- name: "Phase 1: Implementation"' in rendered
+
+    def test_embed_backend_sentence_transformers_for_local_embed_model(self):
+        rendered = _render_workflow_yaml_template(
+            self._SAMPLE_TEMPLATE,
+            name="Local Embed",
+            working_directory="/tmp/proj",
+            model_choices={
+                "architect": "openai/local-27b",
+                "embed": "BAAI/bge-large-en-v1.5",
+            },
+        )
+        assert 'embed_model: "BAAI/bge-large-en-v1.5"' in rendered
+        assert 'embed_backend: "sentence-transformers"' in rendered
+        assert 'editor_agent_test_fallback: "openai/local-27b"' in rendered
+
+    def test_standardize_analyze_bugs_and_file_list_formatting(self):
+        ctx_list = [f"docs/doc_{i}.md" for i in range(20)]
+        rendered = _render_workflow_yaml_template(
+            self._SAMPLE_TEMPLATE,
+            name="Formatting Pipeline",
+            working_directory="/tmp/proj",
+            target_file="src/main.py",
+            context_files=ctx_list,
+            standardize_analyze_bugs=True,
+        )
+        assert "/markdown/internal/analyze_bugs.md" in rendered
+        assert "../markdown/internal/analyze_bugs.md" not in rendered
+        assert '    target_files:\n    - "src/main.py"' in rendered
+        assert '    context_files_job:\n    - "docs/doc_0.md"' in rendered
+        assert "docs/doc_14.md" in rendered
+        assert "docs/doc_15.md" not in rendered
+
+        unindented = 'name: "X"\nworking_directory: "/tmp"\ntarget_files: []\ncontext_files_job: []\n'
+        rendered_unindented = _render_workflow_yaml_template(
+            unindented,
+            name="Unindented",
+            working_directory="/tmp",
+            target_file="scratchpad.py",
+            context_files=["README.md"],
+        )
+        assert 'target_files:\n        - "scratchpad.py"' in rendered_unindented
+        assert 'context_files_job:\n        - "README.md"' in rendered_unindented
+
+
+class TestTestPathParityAndAtomicWrite:
+    @pytest.mark.parametrize(
+        "rel_path,expected",
+        [
+            ("test.py", True),
+            ("tests.py", True),
+            ("src/test.rs", True),
+            ("src/tests.rs", True),
+            ("src/setupTests.ts", True),
+            ("src/setuptests.js", True),
+            ("conftest.py", True),
+            ("app/domain/contest.py", False),
+            ("frontend/lib/latest.ts", False),
+            ("README.md", False),
+            ("", False),
+            (".", False),
+            (None, False),
+        ],
+    )
+    def test_cli_and_env_utils_is_test_path_parity(self, rel_path, expected):
+        assert is_test_path(rel_path) is expected
+        assert _is_test_path(rel_path) is expected
+
+    def test_atomic_write_text_leaves_no_tmp_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "nested", "config.yml")
+            atomic_write_text(target, 'name: "Atomic Test"\n')
+            with open(target, "r", encoding="utf-8") as f:
+                assert f.read() == 'name: "Atomic Test"\n'
+            leftover_tmp = [
+                fn for fn in os.listdir(os.path.join(tmp, "nested"))
+                if fn.endswith(".tmp")
+            ]
+            assert leftover_tmp == []

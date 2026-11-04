@@ -13,15 +13,60 @@ if python_module_dir not in sys.path:
     sys.path.insert(0, python_module_dir)
 
 
+def _compile_dag_tasks(
+    tmpdir: str,
+    config: dict,
+    session_name: str = "mock_topo_session",
+    yaml_name: str = "mock_topo.yml",
+) -> dict:
+    yaml_path = os.path.join(tmpdir, yaml_name)
+    cfg = dict(config)
+    cfg["working_directory"] = tmpdir
+    with open(yaml_path, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f)
+
+    old_argv = list(sys.argv)
+    old_path = list(sys.path)
+    old_env = os.environ.copy()
+    orig_cwd = os.getcwd()
+    os.chdir(tmpdir)
+    sys.argv = ["run_workflow.py", session_name, yaml_path]
+    namespace = {
+        "__name__": "__test__",
+        "__file__": os.path.join(python_module_dir, "run_workflow.py"),
+    }
+
+    with open(
+        os.path.join(python_module_dir, "run_workflow.py"), "r", encoding="utf-8"
+    ) as f:
+        code = f.read()
+
+    try:
+        for k in list(sys.modules.keys()):
+            if (
+                "orchestrate" in k
+                or "run_workflow" in k
+                or k.startswith("aider_factory")
+            ):
+                del sys.modules[k]
+        # Force development source to front of sys.path so exec'd run_workflow.py
+        # imports the development orchestrate.py (with auto_lint) not the installed one.
+        if python_module_dir in sys.path:
+            sys.path.remove(python_module_dir)
+        sys.path.insert(0, python_module_dir)
+        exec(code, namespace)
+        return namespace["factory"].tasks
+    finally:
+        sys.argv = old_argv
+        sys.path[:] = old_path
+        os.environ.clear()
+        os.environ.update(old_env)
+        os.chdir(orig_cwd)
+
+
 def check_topology(test_name, config, required_substrings, forbidden_substrings):
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
-        yaml_path = os.path.join(tmpdir, "mock_topo.yml")
-        config = dict(config)
-        config["working_directory"] = tmpdir
-        with open(yaml_path, "w") as f:
-            yaml.dump(config, f)
-
         # Ensure mock files exist in the project directory
         mock_r = os.path.join(tmpdir, "mock.R")
         mock_md = os.path.join(tmpdir, "mock.md")
@@ -30,46 +75,21 @@ def check_topology(test_name, config, required_substrings, forbidden_substrings)
         open(mock_md, "a").close()
         open(heal_sh, "a").close()
 
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "mock_topo_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
+        tasks = _compile_dag_tasks(tmpdir, config)
+        task_ids = " ".join(tasks.keys())
 
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
+        success = True
+        for req in required_substrings:
+            if req not in task_ids:
+                print(f"  ❌ Missing expected node type: {req}")
+                success = False
+        for forb in forbidden_substrings:
+            if forb in task_ids:
+                print(f"  ❌ Found forbidden node type: {forb}")
+                success = False
 
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            # Force development source to front of sys.path so exec'd run_workflow.py
-            # imports the development orchestrate.py (with auto_lint) not the installed one.
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
-            task_ids = " ".join(tasks.keys())
-
-            success = True
-            for req in required_substrings:
-                if req not in task_ids:
-                    print(f"  ❌ Missing expected node type: {req}")
-                    success = False
-            for forb in forbidden_substrings:
-                if forb in task_ids:
-                    print(f"  ❌ Found forbidden node type: {forb}")
-                    success = False
-
-            assert success, f"{test_name} FAILED: Generated Tasks: {task_ids}"
-            print(f"✅ {test_name} PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        assert success, f"{test_name} FAILED: Generated Tasks: {task_ids}"
+        print(f"✅ {test_name} PASS")
 
 
 def test_code_mode_topology():
@@ -185,52 +205,31 @@ def test_grounding_gate_is_list():
     }
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        review_config["working_directory"] = tmpdir
-        yaml_path = os.path.join(tmpdir, "test_gate_type.yml")
         open(os.path.join(tmpdir, "mock.md"), "a").close()
         open(os.path.join(tmpdir, "heal.sh"), "a").close()
 
-        with open(yaml_path, "w") as f:
-            yaml.dump(review_config, f)
+        tasks = _compile_dag_tasks(
+            tmpdir,
+            review_config,
+            session_name="test_gate_type_session",
+            yaml_name="test_gate_type.yml",
+        )
 
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "test_gate_type_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
+        delib_tasks = [t for tid, t in tasks.items() if "deliberate" in tid]
+        assert len(delib_tasks) > 0, "Expected at least one deliberation task"
 
-            delib_tasks = [t for tid, t in tasks.items() if "deliberate" in tid]
-            assert len(delib_tasks) > 0, "Expected at least one deliberation task"
-
-            for dt in delib_tasks:
-                gate = dt.deliberate.get("gate_cmd")
-                assert isinstance(gate, list), (
-                    f"Expected gate_cmd to be a list, got {type(gate).__name__}: {gate}"
-                )
-                assert gate[0] == sys.executable, (
-                    f"Expected gate_cmd[0] to be sys.executable ({sys.executable}), got {gate[0]}"
-                )
-                assert "validator.py" in gate[1], (
-                    f"Expected 'validator.py' in gate_cmd[1], got {gate[1]}"
-                )
-            print("✅ Grounding gate is list (not shell string) PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        for dt in delib_tasks:
+            gate = dt.deliberate.get("gate_cmd")
+            assert isinstance(gate, list), (
+                f"Expected gate_cmd to be a list, got {type(gate).__name__}: {gate}"
+            )
+            assert gate[0] == sys.executable, (
+                f"Expected gate_cmd[0] to be sys.executable ({sys.executable}), got {gate[0]}"
+            )
+            assert "validator.py" in gate[1], (
+                f"Expected 'validator.py' in gate_cmd[1], got {gate[1]}"
+            )
+        print("✅ Grounding gate is list (not shell string) PASS")
 
 
 def test_tee_writer_dual_output():
@@ -488,172 +487,150 @@ files:
 ```
 """)
 
-        yaml_path = os.path.join(tmpdir, "env_plan_do_test.yml")
-        with open(yaml_path, "w", encoding="utf-8") as f:
-            yaml.dump(config, f)
+        tasks = _compile_dag_tasks(
+            tmpdir,
+            config,
+            session_name="test_plan_do_session",
+            yaml_name="env_plan_do_test.yml",
+        )
 
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "test_plan_do_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
+        # 1. Expected Task Nodes
+        expected_nodes = [
+            "p0_job1_strategy_template",
+            "p1_job1_feature",
+            "p1_job2_debate_feature_r1",
+            "p1_job2_debate_feature_r2",
+            "p1_job2_feature",
+            "p1_job3_debate_feature_r1",
+            "p1_job3_debate_feature_r2",
+            "p1_job3_feature",
+            "p1_verify_feature",
+            "p1_deliberate_feature_r1",
+            "p1_apply_feature_r1",
+            "p1_deliberate_feature_r2",
+            "p1_apply_feature_r2",
+            "p2_job1_feature",
+        ]
+        for node_id in expected_nodes:
+            assert node_id in tasks, f"Expected node '{node_id}' not found in tasks: {list(tasks.keys())}"
 
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
+        # 2. Negative Scope: verify no debates before Job 1
+        assert "p1_job1_debate_feature" not in tasks, "Found forbidden p1_job1_debate_feature node"
+        assert "p1_job1_debate_feature_r1" not in tasks, "Found forbidden p1_job1_debate_feature_r1 node"
 
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
+        # 3. Phase 1 (Planning) Configuration
+        p0_job1 = tasks["p0_job1_strategy_template"]
+        assert p0_job1.pair_programming is True
+        assert p0_job1.yes_always is False
+        assert p0_job1.message_file is not None and os.path.isfile(p0_job1.message_file)
+        assert p0_job1.message_file.endswith("strategy_instruct_template.md")
 
-            # 1. Expected Task Nodes
-            expected_nodes = [
-                "p0_job1_strategy_template",
-                "p1_job1_feature",
-                "p1_job2_debate_feature_r1",
-                "p1_job2_debate_feature_r2",
-                "p1_job2_feature",
-                "p1_job3_debate_feature_r1",
-                "p1_job3_debate_feature_r2",
-                "p1_job3_feature",
-                "p1_verify_feature",
-                "p1_deliberate_feature_r1",
-                "p1_apply_feature_r1",
-                "p1_deliberate_feature_r2",
-                "p1_apply_feature_r2",
-                "p2_job1_feature",
-            ]
-            for node_id in expected_nodes:
-                assert node_id in tasks, f"Expected node '{node_id}' not found in tasks: {list(tasks.keys())}"
+        # Verify Phase barrier linking: Phase 1 Job 1 depends on Phase 0 Job 1
+        p1_j1 = tasks["p1_job1_feature"]
+        assert p1_j1.depends_on == ["p0_job1_strategy_template"], (
+            f"Expected p1_job1_feature to depend on p0_job1_strategy_template, got: {p1_j1.depends_on}"
+        )
 
-            # 2. Negative Scope: verify no debates before Job 1
-            assert "p1_job1_debate_feature" not in tasks, "Found forbidden p1_job1_debate_feature node"
-            assert "p1_job1_debate_feature_r1" not in tasks, "Found forbidden p1_job1_debate_feature_r1 node"
+        # 4. Phase 2 Job 2 Debate Invariants (2 Rounds: R1 = top_k, R2 = no_retrieve)
+        j2_d_r1 = tasks["p1_job2_debate_feature_r1"]
+        assert j2_d_r1.depends_on == ["p1_job1_feature"]
+        assert j2_d_r1.deliberate["retrieve_mode"] == "top_k"
+        assert j2_d_r1.rag_env.get("ORACLE_COLLECTION") == "working_repo_lib"
+        assert j2_d_r1.deliberate["template"].endswith("code_quality_audit.md")
 
-            # 3. Phase 1 (Planning) Configuration
-            p0_job1 = tasks["p0_job1_strategy_template"]
-            assert p0_job1.pair_programming is True
-            assert p0_job1.yes_always is False
-            assert p0_job1.message_file is not None and os.path.isfile(p0_job1.message_file)
-            assert p0_job1.message_file.endswith("strategy_instruct_template.md")
+        j2_d_r2 = tasks["p1_job2_debate_feature_r2"]
+        assert j2_d_r2.depends_on == ["p1_job2_debate_feature_r1"]
+        assert j2_d_r2.deliberate["retrieve_mode"] == "no_retrieve"
+        assert j2_d_r2.rag_env.get("ORACLE_COLLECTION") == ""
+        assert j2_d_r2.deliberate["prior_verdict"].endswith("feature.job2_verdict_r1.md")
 
-            # Verify Phase barrier linking: Phase 1 Job 1 depends on Phase 0 Job 1
-            p1_j1 = tasks["p1_job1_feature"]
-            assert p1_j1.depends_on == ["p0_job1_strategy_template"], (
-                f"Expected p1_job1_feature to depend on p0_job1_strategy_template, got: {p1_j1.depends_on}"
-            )
+        j2 = tasks["p1_job2_feature"]
+        assert j2.depends_on == ["p1_job2_debate_feature_r2"]
+        assert j2.message_file.endswith("feature.job2_verdict_r2.md")
 
-            # 4. Phase 2 Job 2 Debate Invariants (2 Rounds: R1 = top_k, R2 = no_retrieve)
-            j2_d_r1 = tasks["p1_job2_debate_feature_r1"]
-            assert j2_d_r1.depends_on == ["p1_job1_feature"]
-            assert j2_d_r1.deliberate["retrieve_mode"] == "top_k"
-            assert j2_d_r1.rag_env.get("ORACLE_COLLECTION") == "working_repo_lib"
-            assert j2_d_r1.deliberate["template"].endswith("code_quality_audit.md")
+        # 5. Phase 2 Job 3 Debate Invariants (2 Rounds: Pure AST no_retrieve)
+        assert p1_j1.yes_always is False
+        assert p1_j1.auto_accept_architect is True
+        assert p1_j1.testing_context["role"] == "capture_baseline"
+        assert j2.testing_context["role"] == "capture_baseline"
 
-            j2_d_r2 = tasks["p1_job2_debate_feature_r2"]
-            assert j2_d_r2.depends_on == ["p1_job2_debate_feature_r1"]
-            assert j2_d_r2.deliberate["retrieve_mode"] == "no_retrieve"
-            assert j2_d_r2.rag_env.get("ORACLE_COLLECTION") == ""
-            assert j2_d_r2.deliberate["prior_verdict"].endswith("feature.job2_verdict_r1.md")
+        j3_d_r1 = tasks["p1_job3_debate_feature_r1"]
+        assert j3_d_r1.depends_on == ["p1_job2_feature"]
+        assert j3_d_r1.deliberate["retrieve_mode"] == "no_retrieve"
+        assert j3_d_r1.deliberate["template"].endswith("testing_debate.md")
+        assert j3_d_r1.deliberate["issue"].endswith("feature_testing_exec_rendered.md")
+        assert j3_d_r1.testing_context["role"] == "render_testing_exec"
+        assert "docs/test_spec.md" in j3_d_r1.rag_env["ORACLE_CONTEXT_FILES"]
+        assert "docs/spec.md" not in j3_d_r1.rag_env["ORACLE_CONTEXT_FILES"]
 
-            j2 = tasks["p1_job2_feature"]
-            assert j2.depends_on == ["p1_job2_debate_feature_r2"]
-            assert j2.message_file.endswith("feature.job2_verdict_r2.md")
+        j3_d_r2 = tasks["p1_job3_debate_feature_r2"]
+        assert j3_d_r2.depends_on == ["p1_job3_debate_feature_r1"]
+        assert j3_d_r2.deliberate["retrieve_mode"] == "no_retrieve"
+        assert j3_d_r2.deliberate["prior_verdict"].endswith("feature.job3_verdict_r1.md")
+        assert j3_d_r2.testing_context["role"] == "render_testing_exec"
 
-            # 5. Phase 2 Job 3 Debate Invariants (2 Rounds: Pure AST no_retrieve)
-            assert p1_j1.yes_always is False
-            assert p1_j1.auto_accept_architect is True
-            assert p1_j1.testing_context["role"] == "capture_baseline"
-            assert j2.testing_context["role"] == "capture_baseline"
+        j3 = tasks["p1_job3_feature"]
+        assert j3.depends_on == ["p1_job3_debate_feature_r2"]
+        assert j3.message_file.endswith("feature.job3_verdict_r2.md")
+        assert any(f.endswith("test_feature.py") for f in j3.files)
+        assert any(f.endswith("feature.py") for f in j3.files)
+        assert any(f.endswith("feature_testing_exec_rendered.md") for f in j3.read_files)
+        assert j3.testing_context["role"] == "render_testing_exec"
 
-            j3_d_r1 = tasks["p1_job3_debate_feature_r1"]
-            assert j3_d_r1.depends_on == ["p1_job2_feature"]
-            assert j3_d_r1.deliberate["retrieve_mode"] == "no_retrieve"
-            assert j3_d_r1.deliberate["template"].endswith("testing_debate.md")
-            assert j3_d_r1.deliberate["issue"].endswith("feature_testing_exec_rendered.md")
-            assert j3_d_r1.testing_context["role"] == "render_testing_exec"
-            assert "docs/test_spec.md" in j3_d_r1.rag_env["ORACLE_CONTEXT_FILES"]
-            assert "docs/spec.md" not in j3_d_r1.rag_env["ORACLE_CONTEXT_FILES"]
+        # 6. Phase 2 Verification & Escalation Chain
+        verify = tasks["p1_verify_feature"]
+        assert verify.depends_on == ["p1_job3_feature"]
+        assert "pytest tests/unit/test_feature.py" in verify.test_cmd
+        assert verify.iterate_test is True
+        assert verify.soft_fail is True
+        assert verify.iterate_file.endswith("feature_testing_iterate_rendered.md")
+        assert any(f.endswith("feature_testing_iterate_rendered.md") for f in verify.read_files)
+        with open(verify.iterate_file, "r", encoding="utf-8") as vif:
+            vi_txt = vif.read()
+        assert "<completed_strategy_specification>" in vi_txt
+        assert "<implementation_git_diff>" not in vi_txt
 
-            j3_d_r2 = tasks["p1_job3_debate_feature_r2"]
-            assert j3_d_r2.depends_on == ["p1_job3_debate_feature_r1"]
-            assert j3_d_r2.deliberate["retrieve_mode"] == "no_retrieve"
-            assert j3_d_r2.deliberate["prior_verdict"].endswith("feature.job3_verdict_r1.md")
-            assert j3_d_r2.testing_context["role"] == "render_testing_exec"
+        delib_r1 = tasks["p1_deliberate_feature_r1"]
+        apply_r1 = tasks["p1_apply_feature_r1"]
+        delib_r2 = tasks["p1_deliberate_feature_r2"]
+        apply_r2 = tasks["p1_apply_feature_r2"]
 
-            j3 = tasks["p1_job3_feature"]
-            assert j3.depends_on == ["p1_job3_debate_feature_r2"]
-            assert j3.message_file.endswith("feature.job3_verdict_r2.md")
-            assert any(f.endswith("test_feature.py") for f in j3.files)
-            assert any(f.endswith("feature.py") for f in j3.files)
-            assert any(f.endswith("feature_testing_exec_rendered.md") for f in j3.read_files)
-            assert j3.testing_context["role"] == "render_testing_exec"
+        assert delib_r1.depends_on == ["p1_verify_feature"]
+        assert apply_r1.depends_on == ["p1_deliberate_feature_r1"]
+        assert delib_r2.depends_on == ["p1_apply_feature_r1"]
+        assert apply_r2.depends_on == ["p1_deliberate_feature_r2"]
+        assert delib_r1.deliberate["loops"] == 4
+        assert delib_r1.deliberate["pass_history"] is True
 
-            # 6. Phase 2 Verification & Escalation Chain
-            verify = tasks["p1_verify_feature"]
-            assert verify.depends_on == ["p1_job3_feature"]
-            assert "pytest tests/unit/test_feature.py" in verify.test_cmd
-            assert verify.iterate_test is True
-            assert verify.soft_fail is True
-            assert verify.iterate_file.endswith("feature_testing_iterate_rendered.md")
-            assert any(f.endswith("feature_testing_iterate_rendered.md") for f in verify.read_files)
-            with open(verify.iterate_file, "r", encoding="utf-8") as vif:
-                vi_txt = vif.read()
-            assert "<completed_strategy_specification>" in vi_txt
-            assert "<implementation_git_diff>" not in vi_txt
+        # 7. Phase 3 (Review & Follow-up) Invariants & Cross-Phase Context Hygiene
+        p2_job1 = tasks["p2_job1_feature"]
+        assert p2_job1.depends_on == ["p1_apply_feature_r2"]
+        assert p2_job1.pair_programming is True
+        assert p2_job1.yes_always is False
+        assert p2_job1.message_file is not None and os.path.isfile(p2_job1.message_file)
+        assert p2_job1.message_file.endswith("post_test_validation.md")
 
-            delib_r1 = tasks["p1_deliberate_feature_r1"]
-            apply_r1 = tasks["p1_apply_feature_r1"]
-            delib_r2 = tasks["p1_deliberate_feature_r2"]
-            apply_r2 = tasks["p1_apply_feature_r2"]
+        # Phase 2 Job 1 & Job 2 role segregation: no test files or test-only contexts
+        assert not any(f.endswith("test_feature.py") for f in p1_j1.files)
+        assert not any(f.endswith("docs/test_spec.md") for f in p1_j1.read_files)
+        assert any(f.endswith("docs/spec.md") for f in p1_j1.read_files)
+        assert not any(f.endswith("test_feature.py") for f in j2.files)
+        assert not any(f.endswith("docs/test_spec.md") for f in j2.read_files)
 
-            assert delib_r1.depends_on == ["p1_verify_feature"]
-            assert apply_r1.depends_on == ["p1_deliberate_feature_r1"]
-            assert delib_r2.depends_on == ["p1_apply_feature_r1"]
-            assert apply_r2.depends_on == ["p1_deliberate_feature_r2"]
-            assert delib_r1.deliberate["loops"] == 4
-            assert delib_r1.deliberate["pass_history"] is True
+        # Phase 2 Job 3 & Verify context hygiene: no strategy_template.md bloat
+        assert not any(f.endswith("strategy_template.md") for f in j3.read_files)
+        assert not any(f.endswith("strategy_template.md") for f in verify.read_files)
+        assert any(f.endswith("docs/test_spec.md") for f in j3.read_files)
+        assert any(f.endswith("docs/test_spec.md") for f in verify.read_files)
 
-            # 7. Phase 3 (Review & Follow-up) Invariants & Cross-Phase Context Hygiene
-            p2_job1 = tasks["p2_job1_feature"]
-            assert p2_job1.depends_on == ["p1_apply_feature_r2"]
-            assert p2_job1.pair_programming is True
-            assert p2_job1.yes_always is False
-            assert p2_job1.message_file is not None and os.path.isfile(p2_job1.message_file)
-            assert p2_job1.message_file.endswith("post_test_validation.md")
+        # Phase 3 Post-Test Review receives target + <stem> test file + all contexts, but NOT strategy_template.md
+        assert "src/feature.py" in p2_job1.files
+        assert "tests/unit/test_feature.py" in p2_job1.files
+        assert any(f.endswith("docs/spec.md") for f in p2_job1.read_files)
+        assert any(f.endswith("docs/test_spec.md") for f in p2_job1.read_files)
+        assert not any(f.endswith("strategy_template.md") for f in p2_job1.read_files)
 
-            # Phase 2 Job 1 & Job 2 role segregation: no test files or test-only contexts
-            assert not any(f.endswith("test_feature.py") for f in p1_j1.files)
-            assert not any(f.endswith("docs/test_spec.md") for f in p1_j1.read_files)
-            assert any(f.endswith("docs/spec.md") for f in p1_j1.read_files)
-            assert not any(f.endswith("test_feature.py") for f in j2.files)
-            assert not any(f.endswith("docs/test_spec.md") for f in j2.read_files)
-
-            # Phase 2 Job 3 & Verify context hygiene: no strategy_template.md bloat
-            assert not any(f.endswith("strategy_template.md") for f in j3.read_files)
-            assert not any(f.endswith("strategy_template.md") for f in verify.read_files)
-            assert any(f.endswith("docs/test_spec.md") for f in j3.read_files)
-            assert any(f.endswith("docs/test_spec.md") for f in verify.read_files)
-
-            # Phase 3 Post-Test Review receives target + <stem> test file + all contexts, but NOT strategy_template.md
-            assert "src/feature.py" in p2_job1.files
-            assert "tests/unit/test_feature.py" in p2_job1.files
-            assert any(f.endswith("docs/spec.md") for f in p2_job1.read_files)
-            assert any(f.endswith("docs/test_spec.md") for f in p2_job1.read_files)
-            assert not any(f.endswith("strategy_template.md") for f in p2_job1.read_files)
-
-            print("  ✅ env_plan_do 3-phase DAG topology PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        print("  ✅ env_plan_do 3-phase DAG topology PASS")
 
 
 def test_sticky_phases_5_field_extraction():
@@ -716,55 +693,33 @@ files:
             ],
         }
 
-        yaml_path = os.path.join(tmpdir, "test_sticky_5field.yml")
-        with open(yaml_path, "w", encoding="utf-8") as f:
-            yaml.dump(config, f)
+        tasks = _compile_dag_tasks(
+            tmpdir,
+            config,
+            session_name="mock_sticky_session",
+            yaml_name="test_sticky_5field.yml",
+        )
 
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "mock_sticky_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
+        # 1. Target files: engine.py compiled, phantom_nonexistent.py dropped, test_engine.py diverted
+        assert "p1_job1_engine" in tasks, "Expected p1_job1_engine to be compiled"
+        assert "p1_job1_phantom_nonexistent" not in tasks, "Phantom file must not be compiled"
+        assert "p1_job1_test_engine" not in tasks, "Test file must not be compiled as target_file"
 
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
+        # 2. Barrier linking: Phase 1 entry task depends on Phase 0 exit task
+        p0_task = next(t for tid, t in tasks.items() if tid.startswith("p0_"))
+        assert tasks["p1_job1_engine"].depends_on == [p0_task.id], (
+            f"Expected entry task to depend on {p0_task.id}, got {tasks['p1_job1_engine'].depends_on}"
+        )
 
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
+        # 3. Test separation: test_engine.py was diverted to test_files
+        assert tasks["p1_job3_engine"].files[0] == "tests/test_engine.py"
 
-            # 1. Target files: engine.py compiled, phantom_nonexistent.py dropped, test_engine.py diverted
-            assert "p1_job1_engine" in tasks, "Expected p1_job1_engine to be compiled"
-            assert "p1_job1_phantom_nonexistent" not in tasks, "Phantom file must not be compiled"
-            assert "p1_job1_test_engine" not in tasks, "Test file must not be compiled as target_file"
+        # 4. Context propagation: docs/spec.md was inherited in read_files
+        assert any(f.endswith("docs/spec.md") for f in tasks["p1_job1_engine"].read_files)
+        # Verify context_files_test defaulted to context_files_job
+        assert any(f.endswith("docs/spec.md") for f in tasks["p1_job3_engine"].read_files)
 
-            # 2. Barrier linking: Phase 1 entry task depends on Phase 0 exit task
-            p0_task = next(t for tid, t in tasks.items() if tid.startswith("p0_"))
-            assert tasks["p1_job1_engine"].depends_on == [p0_task.id], (
-                f"Expected entry task to depend on {p0_task.id}, got {tasks['p1_job1_engine'].depends_on}"
-            )
-
-            # 3. Test separation: test_engine.py was diverted to test_files
-            assert tasks["p1_job3_engine"].files[0] == "tests/test_engine.py"
-
-            # 4. Context propagation: docs/spec.md was inherited in read_files
-            assert any(f.endswith("docs/spec.md") for f in tasks["p1_job1_engine"].read_files)
-            # Verify context_files_test defaulted to context_files_job
-            assert any(f.endswith("docs/spec.md") for f in tasks["p1_job3_engine"].read_files)
-
-            print("  ✅ sticky_phases 5-field extraction and barrier linking PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        print("  ✅ sticky_phases 5-field extraction and barrier linking PASS")
 
 
 def test_review_mode_autofix_dependency():
@@ -790,42 +745,21 @@ def test_review_mode_autofix_dependency():
         }],
     }
     with tempfile.TemporaryDirectory() as tmpdir:
-        review_config["working_directory"] = tmpdir
-        yaml_path = os.path.join(tmpdir, "review_dep.yml")
         open(os.path.join(tmpdir, "mock.md"), "a").close()
         open(os.path.join(tmpdir, "heal.sh"), "a").close()
 
-        with open(yaml_path, "w") as f:
-            yaml.dump(review_config, f)
-
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "review_dep_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
-            assert "p0_oracle_mock" in tasks
-            assert "p0_autofix_mock" in tasks
-            assert tasks["p0_autofix_mock"].depends_on == ["p0_oracle_mock"], (
-                f"Expected autofix to depend on p0_oracle_mock, got: {tasks['p0_autofix_mock'].depends_on}"
-            )
-            print("  ✅ Grounding mode autofix depends_on oracle task PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        tasks = _compile_dag_tasks(
+            tmpdir,
+            review_config,
+            session_name="review_dep_session",
+            yaml_name="review_dep.yml",
+        )
+        assert "p0_oracle_mock" in tasks
+        assert "p0_autofix_mock" in tasks
+        assert tasks["p0_autofix_mock"].depends_on == ["p0_oracle_mock"], (
+            f"Expected autofix to depend on p0_oracle_mock, got: {tasks['p0_autofix_mock'].depends_on}"
+        )
+        print("  ✅ Grounding mode autofix depends_on oracle task PASS")
 
 
 def test_sticky_phases_multi_block_and_readonly():
@@ -876,43 +810,23 @@ files:
             ],
         }
 
-        yaml_path = os.path.join(tmpdir, "test_multi_block.yml")
-        with open(yaml_path, "w", encoding="utf-8") as f:
-            yaml.dump(config, f)
+        tasks = _compile_dag_tasks(
+            tmpdir,
+            config,
+            session_name="mock_multi_block_session",
+            yaml_name="test_multi_block.yml",
+        )
 
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "mock_multi_block_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
+        # 1. Target file must remain manual_target.py because editable is False
+        assert "p0_job1_manual_target" in tasks
+        assert "p0_job1_plan_target" not in tasks
 
-            # 1. Target file must remain manual_target.py because editable is False
-            assert "p0_job1_manual_target" in tasks
-            assert "p0_job1_plan_target" not in tasks
-
-            # 2. Context file docs/spec.md must be discovered and inherited in read_files
-            j1 = tasks["p0_job1_manual_target"]
-            assert any(f.endswith("docs/spec.md") for f in j1.read_files), (
-                f"Expected docs/spec.md in read_files, got: {j1.read_files}"
-            )
-            print("  ✅ Multi-block YAML resilience and standalone sticky_readonly PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        # 2. Context file docs/spec.md must be discovered and inherited in read_files
+        j1 = tasks["p0_job1_manual_target"]
+        assert any(f.endswith("docs/spec.md") for f in j1.read_files), (
+            f"Expected docs/spec.md in read_files, got: {j1.read_files}"
+        )
+        print("  ✅ Multi-block YAML resilience and standalone sticky_readonly PASS")
 
 
 def test_skipped_or_disabled_phase_barrier_propagation():
@@ -965,44 +879,24 @@ def test_skipped_or_disabled_phase_barrier_propagation():
             ],
         }
 
-        yaml_path = os.path.join(tmpdir, "skipped_phase_barrier.yml")
-        with open(yaml_path, "w") as f:
-            yaml.dump(config, f)
+        tasks = _compile_dag_tasks(
+            tmpdir,
+            config,
+            session_name="mock_skipped_barrier_session",
+            yaml_name="skipped_phase_barrier.yml",
+        )
 
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "mock_skipped_barrier_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
-
-            # Phase 0 ran
-            assert "p0_job1_p0" in tasks
-            # Phase 1 & 2 generated no tasks
-            assert "p1_job1_p1" not in tasks
-            assert "p2_job1_p2" not in tasks
-            # Phase 3 ran and directly depends on Phase 0's exit task
-            assert "p3_job1_p3" in tasks
-            assert tasks["p3_job1_p3"].depends_on == ["p0_job1_p0"], (
-                f"Expected p3_job1_p3 to depend on p0_job1_p0 across skipped phases, got: {tasks['p3_job1_p3'].depends_on}"
-            )
-            print("  ✅ Skipped and disabled phase barrier propagation PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        # Phase 0 ran
+        assert "p0_job1_p0" in tasks
+        # Phase 1 & 2 generated no tasks
+        assert "p1_job1_p1" not in tasks
+        assert "p2_job1_p2" not in tasks
+        # Phase 3 ran and directly depends on Phase 0's exit task
+        assert "p3_job1_p3" in tasks
+        assert tasks["p3_job1_p3"].depends_on == ["p0_job1_p0"], (
+            f"Expected p3_job1_p3 to depend on p0_job1_p0 across skipped phases, got: {tasks['p3_job1_p3'].depends_on}"
+        )
+        print("  ✅ Skipped and disabled phase barrier propagation PASS")
 
 
 def test_multi_target_fan_in_fan_out_matrix():
@@ -1036,49 +930,29 @@ def test_multi_target_fan_in_fan_out_matrix():
             ],
         }
 
-        yaml_path = os.path.join(tmpdir, "fan_in_out.yml")
-        with open(yaml_path, "w") as f:
-            yaml.dump(config, f)
+        tasks = _compile_dag_tasks(
+            tmpdir,
+            config,
+            session_name="mock_fan_in_out_session",
+            yaml_name="fan_in_out.yml",
+        )
 
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "mock_fan_in_out_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
+        # Phase 0 tasks
+        assert "p0_job2_a" in tasks
+        assert "p0_job2_b" in tasks
 
-            # Phase 0 tasks
-            assert "p0_job2_a" in tasks
-            assert "p0_job2_b" in tasks
+        # Phase 1 a.py preserves direct single-file affinity
+        assert "p1_job1_a" in tasks
+        assert tasks["p1_job1_a"].depends_on == ["p0_job2_a"], (
+            f"Expected p1_job1_a to depend strictly on p0_job2_a, got: {tasks['p1_job1_a'].depends_on}"
+        )
 
-            # Phase 1 a.py preserves direct single-file affinity
-            assert "p1_job1_a" in tasks
-            assert tasks["p1_job1_a"].depends_on == ["p0_job2_a"], (
-                f"Expected p1_job1_a to depend strictly on p0_job2_a, got: {tasks['p1_job1_a'].depends_on}"
-            )
-
-            # Phase 1 c.py (brand new target) fans in across ALL Phase 0 terminal tasks as barrier
-            assert "p1_job1_c" in tasks
-            assert set(tasks["p1_job1_c"].depends_on) == {"p0_job2_a", "p0_job2_b"}, (
-                f"Expected p1_job1_c to fan-in depend on all prior phase terminal tasks, got: {tasks['p1_job1_c'].depends_on}"
-            )
-            print("  ✅ Multi-target fan-in/fan-out barrier matrix PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        # Phase 1 c.py (brand new target) fans in across ALL Phase 0 terminal tasks as barrier
+        assert "p1_job1_c" in tasks
+        assert set(tasks["p1_job1_c"].depends_on) == {"p0_job2_a", "p0_job2_b"}, (
+            f"Expected p1_job1_c to fan-in depend on all prior phase terminal tasks, got: {tasks['p1_job1_c'].depends_on}"
+        )
+        print("  ✅ Multi-target fan-in/fan-out barrier matrix PASS")
 
 
 def test_pre_edit_debate_triad_full_chain():
@@ -1132,55 +1006,35 @@ def test_pre_edit_debate_triad_full_chain():
             ],
         }
 
-        yaml_path = os.path.join(tmpdir, "triad.yml")
-        with open(yaml_path, "w") as f:
-            yaml.dump(config, f)
+        tasks = _compile_dag_tasks(
+            tmpdir,
+            config,
+            session_name="mock_triad_session",
+            yaml_name="triad.yml",
+        )
 
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "mock_triad_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
+        # 1. Existence of all 3 debates and all 3 jobs + verify
+        for expected_id in [
+            "p0_job1_debate_triad", "p0_job1_triad",
+            "p0_job2_debate_triad", "p0_job2_triad",
+            "p0_job3_debate_triad", "p0_job3_triad",
+            "p0_verify_triad",
+        ]:
+            assert expected_id in tasks, f"Missing node: {expected_id}"
 
-            # 1. Existence of all 3 debates and all 3 jobs + verify
-            for expected_id in [
-                "p0_job1_debate_triad", "p0_job1_triad",
-                "p0_job2_debate_triad", "p0_job2_triad",
-                "p0_job3_debate_triad", "p0_job3_triad",
-                "p0_verify_triad",
-            ]:
-                assert expected_id in tasks, f"Missing node: {expected_id}"
+        # 2. Strict sequential dependencies
+        assert tasks["p0_job1_triad"].depends_on == ["p0_job1_debate_triad"]
+        assert tasks["p0_job2_debate_triad"].depends_on == ["p0_job1_triad"]
+        assert tasks["p0_job2_triad"].depends_on == ["p0_job2_debate_triad"]
+        assert tasks["p0_job3_debate_triad"].depends_on == ["p0_job2_triad"]
+        assert tasks["p0_job3_triad"].depends_on == ["p0_job3_debate_triad"]
+        assert tasks["p0_verify_triad"].depends_on == ["p0_job3_triad"]
 
-            # 2. Strict sequential dependencies
-            assert tasks["p0_job1_triad"].depends_on == ["p0_job1_debate_triad"]
-            assert tasks["p0_job2_debate_triad"].depends_on == ["p0_job1_triad"]
-            assert tasks["p0_job2_triad"].depends_on == ["p0_job2_debate_triad"]
-            assert tasks["p0_job3_debate_triad"].depends_on == ["p0_job2_triad"]
-            assert tasks["p0_job3_triad"].depends_on == ["p0_job3_debate_triad"]
-            assert tasks["p0_verify_triad"].depends_on == ["p0_job3_triad"]
-
-            # 3. Segregated verdict filenames
-            assert tasks["p0_job1_triad"].message_file.endswith("triad.job1_verdict.md")
-            assert tasks["p0_job2_triad"].message_file.endswith("triad.job2_verdict.md")
-            assert tasks["p0_job3_triad"].message_file.endswith("triad.job3_verdict.md")
-            print("  ✅ Pre-edit debate triad [1, 1, 1] full sequential DAG PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        # 3. Segregated verdict filenames
+        assert tasks["p0_job1_triad"].message_file.endswith("triad.job1_verdict.md")
+        assert tasks["p0_job2_triad"].message_file.endswith("triad.job2_verdict.md")
+        assert tasks["p0_job3_triad"].message_file.endswith("triad.job3_verdict.md")
+        print("  ✅ Pre-edit debate triad [1, 1, 1] full sequential DAG PASS")
 
 
 def test_hybrid_multi_mode_phase_cascade():
@@ -1227,49 +1081,29 @@ def test_hybrid_multi_mode_phase_cascade():
             ],
         }
 
-        yaml_path = os.path.join(tmpdir, "hybrid_cascade.yml")
-        with open(yaml_path, "w") as f:
-            yaml.dump(config, f)
+        tasks = _compile_dag_tasks(
+            tmpdir,
+            config,
+            session_name="mock_hybrid_session",
+            yaml_name="hybrid_cascade.yml",
+        )
 
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "mock_hybrid_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
+        # Phase 0 exit task
+        assert "p0_job1_spec" in tasks
+        # Phase 1 links to Phase 0 exit
+        assert tasks["p1_oracle_spec"].depends_on == ["p0_job1_spec"]
+        assert tasks["p1_autofix_spec"].depends_on == ["p1_oracle_spec"]
+        assert tasks["p1_heal_spec"].depends_on == ["p1_autofix_spec"]
+        assert tasks["p1_deliberate_spec"].depends_on == ["p1_heal_spec"]
+        assert tasks["p1_apply_spec"].depends_on == ["p1_deliberate_spec"]
+        assert tasks["p1_finalize_spec"].depends_on == ["p1_apply_spec"]
 
-            # Phase 0 exit task
-            assert "p0_job1_spec" in tasks
-            # Phase 1 links to Phase 0 exit
-            assert tasks["p1_oracle_spec"].depends_on == ["p0_job1_spec"]
-            assert tasks["p1_autofix_spec"].depends_on == ["p1_oracle_spec"]
-            assert tasks["p1_heal_spec"].depends_on == ["p1_autofix_spec"]
-            assert tasks["p1_deliberate_spec"].depends_on == ["p1_heal_spec"]
-            assert tasks["p1_apply_spec"].depends_on == ["p1_deliberate_spec"]
-            assert tasks["p1_finalize_spec"].depends_on == ["p1_apply_spec"]
-
-            # Phase 2 entry task waits for Phase 1 finalize
-            assert "p2_job1_spec" in tasks
-            assert tasks["p2_job1_spec"].depends_on == ["p1_finalize_spec"], (
-                f"Expected p2_job1_spec to depend on p1_finalize_spec, got: {tasks['p2_job1_spec'].depends_on}"
-            )
-            print("  ✅ Hybrid multi-mode phase cascade barrier PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        # Phase 2 entry task waits for Phase 1 finalize
+        assert "p2_job1_spec" in tasks
+        assert tasks["p2_job1_spec"].depends_on == ["p1_finalize_spec"], (
+            f"Expected p2_job1_spec to depend on p1_finalize_spec, got: {tasks['p2_job1_spec'].depends_on}"
+        )
+        print("  ✅ Hybrid multi-mode phase cascade barrier PASS")
 
 
 def test_glob_expansion_in_strategy_plan():
@@ -1319,44 +1153,24 @@ files:
             ],
         }
 
-        yaml_path = os.path.join(tmpdir, "glob_plan.yml")
-        with open(yaml_path, "w") as f:
-            yaml.dump(config, f)
+        tasks = _compile_dag_tasks(
+            tmpdir,
+            config,
+            session_name="mock_glob_session",
+            yaml_name="glob_plan.yml",
+        )
 
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "mock_glob_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
+        # Both alpha and beta targets expanded
+        assert "p0_job1_mod_alpha" in tasks
+        assert "p0_job1_mod_beta" in tasks
 
-            # Both alpha and beta targets expanded
-            assert "p0_job1_mod_alpha" in tasks
-            assert "p0_job1_mod_beta" in tasks
+        # Test files matched
+        assert "tests/test_mod_alpha.py" in tasks["p0_job3_mod_alpha"].files
+        assert "tests/test_mod_beta.py" in tasks["p0_job3_mod_beta"].files
 
-            # Test files matched
-            assert "tests/test_mod_alpha.py" in tasks["p0_job3_mod_alpha"].files
-            assert "tests/test_mod_beta.py" in tasks["p0_job3_mod_beta"].files
-
-            # Context file docs/guide.md inherited in read_files
-            assert any(f.endswith("docs/guide.md") for f in tasks["p0_job1_mod_alpha"].read_files)
-            print("  ✅ Glob pattern expansion in strategy plans PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        # Context file docs/guide.md inherited in read_files
+        assert any(f.endswith("docs/guide.md") for f in tasks["p0_job1_mod_alpha"].read_files)
+        print("  ✅ Glob pattern expansion in strategy plans PASS")
 
 
 def test_asymmetric_sticky_phases_discovery():
@@ -1410,35 +1224,15 @@ files:
             ],
         }
 
-        yaml_path = os.path.join(tmpdir, "asym_sticky.yml")
-        with open(yaml_path, "w", encoding="utf-8") as f:
-            yaml.dump(config, f)
+        tasks = _compile_dag_tasks(
+            tmpdir,
+            config,
+            session_name="mock_asym_sticky_session",
+            yaml_name="asym_sticky.yml",
+        )
 
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "mock_asym_sticky_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
-
-            assert "p1_job1_target" in tasks, f"Expected p1_job1_target in tasks: {list(tasks.keys())}"
-            print("  ✅ Asymmetric sticky phases discovery PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        assert "p1_job1_target" in tasks, f"Expected p1_job1_target in tasks: {list(tasks.keys())}"
+        print("  ✅ Asymmetric sticky phases discovery PASS")
 
 
 def test_sticky_phases_h2_markdown_header_fallback():
@@ -1478,36 +1272,16 @@ def test_sticky_phases_h2_markdown_header_fallback():
             ],
         }
 
-        yaml_path = os.path.join(tmpdir, "test_h2.yml")
-        with open(yaml_path, "w") as f:
-            yaml.dump(config, f)
+        tasks = _compile_dag_tasks(
+            tmpdir,
+            config,
+            session_name="mock_h2_session",
+            yaml_name="test_h2.yml",
+        )
 
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "mock_h2_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
-
-            assert "p0_job1_h2_target" in tasks, "Expected p0_job1_h2_target from H2 header parsing"
-            assert tasks["p0_job3_h2_target"].files[0] == "tests/test_h2.py"
-            print("  ✅ H2 markdown header manifest parsing PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        assert "p0_job1_h2_target" in tasks, "Expected p0_job1_h2_target from H2 header parsing"
+        assert tasks["p0_job3_h2_target"].files[0] == "tests/test_h2.py"
+        print("  ✅ H2 markdown header manifest parsing PASS")
 
 
 def test_pre_edit_debate_multi_round_topology():
@@ -1548,54 +1322,33 @@ def test_pre_edit_debate_multi_round_topology():
             ],
         }
 
-        yaml_path = os.path.join(tmpdir, "multi_round_pre.yml")
-        with open(yaml_path, "w") as f:
-            yaml.dump(config, f)
+        tasks = _compile_dag_tasks(
+            tmpdir,
+            config,
+            session_name="mock_pre_round_session",
+            yaml_name="multi_round_pre.yml",
+        )
 
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "mock_pre_round_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
+        # 1. Assert both rounds exist
+        assert "p0_job1_debate_mock_r1" in tasks
+        assert "p0_job1_debate_mock_r2" in tasks
+        assert "p0_job1_mock" in tasks
 
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
+        # 2. Assert dependency chaining
+        assert tasks["p0_job1_debate_mock_r2"].depends_on == ["p0_job1_debate_mock_r1"]
+        assert tasks["p0_job1_mock"].depends_on == ["p0_job1_debate_mock_r2"]
 
-            # 1. Assert both rounds exist
-            assert "p0_job1_debate_mock_r1" in tasks
-            assert "p0_job1_debate_mock_r2" in tasks
-            assert "p0_job1_mock" in tasks
+        # 3. Assert round parameters in deliberate dict
+        d1 = tasks["p0_job1_debate_mock_r1"].deliberate
+        d2 = tasks["p0_job1_debate_mock_r2"].deliberate
+        assert d1["round_idx"] == 1
+        assert d2["round_idx"] == 2
+        assert d1["persist"] is True
+        assert d2["persist"] is True
+        assert "prior_ledger" in d2
+        assert "prior_verdict" in d2
 
-            # 2. Assert dependency chaining
-            assert tasks["p0_job1_debate_mock_r2"].depends_on == ["p0_job1_debate_mock_r1"]
-            assert tasks["p0_job1_mock"].depends_on == ["p0_job1_debate_mock_r2"]
-
-            # 3. Assert round parameters in deliberate dict
-            d1 = tasks["p0_job1_debate_mock_r1"].deliberate
-            d2 = tasks["p0_job1_debate_mock_r2"].deliberate
-            assert d1["round_idx"] == 1
-            assert d2["round_idx"] == 2
-            assert d1["persist"] is True
-            assert d2["persist"] is True
-            assert "prior_ledger" in d2
-            assert "prior_verdict" in d2
-
-            print("  ✅ Pre-edit debate multi-round topology and chaining PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        print("  ✅ Pre-edit debate multi-round topology and chaining PASS")
 
 
 def test_rag_db_and_type_filter_dag_env_propagation():
@@ -1626,40 +1379,19 @@ def test_rag_db_and_type_filter_dag_env_propagation():
             ],
         }
 
-        yaml_path = os.path.join(tmpdir, "rag_env_prop.yml")
-        with open(yaml_path, "w") as f:
-            yaml.dump(config, f)
+        tasks = _compile_dag_tasks(
+            tmpdir,
+            config,
+            session_name="mock_rag_prop_session",
+            yaml_name="rag_env_prop.yml",
+        )
 
-        old_argv = sys.argv
-        orig_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        sys.argv = ["run_workflow.py", "mock_rag_prop_session", yaml_path]
-        namespace = {
-            "__name__": "__test__",
-            "__file__": os.path.join(python_module_dir, "run_workflow.py"),
-        }
-
-        with open(os.path.join(python_module_dir, "run_workflow.py"), "r") as f:
-            code = f.read()
-        try:
-            for k in list(sys.modules.keys()):
-                if "orchestrate" in k or "run_workflow" in k or k.startswith("aider_factory"):
-                    del sys.modules[k]
-            if python_module_dir in sys.path:
-                sys.path.remove(python_module_dir)
-            sys.path.insert(0, python_module_dir)
-            exec(code, namespace)
-            tasks = namespace["factory"].tasks
-
-            j1_task = tasks["p0_job1_target"]
-            rag_env = j1_task.rag_env
-            assert rag_env["ORACLE_TYPE_FILTER"] == "code"
-            assert rag_env["ORACLE_CLAIMS_ONLY"] == "1"
-            assert rag_env["ORACLE_RAG_DB_DIR"].replace("\\", "/").endswith("/shared_lancedb")
-            print("  ✅ RAG db, type_filter, and claims_only propagation PASS")
-        finally:
-            sys.argv = old_argv
-            os.chdir(orig_cwd)
+        j1_task = tasks["p0_job1_target"]
+        rag_env = j1_task.rag_env
+        assert rag_env["ORACLE_TYPE_FILTER"] == "code"
+        assert rag_env["ORACLE_CLAIMS_ONLY"] == "1"
+        assert rag_env["ORACLE_RAG_DB_DIR"].replace("\\", "/").endswith("/shared_lancedb")
+        print("  ✅ RAG db, type_filter, and claims_only propagation PASS")
 
 
 def test_subprocess_non_zero_exit_error_propagation():

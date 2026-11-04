@@ -329,9 +329,218 @@ def test_add_operations():
             shutil.rmtree(external_dir)
 
 
+def test_oracle_maintenance_reexport_parity():
+    import tempfile
+    import oracle_maintenance
+
+    reexported_names = [
+        "_resolve_file_path",
+        "_list_tables",
+        "_list_files",
+        "_remove_table",
+        "_remove_file",
+        "_remove_db",
+        "_resolve_active_collection",
+        "_load_maintenance_config",
+        "_run_maintenance_ingest",
+        "_add_maintenance",
+        "_add_web_maintenance",
+    ]
+    for name in reexported_names:
+        assert hasattr(oracle_maintenance, name), f"Missing {name} in oracle_maintenance"
+        assert hasattr(oracle_agent, name), f"Missing {name} in oracle_agent"
+        assert getattr(oracle_agent, name) is getattr(oracle_maintenance, name), (
+            f"Identity mismatch for {name}"
+        )
+
+    assert oracle_maintenance._safe_int("42", 10) == 42
+    assert oracle_maintenance._safe_int(None, 10) == 10
+    assert oracle_maintenance._safe_int("   ", 10) == 10
+    assert oracle_maintenance._safe_int("invalid", 10) == 10
+
+    assert oracle_maintenance._safe_float("0.15", 0.05) == 0.15
+    assert oracle_maintenance._safe_float(None, 0.05) == 0.05
+    assert oracle_maintenance._safe_float("", 0.05) == 0.05
+    assert oracle_maintenance._safe_float("invalid", 0.05) == 0.05
+
+    assert oracle_maintenance._resolve_file_path(None) is None
+    assert oracle_maintenance._resolve_file_path("   ") is None
+    with tempfile.TemporaryDirectory() as tmpdir:
+        rel_resolved = oracle_maintenance._resolve_file_path("sub/file.txt", base_dir=tmpdir)
+        assert rel_resolved == os.path.normpath(os.path.join(tmpdir, "sub/file.txt"))
+
+    print("  [Unit] oracle_maintenance re-export identity and helpers verified.")
+
+
+def test_add_vs_web_maintenance_ingest_contracts():
+    import builtins
+    import contextlib
+    import io
+    import tempfile
+    from unittest.mock import patch
+    import yaml
+
+    import oracle_maintenance
+    import rag_manager
+    import rag_web
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg_file = os.path.join(tmpdir, ".env.yml")
+        with open(cfg_file, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                {
+                    "working_directory": tmpdir,
+                    "phases": [{"enabled": True, "rag": {"collection_name": "contract_col"}}],
+                },
+                f,
+            )
+
+        src_file = os.path.join(tmpdir, "sample.txt")
+        with open(src_file, "w", encoding="utf-8") as f:
+            f.write("sample content")
+
+        url_list_file = os.path.join(tmpdir, "urls.txt")
+        with open(url_list_file, "w", encoding="utf-8") as f:
+            f.write("# Comment line\n\nhttps://example.com/a\nhttps://example.com/b\n")
+
+        context_root = os.path.join(tmpdir, "lanceDB")
+        hermetic_env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", tmpdir),
+            "USERPROFILE": os.environ.get("USERPROFILE", tmpdir),
+            "ORACLE_CONFIG_FILE": cfg_file,
+        }
+
+        orig_oa_root = getattr(oracle_agent, "rag_context_root", None)
+        orig_om_root = getattr(oracle_maintenance, "rag_context_root", None)
+        try:
+            oracle_agent.rag_context_root = context_root
+            oracle_maintenance.rag_context_root = None
+
+            with patch.dict("os.environ", hermetic_env, clear=True):
+                # 1. _add_maintenance: default embed_model="gemini/text-embedding-004", returns 1 when ingest=False
+                ingest_kwargs_log = []
+
+                def fake_ingest_false(*args, **kwargs):
+                    ingest_kwargs_log.append(kwargs)
+                    return False
+
+                with patch.object(rag_manager, "ingest", side_effect=fake_ingest_false):
+                    rc = oracle_maintenance._add_maintenance("file", [src_file])
+                assert rc == 1
+                assert len(ingest_kwargs_log) == 1
+                assert ingest_kwargs_log[0]["embed_model"] == "gemini/text-embedding-004"
+                assert ingest_kwargs_log[0]["embed_backend"] == "openai"
+                assert ingest_kwargs_log[0]["ocr_only"] is False
+
+                # 2. _add_maintenance with ORACLE_NO_RAG_INGEST="1" passes ocr_only=True
+                os.environ["ORACLE_NO_RAG_INGEST"] = "1"
+                ingest_kwargs_log.clear()
+                with patch.object(
+                    rag_manager,
+                    "ingest",
+                    side_effect=lambda *a, **kw: ingest_kwargs_log.append(kw) or True,
+                ):
+                    rc_ocr = oracle_maintenance._add_maintenance("file", [src_file])
+                assert rc_ocr == 0
+                assert len(ingest_kwargs_log) == 1
+                assert ingest_kwargs_log[0]["ocr_only"] is True
+                os.environ.pop("ORACLE_NO_RAG_INGEST", None)
+
+                # 3. _add_maintenance error branches: directory with action="file" & missing path
+                sub_dir = os.path.join(tmpdir, "subdir")
+                os.makedirs(sub_dir, exist_ok=True)
+                assert oracle_maintenance._add_maintenance("file", [sub_dir]) == 1
+                assert oracle_maintenance._add_maintenance("file", [os.path.join(tmpdir, "missing.txt")]) == 1
+
+                # 4. _add_web_maintenance: default embed_model="BAAI/bge-m3", returns 0 when ingest=False
+                ingest_kwargs_log.clear()
+                fetch_calls = []
+
+                def fake_fetch(urls, job_dir, workers=1):
+                    fetch_calls.append((list(urls), job_dir, workers))
+                    return (len(urls), 0)
+
+                os.environ["ORACLE_WEB_WORKERS"] = "4"
+                with patch.object(rag_web, "fetch_urls_batch", side_effect=fake_fetch), patch.object(
+                    rag_manager, "ingest", side_effect=fake_ingest_false
+                ):
+                    rc_web = oracle_maintenance._add_web_maintenance([f"--file:{url_list_file}"])
+                assert rc_web == 0
+                assert len(fetch_calls) == 1
+                assert fetch_calls[0][0] == ["https://example.com/a", "https://example.com/b"]
+                assert fetch_calls[0][2] == 4
+                assert len(ingest_kwargs_log) == 1
+                assert ingest_kwargs_log[0]["embed_model"] == "BAAI/bge-m3"
+                assert ingest_kwargs_log[0]["embed_backend"] == "sentence-transformers"
+
+                # 5. _add_web_maintenance with ORACLE_NO_RAG_INGEST="1" bypasses rag_manager.ingest
+                os.environ["ORACLE_NO_RAG_INGEST"] = "1"
+                os.environ["ORACLE_WEB_WORKERS"] = "-5"
+                ingest_kwargs_log.clear()
+                fetch_calls.clear()
+                with patch.object(rag_web, "fetch_urls_batch", side_effect=fake_fetch), patch.object(
+                    rag_manager, "ingest", side_effect=fake_ingest_false
+                ):
+                    rc_web_norag = oracle_maintenance._add_web_maintenance(["https://example.com/direct"])
+                assert rc_web_norag == 0
+                assert len(fetch_calls) == 1
+                assert fetch_calls[0][2] == 1  # clamped to >= 1
+                assert len(ingest_kwargs_log) == 0
+                os.environ.pop("ORACLE_NO_RAG_INGEST", None)
+
+                # 6. Exception cascades: YAMLError, ingest RuntimeError, URL file PermissionError
+                stderr_buf = io.StringIO()
+                with contextlib.redirect_stderr(stderr_buf), patch(
+                    "yaml.safe_load", side_effect=yaml.YAMLError("corrupt yaml")
+                ):
+                    assert oracle_maintenance._load_maintenance_config() is None
+                assert "failed to load config" in stderr_buf.getvalue()
+
+                stderr_buf = io.StringIO()
+                with contextlib.redirect_stderr(stderr_buf), patch.object(
+                    rag_manager, "ingest", side_effect=RuntimeError("disk full")
+                ):
+                    rc_err = oracle_maintenance._run_maintenance_ingest({}, context_root, "contract_col")
+                assert rc_err == 1
+                assert "failed with error: disk full" in stderr_buf.getvalue()
+
+                real_open = builtins.open
+
+                def selective_open(file, *args, **kwargs):
+                    if os.path.abspath(str(file)) == os.path.abspath(url_list_file):
+                        raise PermissionError("access denied")
+                    return real_open(file, *args, **kwargs)
+
+                stderr_buf = io.StringIO()
+                with contextlib.redirect_stderr(stderr_buf), patch(
+                    "builtins.open", side_effect=selective_open
+                ):
+                    rc_perm = oracle_maintenance._add_web_maintenance([f"--file:{url_list_file}"])
+                assert rc_perm == 1
+                assert "Error reading URL file" in stderr_buf.getvalue()
+
+        finally:
+            oracle_agent.rag_context_root = orig_oa_root
+            oracle_maintenance.rag_context_root = orig_om_root
+
+    print("  [Unit] _add_maintenance vs _add_web_maintenance contracts verified.")
+
+
+def test_deliberate_shared_contracts_and_loaders():
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    import test_oracle_debate_cli
+
+    test_oracle_debate_cli.test_deliberate_shared_contracts_and_loaders()
+
+
 if __name__ == "__main__":
     test_maintenance_flags_parsing()
     test_add_flags_parsing()
     test_lancedb_operations()
     test_add_operations()
+    test_oracle_maintenance_reexport_parity()
+    test_add_vs_web_maintenance_ingest_contracts()
+    test_deliberate_shared_contracts_and_loaders()
     print("\n🎉 All LanceDB Maintenance CLI Tests Passed!")

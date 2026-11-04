@@ -201,6 +201,26 @@ except ImportError:
     )
 
 
+def _call_oracle_llm(model, messages, api_base=None, api_key=None, *, persist_session=False):
+    """Execute litellm.completion with timing and return (answer, cost_line)."""
+    import litellm
+    import time
+
+    kwargs = _build_llm_kwargs(model, messages, api_base, api_key)
+    effort_tag = f", effort={kwargs.get('reasoning_effort')}" if kwargs.get("reasoning_effort") else ""
+    print(f"[oracle] Thinking ({model}{effort_tag})...", file=sys.stderr, flush=True)
+
+    t0 = time.time()
+    resp = litellm.completion(**kwargs)
+    elapsed = time.time() - t0
+
+    answer = _response_content(resp)
+    cost_line = _litellm_cost_line(resp, persist_session=persist_session)
+    if cost_line:
+        cost_line += f" · thinking_time={elapsed:.2f}s"
+    return answer, cost_line
+
+
 def _load_local_reranker(model: str):
     """Load a local reranker, auto-selecting the correct backend for the model family.
 
@@ -664,6 +684,106 @@ def _full_document(db_dir, collection):
     return f"[source: {src}]\n{body}"
 
 
+def _retrieve_by_mode(
+    query: str,
+    mode: str,
+    k: int,
+    db_dir: Optional[str] = None,
+    collection: Optional[str] = None,
+) -> str:
+    """Dispatch RAG retrieval according to mode (top_k, full_document, no_retrieve)."""
+    m = (mode or "top_k").strip().lower()
+    if m == "no_retrieve":
+        return ""
+    if m == "full_document":
+        return _full_document(
+            db_dir if db_dir is not None else os.environ.get("ORACLE_RAG_DB_DIR"),
+            collection if collection is not None else os.environ.get("ORACLE_COLLECTION", "knowledge"),
+        )
+    return _retrieve(query, k)
+
+
+def _format_project_files_block(
+    file_paths,
+    base_dir: Optional[str] = None,
+    item_prefix: str = "File: ",
+    skip_conventions: bool = False,
+) -> str:
+    """Read existing files and format them into a <project_files> XML block."""
+    if not file_paths:
+        return ""
+    blocks = []
+    for rf in file_paths:
+        if not rf:
+            continue
+        if skip_conventions and os.path.basename(rf).lower() == "conventions.md":
+            continue
+        full = os.path.join(base_dir, rf) if (base_dir and not os.path.isabs(rf)) else rf
+        if os.path.isfile(full):
+            try:
+                with open(full, encoding="utf-8", errors="replace") as fh:
+                    blocks.append(f"{item_prefix}{rf}\n```\n{fh.read()}\n```")
+            except Exception:
+                pass
+    if not blocks:
+        return ""
+    return "<project_files>\n" + "\n\n".join(blocks) + "\n</project_files>\n\n"
+
+
+def _resolve_collection_and_db(raw_val: str, project_dir: str) -> tuple[str, str]:
+    """Resolve (collection_name, db_dir) from a collection name or directory path."""
+    raw_val = (raw_val or "").strip()
+    if not raw_val:
+        return "", ""
+    expanded = os.path.abspath(os.path.expanduser(raw_val))
+    if "/" in raw_val or "\\" in raw_val or os.path.exists(expanded):
+        base = os.path.basename(expanded.rstrip("/\\"))
+        if base.lower() == "lancedb":
+            return os.path.basename(os.path.dirname(expanded.rstrip("/\\"))), expanded
+        return base, os.path.join(expanded, "lancedb")
+    return raw_val, os.path.join(
+        project_dir, ".aider_factory", "markdown", "lanceDB", raw_val, "lancedb"
+    )
+
+
+def _select_active_phase(
+    config: dict,
+    active_idx: Optional[str] = None,
+    target_coll: Optional[str] = None,
+    prefer_debate: bool = False,
+) -> Optional[dict]:
+    """Select the active phase from config matching index, collection, or debate preference."""
+    phases = (config or {}).get("phases", []) or []
+    candidate = None
+    for idx, phase in enumerate(phases):
+        if not phase.get("enabled", True):
+            continue
+        if active_idx is not None and str(idx) == str(active_idx):
+            return phase
+        if active_idx is None and target_coll:
+            p_coll = (phase.get("rag") or {}).get("collection_name") or (
+                phase.get("vector_store") or {}
+            ).get("collection_name")
+            if p_coll == target_coll:
+                return phase
+        if candidate is None:
+            candidate = phase
+        elif prefer_debate:
+            has_debate = bool(
+                phase.get("escalation_debate")
+                or (phase.get("oracle") or {}).get("pre_edit_debate")
+            )
+            cand_has_debate = bool(
+                candidate.get("escalation_debate")
+                or (candidate.get("oracle") or {}).get("pre_edit_debate")
+            )
+            if has_debate and not cand_has_debate:
+                candidate = phase
+    if candidate is None and phases and not prefer_debate:
+        candidate = phases[0]
+    return candidate
+
+
 def _run_auto():
     """Programmatic, no-Aider job: fill a template from one collection's knowledge
     and write the synthesized result straight to disk. Driven entirely by env vars
@@ -713,25 +833,18 @@ def _run_auto():
     # Keep stdout pristine: stray library prints during retrieval / the model call
     # are redirected to stderr; only the final confirmation lands on stdout.
     with contextlib.redirect_stdout(sys.stderr):
-        context = (
-            _full_document(db_dir, collection)
-            if full_doc
-            else _retrieve(instructions, k)
+        context = _retrieve_by_mode(
+            instructions,
+            "full_document" if full_doc else "top_k",
+            k,
+            db_dir=db_dir,
+            collection=collection,
         )
 
         prompt = ""
         rf_str = os.environ.get("ORACLE_JOB_READ_FILES")
         if rf_str:
-            _ctx = []
-            for rf in rf_str.split("\x1e"):
-                if os.path.isfile(rf):
-                    try:
-                        with open(rf, encoding="utf-8") as fh:
-                            _ctx.append(f"File: {rf}\n```\n{fh.read()}\n```")
-                    except Exception:
-                        pass
-            if _ctx:
-                prompt += "<project_files>\n" + "\n\n".join(_ctx) + "\n</project_files>\n\n"
+            prompt += _format_project_files_block(rf_str.split("\x1e"))
 
         if context:
             prompt += f"<knowledge_base>\n{context}\n</knowledge_base>\n\n"
@@ -749,21 +862,9 @@ def _run_auto():
             {"role": "user", "content": prompt},
         ]
         try:
-            import litellm
-            import time
-
-            kwargs = _build_llm_kwargs(model, messages, api_base, api_key)
-            effort_tag = f", effort={kwargs.get('reasoning_effort')}" if kwargs.get("reasoning_effort") else ""
-            print(f"[oracle] Thinking ({model}{effort_tag})...", file=sys.stderr, flush=True)
-
-            t0 = time.time()
-            resp = litellm.completion(**kwargs)
-            elapsed = time.time() - t0
-
-            answer = _response_content(resp)
-            cost_line = _litellm_cost_line(resp, persist_session=False)
-            if cost_line:
-                cost_line += f" · thinking_time={elapsed:.2f}s"
+            answer, cost_line = _call_oracle_llm(
+                model, messages, api_base, api_key, persist_session=False
+            )
         except Exception as e:
             print(f"[oracle-job] model call failed: {e}", file=sys.stderr)
             return 1
@@ -786,20 +887,35 @@ def _run_auto():
     return 0
 
 
-def _resolve_file_path(path_str, base_dir=None):
-    """Shared path resolver for all --file parameters across the AI Factory.
-
-    1. Expands user tilde (~/ -> /home/user).
-    2. Resolves relative paths against base_dir or current working repo root (os.getcwd()).
-    3. Returns normalized absolute path string (or None if path_str is empty/None).
-    """
-    if not path_str:
-        return None
-    expanded = os.path.expanduser(str(path_str).strip())
-    if not os.path.isabs(expanded):
-        base = base_dir or os.getcwd()
-        expanded = os.path.join(base, expanded)
-    return os.path.normpath(expanded)
+# Removed: inline _resolve_file_path moved to oracle_maintenance
+try:
+    from oracle_maintenance import (
+        _add_maintenance,
+        _add_web_maintenance,
+        _list_files,
+        _list_tables,
+        _load_maintenance_config,
+        _remove_db,
+        _remove_file,
+        _remove_table,
+        _resolve_active_collection,
+        _resolve_file_path,
+        _run_maintenance_ingest,
+    )
+except ImportError:
+    from aider_factory.python.oracle_maintenance import (
+        _add_maintenance,
+        _add_web_maintenance,
+        _list_files,
+        _list_tables,
+        _load_maintenance_config,
+        _remove_db,
+        _remove_file,
+        _remove_table,
+        _resolve_active_collection,
+        _resolve_file_path,
+        _run_maintenance_ingest,
+    )
 
 
 def _build_question(argv):
@@ -1031,25 +1147,14 @@ def _extract_overrides(argv):
             print("[oracle] --temperature requires a float value", file=sys.stderr)
             return out, do_list, did_clear, None, None
         if a == "--collection":
-            if i + 1 < len(args):
+            if i + 1 < len(args) and args[i + 1].strip():
                 raw_val = args[i + 1].strip()
                 os.environ["ORACLE_EXPLICIT_COLLECTION"] = "1"
-                expanded = os.path.abspath(os.path.expanduser(raw_val))
-                if "/" in raw_val or "\\" in raw_val or os.path.exists(expanded):
-                    base = os.path.basename(expanded.rstrip("/\\"))
-                    if base.lower() == "lancedb":
-                        coll_name = os.path.basename(os.path.dirname(expanded.rstrip("/\\")))
-                        db_dir = expanded
-                    else:
-                        coll_name = base
-                        db_dir = os.path.join(expanded, "lancedb")
+                coll_name, db_dir = _resolve_collection_and_db(raw_val, os.getcwd())
+                if coll_name:
                     os.environ["ORACLE_COLLECTION"] = coll_name
+                if db_dir:
                     os.environ["ORACLE_RAG_DB_DIR"] = db_dir
-                else:
-                    os.environ["ORACLE_COLLECTION"] = raw_val
-                    os.environ["ORACLE_RAG_DB_DIR"] = os.path.join(
-                        os.getcwd(), ".aider_factory", "markdown", "lanceDB", raw_val, "lancedb"
-                    )
                 i += 2
                 continue
             print("[oracle] --collection requires a name or path", file=sys.stderr)
@@ -1174,662 +1279,7 @@ def _extract_overrides(argv):
     return out, do_list, did_clear, maintenance_action, maintenance_target
 
 
-def _list_tables():
-    """Print the LanceDB tables in ORACLE_RAG_DB_DIR (one per line) to stdout."""
-    db_dir = os.environ.get("ORACLE_RAG_DB_DIR")
-    if not db_dir or not os.path.isdir(db_dir):
-        print(
-            f"[oracle] no lancedb dir to list (ORACLE_RAG_DB_DIR={db_dir})",
-            file=sys.stderr,
-        )
-        return 0
-    names = []
-    with contextlib.redirect_stdout(sys.stderr):
-        try:
-            import lancedb
-
-            db = lancedb.connect(db_dir)
-            _n = db.list_tables() if hasattr(db, "list_tables") else db.table_names()
-            names = list(getattr(_n, "tables", _n))
-        except Exception as e:
-            print(f"[oracle] cannot list tables: {e}", file=sys.stderr)
-    for n in names:
-        print(n)
-    print(f"[oracle] {len(names)} table(s) in {db_dir}", file=sys.stderr)
-    return 0
-
-
-def _list_files():
-    """Print all unique source files across all tables in the active collection."""
-    db_dir = os.environ.get("ORACLE_RAG_DB_DIR")
-    collection = os.environ.get("ORACLE_COLLECTION", "knowledge")
-    if not db_dir or not os.path.isdir(db_dir):
-        print(
-            f"[oracle] no lancedb dir to list files (ORACLE_RAG_DB_DIR={db_dir})",
-            file=sys.stderr,
-        )
-        return 1
-
-    try:
-        import lancedb
-
-        db = lancedb.connect(db_dir)
-        _n = db.list_tables() if hasattr(db, "list_tables") else db.table_names()
-        all_tables = list(getattr(_n, "tables", _n))
-    except Exception as e:
-        print(f"[oracle] cannot connect to database: {e}", file=sys.stderr)
-        return 1
-
-    if collection and collection != "*":
-        tables = [
-            t for t in all_tables if t == collection or t.startswith(collection + "_")
-        ]
-    else:
-        tables = list(all_tables)
-
-    if not tables:
-        print(
-            f"[oracle] no tables found for collection '{collection}'", file=sys.stderr
-        )
-        return 0
-
-    print(f"[oracle] Scanning files in collection '{collection}'...", file=sys.stderr)
-    for tname in sorted(tables):
-        try:
-            tbl = db.open_table(tname)
-            if "source_file" not in tbl.schema.names:
-                continue
-            rows = tbl.search().select(["source_file"]).to_list()
-            unique_files = sorted(
-                list(set(r["source_file"] for r in rows if "source_file" in r))
-            )
-            print(
-                f"\nTable: {tname} ({tbl.count_rows()} chunks, {len(unique_files)} files)"
-            )
-            for uf in unique_files:
-                print(f"  - {uf}")
-        except Exception as e:
-            print(f"[oracle] error reading table {tname}: {e}", file=sys.stderr)
-    return 0
-
-
-def _remove_table(table_name):
-    """Drop a specific table from the active database."""
-    db_dir = os.environ.get("ORACLE_RAG_DB_DIR")
-    if not db_dir or not os.path.isdir(db_dir):
-        print(f"[oracle] no lancedb dir (ORACLE_RAG_DB_DIR={db_dir})", file=sys.stderr)
-        return 1
-
-    try:
-        import lancedb
-
-        db = lancedb.connect(db_dir)
-        _n = db.list_tables() if hasattr(db, "list_tables") else db.table_names()
-        all_tables = list(getattr(_n, "tables", _n))
-
-        if table_name not in all_tables:
-            print(
-                f"[oracle] table '{table_name}' does not exist in the database.",
-                file=sys.stderr,
-            )
-            return 1
-
-        db.drop_table(table_name)
-        print(
-            f"[oracle] Table '{table_name}' successfully dropped from the database.",
-            file=sys.stderr,
-        )
-    except Exception as e:
-        print(f"[oracle] failed to drop table '{table_name}': {e}", file=sys.stderr)
-        return 1
-    return 0
-
-
-def _remove_file(filename):
-    """Surgically delete all chunks belonging to a file across all tables in the active collection."""
-    db_dir = os.environ.get("ORACLE_RAG_DB_DIR")
-    collection = os.environ.get("ORACLE_COLLECTION", "knowledge")
-    if not db_dir or not os.path.isdir(db_dir):
-        print(f"[oracle] no lancedb dir (ORACLE_RAG_DB_DIR={db_dir})", file=sys.stderr)
-        return 1
-
-    try:
-        import lancedb
-
-        db = lancedb.connect(db_dir)
-        _n = db.list_tables() if hasattr(db, "list_tables") else db.table_names()
-        all_tables = list(getattr(_n, "tables", _n))
-    except Exception as e:
-        print(f"[oracle] failed to connect to database: {e}", file=sys.stderr)
-        return 1
-
-    if collection and collection != "*":
-        tables = [
-            t for t in all_tables if t == collection or t.startswith(collection + "_")
-        ]
-    else:
-        tables = list(all_tables)
-
-    total_deleted = 0
-    print(
-        f"[oracle] Surgically removing file '{filename}' from collection '{collection}'...",
-        file=sys.stderr,
-    )
-
-    for tname in tables:
-        try:
-            tbl = db.open_table(tname)
-            if "source_file" not in tbl.schema.names:
-                continue
-
-            count_before = tbl.count_rows()
-            where_clause = (
-                f"source_file = '{filename}' OR source_file LIKE '%/{filename}'"
-            )
-            tbl.delete(where=where_clause)
-
-            count_after = tbl.count_rows()
-            deleted = count_before - count_after
-
-            if deleted > 0:
-                print(
-                    f"  - Table '{tname}': Deleted {deleted} chunk(s).", file=sys.stderr
-                )
-                total_deleted += deleted
-
-                if count_after == 0:
-                    db.drop_table(tname)
-                    print(
-                        f"  - Table '{tname}' is now empty; dropped table.",
-                        file=sys.stderr,
-                    )
-                else:
-                    try:
-                        tbl.optimize()
-                    except Exception:
-                        pass
-        except Exception as e:
-            print(f"[oracle] error processing table {tname}: {e}", file=sys.stderr)
-
-    if total_deleted > 0:
-        print(
-            f"[oracle] Success! Surgically removed {total_deleted} total chunk(s) from the database.",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            f"[oracle] No matching chunks found for file '{filename}' in the active collection.",
-            file=sys.stderr,
-        )
-    return 0
-
-
-def _remove_db():
-    """Surgically delete ONLY the lancedb directory for the active collection, preserving OCR files."""
-    db_dir = os.environ.get("ORACLE_RAG_DB_DIR")
-    collection = os.environ.get("ORACLE_COLLECTION", "knowledge")
-    if not db_dir or not os.path.isdir(db_dir):
-        print(
-            f"[oracle] no lancedb dir to remove (ORACLE_RAG_DB_DIR={db_dir})",
-            file=sys.stderr,
-        )
-        return 1
-
-    import shutil
-
-    print(
-        f"[oracle] Surgically wiping vector database for collection '{collection}'...",
-        file=sys.stderr,
-    )
-    print(f"[oracle] Target: {db_dir}", file=sys.stderr)
-    try:
-        shutil.rmtree(db_dir)
-        print(
-            f"[oracle] Success! Vector database wiped. OCR text cache and images preserved.",
-            file=sys.stderr,
-        )
-    except Exception as e:
-        print(f"[oracle] failed to remove database directory: {e}", file=sys.stderr)
-        return 1
-    return 0
-
-
-def _resolve_active_collection(cfg):
-    """Resolve collection name for maintenance commands (--add-file, --add-web, etc.).
-
-    Explicit CLI --collection overrides take highest priority. Otherwise, reads the
-    phase collection_name from config, avoiding inherited per-doc table names.
-    """
-    if os.environ.get("ORACLE_EXPLICIT_COLLECTION") == "1" and os.environ.get("ORACLE_COLLECTION"):
-        return os.environ.get("ORACLE_COLLECTION")
-
-    phases = cfg.get("phases", [])
-    if phases:
-        active_phase = None
-        phase_idx_str = os.environ.get("ORACLE_PHASE_INDEX")
-        if phase_idx_str is not None:
-            try:
-                idx = int(phase_idx_str)
-                if 0 <= idx < len(phases):
-                    active_phase = phases[idx]
-            except ValueError:
-                pass
-        if active_phase is None:
-            active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
-
-        rag_phase = active_phase.get("rag", {}) or {}
-        if isinstance(rag_phase, dict) and rag_phase.get("collection_name"):
-            return rag_phase.get("collection_name")
-
-    return "knowledge"
-
-
-def _add_maintenance(action, paths):
-    """Implement --add-file and --add-table maintenance commands."""
-    import shutil
-
-    import rag_manager
-    import yaml
-
-    # 1. Resolve project directory and default directories
-    project_dir = os.getcwd()
-    context_root = os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB")
-
-    # 2. Resolve active configuration path automatically on disk
-    config_path = os.environ.get("ORACLE_CONFIG_FILE")
-    if not config_path or not os.path.exists(config_path):
-        config_path = os.path.join(project_dir, ".aider_factory", ".env.yml")
-    if not os.path.exists(config_path):
-        config_path = os.path.join(project_dir, ".env.yml")
-
-    cfg = {}
-    if config_path and os.path.exists(config_path):
-        print(f"[oracle] Loading configuration from: {config_path}", file=sys.stderr)
-        try:
-            with open(config_path, "r") as f:
-                cfg = yaml.safe_load(f) or {}
-        except Exception as e:
-            print(f"[oracle] failed to load config: {e}", file=sys.stderr)
-            return 1
-    else:
-        print(f"[oracle] Config file not found; using default configuration.", file=sys.stderr)
-
-    project_dir = str(cfg.get("working_directory", project_dir))
-    context_root = os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB")
-
-    endpoints = cfg.get("endpoints", {}) or {}
-    
-    # Find the active phase to resolve models
-    phases = cfg.get("phases", []) or []
-    active_phase = next((ph for ph in phases if ph.get("enabled")), {}) if phases else {}
-    phase_models = active_phase.get("models", {}) or {}
-
-    # 3. Resolve active collection
-    collection = _resolve_active_collection(cfg)
-
-    # Update environment variable so rag_manager uses the correct collection
-    os.environ["ORACLE_COLLECTION"] = collection
-
-    job_dir = os.path.join(context_root, collection)
-    print(f"[oracle] Active collection: {collection}", file=sys.stderr)
-    print(f"[oracle] Collection directory: {job_dir}", file=sys.stderr)
-
-    # 4. Bootstrap collection directory if it doesn't exist
-    if not os.path.exists(job_dir):
-        print(f"[oracle] Bootstrapping new collection directory...", file=sys.stderr)
-        os.makedirs(job_dir, exist_ok=True)
-
-    # 5. Process and copy paths
-    for p in paths:
-        if not os.path.exists(p):
-            print(f"[oracle] Error: Path does not exist: {p}", file=sys.stderr)
-            return 1
-
-        abs_p = os.path.abspath(p)
-        abs_job_dir = os.path.abspath(job_dir)
-
-        # Check if the path is already inside the collection directory
-        if abs_p.startswith(abs_job_dir + os.sep) or abs_p == abs_job_dir:
-            print(
-                f"[oracle] Path is already inside collection directory: {p}",
-                file=sys.stderr,
-            )
-            continue
-
-        # Copy file or directory
-        name = os.path.basename(p)
-        dest_p = os.path.join(job_dir, name)
-
-        if os.path.isdir(p):
-            if action == "file":
-                print(
-                    f"[oracle] Error: Cannot add directory '{p}' using --add-file. Use --add-table instead.",
-                    file=sys.stderr,
-                )
-                return 1
-            print(f"[oracle] Copying directory {p} -> {dest_p}...", file=sys.stderr)
-            if os.path.exists(dest_p):
-                # Merge directory contents recursively
-                for root, dirs, files in os.walk(p):
-                    rel_path = os.path.relpath(root, p)
-                    target_dir = os.path.join(dest_p, rel_path)
-                    os.makedirs(target_dir, exist_ok=True)
-                    for f in files:
-                        shutil.copy2(os.path.join(root, f), os.path.join(target_dir, f))
-            else:
-                shutil.copytree(p, dest_p)
-        else:
-            print(f"[oracle] Copying file {p} -> {dest_p}...", file=sys.stderr)
-            shutil.copy2(p, dest_p)
-
-    # 6. Determine settings from active phase
-    batch_setting = True
-    chunk_size = 1500
-    chunk_overlap = 300
-    cer_thresh = 0.05
-    max_retries = 2
-    parallel = 1
-    ocr_max_tokens = 4096
-    code_chunk_size = 2000
-    use_docling = True
-    docling_do_ocr = True
-    docling_timeout = None
-    ocr_prompt = rag_manager.DEFAULT_OCR_PROMPT
-
-    phases = cfg.get("phases", [])
-    if phases:
-        active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
-        phase_rag = active_phase.get("rag", {}) or {}
-        phase_val = active_phase.get("validation", {}) or {}
-        batch_setting = bool(phase_rag.get("batch", True))
-        chunk_size = int(phase_rag.get("chunk_size_chars", 1500))
-        chunk_overlap = int(phase_rag.get("chunk_overlap_chars", 300))
-        cer_thresh = float(phase_rag.get("cer_threshold", 0.05))
-        max_retries = int(phase_rag.get("ocr_max_retries", 2))
-        parallel = int(phase_rag.get("ocr_parallel", 1))
-        ocr_max_tokens = int(phase_rag.get("ocr_max_tokens", 4096))
-        code_chunk_size = int(phase_rag.get("code_chunk_size", 2000))
-        use_docling = phase_rag.get("use_docling", True)
-        docling_do_ocr = phase_rag.get("docling_do_ocr", True)
-        docling_timeout = phase_rag.get("docling_timeout") or cfg.get("rag", {}).get("docling_timeout")
-        ocr_prompt = phase_rag.get("ocr_prompt", rag_manager.DEFAULT_OCR_PROMPT)
-
-    # Resolve embedding settings with proper fallbacks to rag blocks
-    global_rag = cfg.get("rag", {}) or {}
-    phase_rag = {}
-    if phases:
-        active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
-        phase_rag = active_phase.get("rag", {}) or {}
-
-    embed_model = (
-        os.environ.get("ORACLE_EMBED_MODEL")
-        or phase_rag.get("embed_model")
-        or global_rag.get("embed_model")
-        or phase_models.get("embed_model", "gemini/text-embedding-004")
-    )
-    embed_api_base = (
-        os.environ.get("ORACLE_EMBED_API_BASE")
-        or phase_rag.get("embed_api_base")
-        or global_rag.get("embed_api_base")
-        or endpoints.get("embed_api_base")
-    )
-    embed_backend = (
-        os.environ.get("ORACLE_EMBED_BACKEND")
-        or phase_rag.get("embed_backend")
-        or global_rag.get("embed_backend")
-        or ("openai" if "embedding" in embed_model.lower() else "sentence-transformers")
-    )
-    if (
-        embed_api_base
-        and embed_backend == "sentence-transformers"
-        and not os.environ.get("ORACLE_EMBED_BACKEND")
-    ):
-        embed_backend = "openai"
-
-    ocr_only_mode = os.environ.get("ORACLE_NO_RAG_INGEST") == "1"
-    if ocr_only_mode:
-        print(f"[oracle] --no-rag active: Files will be OCR'd to Markdown but NOT indexed into LanceDB.", file=sys.stderr)
-    else:
-        print(
-            f"[oracle] Running incremental ingestion (batch={batch_setting}, model={embed_model}, backend={embed_backend})...",
-            file=sys.stderr,
-        )
-
-    # 7. Call rag_manager.ingest
-    try:
-        success = rag_manager.ingest(
-            context_root=context_root,
-            collection_name=collection,
-            embed_model=embed_model,
-            embed_backend=embed_backend,
-            embed_api_base=embed_api_base,
-            chunk_size_chars=chunk_size,
-            chunk_overlap_chars=chunk_overlap,
-            ocr_api_base=endpoints.get("ocr_api_base"),
-            ocr_agent=phase_models.get("ocr_agent"),
-            ocr_prompt=ocr_prompt,
-            overwrite=False,  # CRITICAL: incremental update!
-            cer_threshold=cer_thresh,
-            ocr_max_retries=max_retries,
-            ocr_parallel=parallel,
-            ocr_max_tokens=ocr_max_tokens,
-            code_chunk_size=code_chunk_size,
-            batch=batch_setting,
-            ocr_only=ocr_only_mode,
-            use_docling=use_docling,
-            docling_do_ocr=docling_do_ocr,
-            docling_timeout=docling_timeout,
-        )
-        if success:
-            print("[oracle] Ingestion completed successfully.", file=sys.stderr)
-            return 0
-        else:
-            print(
-                "[oracle] Ingestion failed: no files were added or an error occurred.",
-                file=sys.stderr,
-            )
-            return 1
-    except Exception as e:
-        print(f"[oracle] Ingestion failed with error: {e}", file=sys.stderr)
-        return 1
-
-
-def _add_web_maintenance(urls):
-    """Implement --add-web maintenance command: fetch web content, convert to <stem>.md / <stem>.pdf,
-    and incrementally ingest into LanceDB via rag_manager.ingest()."""
-    import rag_manager
-    import rag_web
-    import yaml
-
-    project_dir = os.getcwd()
-    context_root = os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB")
-
-    config_path = os.environ.get("ORACLE_CONFIG_FILE")
-    if not config_path or not os.path.exists(config_path):
-        config_path = os.path.join(project_dir, ".aider_factory", ".env.yml")
-    if not os.path.exists(config_path):
-        config_path = os.path.join(project_dir, ".env.yml")
-
-    cfg = {}
-    if config_path and os.path.exists(config_path):
-        print(f"[oracle] Loading configuration from: {config_path}", file=sys.stderr)
-        try:
-            with open(config_path, "r") as f:
-                cfg = yaml.safe_load(f) or {}
-        except Exception as e:
-            print(f"[oracle] failed to load config: {e}", file=sys.stderr)
-            return 1
-    else:
-        print(f"[oracle] Config file not found; using default configuration.", file=sys.stderr)
-
-    project_dir = str(cfg.get("working_directory", project_dir))
-    context_root = os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB")
-
-    endpoints = cfg.get("endpoints", {}) or {}
-    phases = cfg.get("phases", []) or []
-    active_phase = next((ph for ph in phases if ph.get("enabled")), {}) if phases else {}
-    phase_models = active_phase.get("models", {}) or {}
-    collection = _resolve_active_collection(cfg)
-    os.environ["ORACLE_COLLECTION"] = collection
-
-    job_dir = os.path.join(context_root, collection)
-    os.makedirs(job_dir, exist_ok=True)
-
-    # Process file inputs (--file <path> or positional file paths) and direct URLs
-    expanded_urls = []
-    for t in urls:
-        is_explicit_file = t.startswith("--file:")
-        raw_path = t[7:] if is_explicit_file else t
-
-        resolved_path = _resolve_file_path(raw_path, project_dir)
-
-        if is_explicit_file or os.path.isfile(resolved_path):
-            if not os.path.isfile(resolved_path):
-                print(
-                    f"[oracle] Error: URL file not found: {resolved_path}",
-                    file=sys.stderr,
-                )
-                return 1
-            print(
-                f"[oracle] Reading URLs from file: {resolved_path}", file=sys.stderr
-            )
-            try:
-                with open(resolved_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            expanded_urls.append(line)
-            except Exception as e:
-                print(
-                    f"[oracle] Error reading URL file '{resolved_path}': {e}",
-                    file=sys.stderr,
-                )
-                return 1
-        else:
-            expanded_urls.append(t)
-
-    try:
-        workers = int(os.environ.get("ORACLE_WEB_WORKERS", "1"))
-    except ValueError:
-        workers = 1
-
-    success_count, skipped_count = rag_web.fetch_urls_batch(expanded_urls, job_dir, workers=workers)
-
-    print(f"\n[rag-web] Batch Web Download Summary:", file=sys.stderr)
-    print(f"          - Successfully Ingested: {success_count} file(s)", file=sys.stderr)
-    print(f"          - Skipped / Failed:        {skipped_count} file(s)", file=sys.stderr)
-
-    if success_count == 0:
-        print("[oracle] No web files were successfully fetched.", file=sys.stderr)
-        return 1
-
-    # Check for --no-rag flag override (Markdown conversion only, skip LanceDB indexing)
-    if os.environ.get("ORACLE_NO_RAG_INGEST") == "1":
-        print(f"[oracle] --no-rag active: Saved Markdown files to '{job_dir}'. Bypassing LanceDB vector indexing.", file=sys.stderr)
-        return 0
-
-    batch_setting = True
-    chunk_size = 1500
-    chunk_overlap = 300
-    cer_thresh = 0.05
-    max_retries = 2
-    parallel = 1
-    ocr_max_tokens = 4096
-    code_chunk_size = 2000
-    use_docling = True
-    docling_do_ocr = True
-    docling_timeout = None
-    ocr_prompt = rag_manager.DEFAULT_OCR_PROMPT
-
-    phases = cfg.get("phases", [])
-    if phases:
-        active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
-        phase_rag = active_phase.get("rag", {}) or {}
-        batch_setting = bool(phase_rag.get("batch", True))
-        chunk_size = int(phase_rag.get("chunk_size_chars", 1500))
-        chunk_overlap = int(phase_rag.get("chunk_overlap_chars", 300))
-        cer_thresh = float(phase_rag.get("cer_threshold", 0.05))
-        max_retries = int(phase_rag.get("ocr_max_retries", 2))
-        parallel = int(phase_rag.get("ocr_parallel", 1))
-        ocr_max_tokens = int(phase_rag.get("ocr_max_tokens", 4096))
-        code_chunk_size = int(phase_rag.get("code_chunk_size", 2000))
-        use_docling = phase_rag.get("use_docling", True)
-        docling_do_ocr = phase_rag.get("docling_do_ocr", True)
-        docling_timeout = phase_rag.get("docling_timeout") or cfg.get("rag", {}).get("docling_timeout")
-        ocr_prompt = phase_rag.get("ocr_prompt", rag_manager.DEFAULT_OCR_PROMPT)
-
-    # Resolve embedding settings with proper fallbacks to rag blocks
-    global_rag = cfg.get("rag", {}) or {}
-    phase_rag = {}
-    if phases:
-        active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
-        phase_rag = active_phase.get("rag", {}) or {}
-
-    embed_model = (
-        os.environ.get("ORACLE_EMBED_MODEL")
-        or phase_rag.get("embed_model")
-        or global_rag.get("embed_model")
-        or phase_models.get("embed_model", "BAAI/bge-m3")
-    )
-    embed_api_base = (
-        os.environ.get("ORACLE_EMBED_API_BASE")
-        or phase_rag.get("embed_api_base")
-        or global_rag.get("embed_api_base")
-        or endpoints.get("embed_api_base")
-    )
-    embed_backend = (
-        os.environ.get("ORACLE_EMBED_BACKEND")
-        or phase_rag.get("embed_backend")
-        or global_rag.get("embed_backend")
-        or ("openai" if "embedding" in embed_model.lower() else "sentence-transformers")
-    )
-    if (
-        embed_api_base
-        and embed_backend == "sentence-transformers"
-        and not os.environ.get("ORACLE_EMBED_BACKEND")
-    ):
-        embed_backend = "openai"
-
-    print(
-        f"[oracle] Incremental LanceDB ingestion for collection '{collection}' (model={embed_model}, backend={embed_backend})...",
-        file=sys.stderr,
-    )
-
-    try:
-        success = rag_manager.ingest(
-            context_root=context_root,
-            collection_name=collection,
-            embed_model=embed_model,
-            embed_backend=embed_backend,
-            embed_api_base=embed_api_base,
-            chunk_size_chars=chunk_size,
-            chunk_overlap_chars=chunk_overlap,
-            ocr_api_base=endpoints.get("ocr_api_base"),
-            ocr_agent=phase_models.get("ocr_agent"),
-            ocr_prompt=ocr_prompt,
-            overwrite=False,
-            cer_threshold=cer_thresh,
-            ocr_max_retries=max_retries,
-            ocr_parallel=parallel,
-            ocr_max_tokens=ocr_max_tokens,
-            code_chunk_size=code_chunk_size,
-            batch=batch_setting,
-            use_docling=use_docling,
-            docling_do_ocr=docling_do_ocr,
-            docling_timeout=docling_timeout,
-        )
-        if success:
-            print("[oracle] Web ingestion completed successfully.", file=sys.stderr)
-            return 0
-        else:
-            print(
-                "[oracle] Web ingestion completed but no new chunks were added or an error occurred.",
-                file=sys.stderr,
-            )
-            return 0
-    except Exception as e:
-        print(f"[oracle] Web ingestion failed with error: {e}", file=sys.stderr)
-        return 1
+# Removed: LanceDB and Web maintenance operations (_list_tables, _list_files, _remove_table, _remove_file, _remove_db, _resolve_active_collection, _add_maintenance, _add_web_maintenance) moved to oracle_maintenance.py
 
 
 def _resolve_debate_stem(explicit_stem: Optional[str] = None, config: Optional[dict] = None) -> str:
@@ -1901,29 +1351,14 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
     active_idx = os.environ.get("ORACLE_PHASE_INDEX")
     target_coll = os.environ.get("ORACLE_COLLECTION")
     config = {}
+    candidate_phase = None
     if os.path.exists(yaml_path):
         try:
-            with open(yaml_path, "r") as f:
+            with open(yaml_path, "r", encoding="utf-8", errors="replace") as f:
                 config = yaml.safe_load(f) or {}
-            candidate_phase = None
-            for idx, phase in enumerate(config.get("phases", [])):
-                if not phase.get("enabled", True):
-                    continue
-                if active_idx is not None and str(idx) == active_idx:
-                    candidate_phase = phase
-                    break
-                elif active_idx is None and target_coll:
-                    phase_coll = (phase.get("rag") or {}).get("collection_name") or (phase.get("vector_store") or {}).get("collection_name")
-                    if phase_coll == target_coll:
-                        candidate_phase = phase
-                        break
-                elif candidate_phase is None:
-                    candidate_phase = phase
-                else:
-                    has_debate = bool(phase.get("escalation_debate") or (phase.get("oracle") or {}).get("pre_edit_debate"))
-                    cand_has_debate = bool(candidate_phase.get("escalation_debate") or (candidate_phase.get("oracle") or {}).get("pre_edit_debate"))
-                    if has_debate and not cand_has_debate:
-                        candidate_phase = phase
+            candidate_phase = _select_active_phase(
+                config, active_idx=active_idx, target_coll=target_coll, prefer_debate=True
+            )
 
             if candidate_phase:
                 phase = candidate_phase
@@ -1996,37 +1431,31 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
     # Resolve weak model routing for debate task
     resolved_weak_model = os.environ.get("AIDER_WEAK_MODEL") or os.environ.get("WEAK_MODEL")
     raw_weak_api = os.environ.get("WEAK_MODEL_API_BASE") or os.environ.get("AIDER_WEAK_MODEL_API_BASE")
-    if os.path.exists(yaml_path):
+    if config:
         try:
-            with open(yaml_path, "r", encoding="utf-8") as f:
-                _cfg = yaml.safe_load(f) or {}
-            _phases = _cfg.get("phases", []) or []
-            _p = _phases[int(active_idx)] if active_idx is not None and int(active_idx) < len(_phases) else (_phases[0] if _phases else {})
-            resolved_weak_model = (_p.get("models", {}) or {}).get("weak_model") or (_cfg.get("models", {}) or {}).get("weak_model") or resolved_weak_model
-            raw_weak_api = (_p.get("endpoints", {}) or {}).get("weak_model_api_base") or (_cfg.get("endpoints", {}) or {}).get("weak_model_api_base") or raw_weak_api
+            _phases = config.get("phases", []) or []
+            _p = candidate_phase or (
+                _phases[int(active_idx)]
+                if active_idx is not None and int(active_idx) < len(_phases)
+                else (_phases[0] if _phases else {})
+            )
+            resolved_weak_model = (_p.get("models", {}) or {}).get("weak_model") or (config.get("models", {}) or {}).get("weak_model") or resolved_weak_model
+            raw_weak_api = (_p.get("endpoints", {}) or {}).get("weak_model_api_base") or (config.get("endpoints", {}) or {}).get("weak_model_api_base") or raw_weak_api
         except Exception:
             pass
 
-    from env_utils import is_local_model, is_valid_endpoint, ensure_model_settings, is_dummy_key
-    resolved_weak_api = raw_weak_api if is_valid_endpoint(raw_weak_api) else None
     if resolved_weak_model and not is_local_model(resolved_weak_model):
+        resolved_weak_api = None
+    elif is_valid_endpoint(raw_weak_api):
+        resolved_weak_api = raw_weak_api
+    elif resolved_weak_model and is_local_model(resolved_weak_model):
+        cand_fb = oracle_api or arch_api
+        resolved_weak_api = cand_fb if is_valid_endpoint(cand_fb) else None
+    else:
         resolved_weak_api = None
 
     task.weak_model = resolved_weak_model
     task.weak_model_api_base = resolved_weak_api
-    if resolved_weak_model and resolved_weak_api:
-        _router_k = os.environ.get("LITELLM_API_KEY", "")
-        _router_k = _router_k if _router_k and not is_dummy_key(_router_k) else "sk-dummy"
-        base_settings_cands = [
-            os.path.join(project_dir, ".aider_factory", ".aider.model.settings.yml"),
-            os.path.join(project_dir, ".aider.model.settings.yml"),
-        ]
-        base_settings_path = next((c for c in base_settings_cands if os.path.isfile(c)), None)
-        ensure_model_settings(
-            target_path=os.path.join(str(factory.session_dir), ".aider.model.settings.yml"),
-            models_to_configure=[{"name": resolved_weak_model, "api_base": resolved_weak_api, "api_key": _router_k}],
-            base_settings_path=base_settings_path,
-        )
 
     def _resolve_template_or_file(path_str):
         p = _resolve_file_path(path_str, project_dir)
@@ -2039,30 +1468,41 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
         cand = resolve_template_path(path_str, project_directory=project_dir)
         return cand if (cand and os.path.isfile(cand)) else p
 
-    def _load_contents(raw_val, label):
-        if not raw_val:
-            return []
-        items = raw_val if isinstance(raw_val, (list, tuple)) else str(raw_val).split(",")
-        contents = []
-        for entry in [str(f).strip() for f in items if str(f).strip()]:
-            resolved = _resolve_template_or_file(entry)
-            if not resolved or not os.path.isfile(resolved):
-                print(f"[oracle] Error: {label} file not found: {entry}", file=sys.stderr)
-                return None
-            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
-                contents.append(f.read().strip())
-        return contents
-
-    oracle_persona_contents = _load_contents(raw_orc_persona, "Oracle persona")
+    # Removed: inline _load_contents replaced by deliberate.load_persona_or_instruct_files
+    oracle_persona_contents = deliberate.load_persona_or_instruct_files(
+        raw_orc_persona,
+        project_dir=project_dir,
+        resolve_fn=_resolve_template_or_file,
+        label="Oracle persona",
+        strict=True,
+    )
     if oracle_persona_contents is None:
         return 1
-    arch_persona_contents = _load_contents(raw_arch_persona, "Architect persona")
+    arch_persona_contents = deliberate.load_persona_or_instruct_files(
+        raw_arch_persona,
+        project_dir=project_dir,
+        resolve_fn=_resolve_template_or_file,
+        label="Architect persona",
+        strict=True,
+    )
     if arch_persona_contents is None:
         return 1
-    oracle_file_contents = _load_contents(raw_orc_files, "Oracle instruction")
+    oracle_file_contents = deliberate.load_persona_or_instruct_files(
+        raw_orc_files,
+        project_dir=project_dir,
+        resolve_fn=_resolve_template_or_file,
+        label="Oracle instruction",
+        strict=True,
+    )
     if oracle_file_contents is None:
         return 1
-    arch_file_contents = _load_contents(raw_arch_files, "Architect instruction")
+    arch_file_contents = deliberate.load_persona_or_instruct_files(
+        raw_arch_files,
+        project_dir=project_dir,
+        resolve_fn=_resolve_template_or_file,
+        label="Architect instruction",
+        strict=True,
+    )
     if arch_file_contents is None:
         return 1
 
@@ -2110,7 +1550,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
     conventions_content = ""
     if conventions_path and os.path.isfile(conventions_path):
         try:
-            with open(conventions_path, "r", encoding="utf-8") as f:
+            with open(conventions_path, "r", encoding="utf-8", errors="replace") as f:
                 conventions_content = f.read().strip()
             rel_conv = os.path.relpath(conventions_path, project_dir).replace("\\", "/")
             if rel_conv not in _reads and conventions_path not in _reads:
@@ -2127,16 +1567,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
             parts.append(f"## Custom Persona Directives\n{p_content}")
         return "\n\n".join(parts)
 
-    terminal_contract = (
-        "\n\n<evaluation_contract>\n"
-        "Critically evaluate the Architect's proposal in accordance with your persona guidelines. "
-        "Structure your response exactly as follows:\n"
-        "<critique>\n"
-        "[Step-by-step analysis of edge cases, logic flaws, and RAG grounding]\n"
-        "</critique>\n"
-        "VERDICT: [AGREE | REVISE | OBJECT - <reason>]\n"
-        "</evaluation_contract>"
-    )
+    terminal_contract = deliberate.EVALUATION_CONTRACT
 
     def _format_arch_prompt(prompt_text: str, r_idx: int) -> str:
         if arch_persona_contents:
@@ -2197,13 +1628,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
     except ValueError:
         k = 20
     with contextlib.redirect_stdout(sys.stderr):
-        if ret_mode == "full_document":
-            context = _full_document(
-                os.environ.get("ORACLE_RAG_DB_DIR"),
-                os.environ.get("ORACLE_COLLECTION", "knowledge"),
-            )
-        elif ret_mode != "no_retrieve":
-            context = _retrieve(question, k)
+        context = _retrieve_by_mode(question, ret_mode, k)
 
     # Log retrieved chunks for debates to stderr (keeps stdout pristine)
     nchunks = context.count("[source:") if context else 0
@@ -2241,13 +1666,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
                 except ValueError:
                     k = 20
                 with contextlib.redirect_stdout(sys.stderr):
-                    if ret_mode == "full_document":
-                        context = _full_document(
-                            os.environ.get("ORACLE_RAG_DB_DIR"),
-                            os.environ.get("ORACLE_COLLECTION", "knowledge"),
-                        )
-                    elif ret_mode != "no_retrieve":
-                        context = _retrieve(question, k)
+                    context = _retrieve_by_mode(question, ret_mode, k)
             if os.path.exists(debate_aider_history):
                 try:
                     os.remove(debate_aider_history)
@@ -2281,24 +1700,14 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
             )
 
         if not _session_loaded:
-            _file_ctx = []
-            for _rf in _reads:
-                if os.path.basename(_rf).lower() == "conventions.md":
-                    continue
-                _full = os.path.join(project_dir, _rf)
-                if os.path.isfile(_full):
-                    try:
-                        with open(_full, encoding="utf-8") as _fh:
-                            _file_ctx.append(f"## {_rf}\n```\n{_fh.read()}\n```")
-                    except Exception:
-                        pass
-            cli_file_text = ("\n\n".join(_file_ctx)) if _file_ctx else ""
-
             orc_seed = ""
             if orc_file_snippet:
                 orc_seed += orc_file_snippet
-            if cli_file_text:
-                orc_seed += f"<project_files>\n{cli_file_text}\n</project_files>\n\n"
+            _pf_block = _format_project_files_block(
+                _reads, base_dir=project_dir, item_prefix="## ", skip_conventions=True
+            )
+            if _pf_block:
+                orc_seed += _pf_block
             if context:
                 orc_seed += f"<knowledge_base>\n{context}\n</knowledge_base>\n\n"
             orc_seed += f"<question>\n{question}\n</question>"
@@ -2313,21 +1722,9 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
         oracle_messages.append({"role": "user", "content": orc_seed})
 
         try:
-            import litellm
-            import time
-
-            _t0_kwargs = _build_llm_kwargs(oracle_model, oracle_messages, oracle_api)
-            effort_tag = f", effort={_t0_kwargs.get('reasoning_effort')}" if _t0_kwargs.get("reasoning_effort") else ""
-            print(f"[oracle] Thinking ({oracle_model}{effort_tag})...", file=sys.stderr, flush=True)
-
-            t0 = time.time()
-            resp = litellm.completion(**_t0_kwargs)
-            elapsed = time.time() - t0
-
-            initial_oracle = _response_content(resp)
-            oracle_cost_line_0 = _litellm_cost_line(resp, persist_session=False)
-            if oracle_cost_line_0:
-                oracle_cost_line_0 += f" · thinking_time={elapsed:.2f}s"
+            initial_oracle, oracle_cost_line_0 = _call_oracle_llm(
+                oracle_model, oracle_messages, oracle_api, persist_session=False
+            )
         except Exception as e:
             print(f"Oracle API Error (turn 0): {e}", file=sys.stderr)
             return 1
@@ -2370,10 +1767,7 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
                 + "\n\n"
             )
 
-        terminal_anchor = (
-            "Conclude your response with EXACTLY this terminal line:\n"
-            "PROPOSAL: <one-line summary of resolution>"
-        )
+        terminal_anchor = deliberate.PROPOSAL_TERMINAL_ANCHOR
 
         for turn in range(max_turns):
             turn_label = f"r{round_idx} turn {turn + 1}/{max_turns}"
@@ -2493,21 +1887,9 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
             oracle_messages.append({"role": "user", "content": orc_msg})
 
             try:
-                import litellm
-                import time
-
-                kwargs = _build_llm_kwargs(oracle_model, oracle_messages, oracle_api)
-                effort_tag = f", effort={kwargs.get('reasoning_effort')}" if kwargs.get("reasoning_effort") else ""
-                print(f"[oracle] Thinking ({oracle_model}{effort_tag})...", file=sys.stderr, flush=True)
-
-                t0 = time.time()
-                resp = litellm.completion(**kwargs)
-                elapsed = time.time() - t0
-
-                last_oracle = _response_content(resp)
-                oracle_cost_line = _litellm_cost_line(resp, persist_session=False)
-                if oracle_cost_line:
-                    oracle_cost_line += f" · thinking_time={elapsed:.2f}s"
+                last_oracle, oracle_cost_line = _call_oracle_llm(
+                    oracle_model, oracle_messages, oracle_api, persist_session=False
+                )
             except Exception as e:
                 print(f"Oracle API Error: {e}", file=sys.stderr)
                 return 1
@@ -2570,11 +1952,12 @@ def _run_cli_debate(question, mode, max_turns, rounds=1, persist=False):
         )
 
         # Early exit on agreement only if not in persist mode and no distinct configurations remain
-        has_remaining_rounds = (
-            round_idx < len(oracle_persona_contents)
-            or round_idx < len(arch_persona_contents)
-            or round_idx < len(oracle_file_contents)
-            or round_idx < len(arch_file_contents)
+        has_remaining_rounds = deliberate.has_remaining_round_configs(
+            round_idx,
+            oracle_persona_contents,
+            arch_persona_contents,
+            oracle_file_contents,
+            arch_file_contents,
         )
         if state == "agreed" and not persist and not has_remaining_rounds:
             break
@@ -2681,30 +2064,17 @@ def _ensure_oracle_config():
 
         target_coll = os.environ.get("ORACLE_COLLECTION")
         active_idx = os.environ.get("ORACLE_PHASE_INDEX")
-        active_phase = None
+        active_phase = _select_active_phase(
+            config, active_idx=active_idx, target_coll=target_coll, prefer_debate=False
+        )
 
-        for idx, p in enumerate(phases):
-            if not p.get("enabled", True):
-                continue
-            if active_idx is not None and str(idx) == active_idx:
-                active_phase = p
-                break
-            elif active_idx is None and target_coll:
-                p_coll = (p.get("rag") or {}).get("collection_name") or (p.get("vector_store") or {}).get("collection_name")
-                if p_coll == target_coll:
-                    active_phase = p
-                    break
-
-        if not active_phase and phases:
-            active_phase = next((p for p in phases if p.get("enabled", True)), phases[0])
-
-        yaml_type = (active_phase.get("rag") or {}).get("type_filter") or (config.get("rag") or {}).get("type_filter")
+        yaml_type = ((active_phase or {}).get("rag") or {}).get("type_filter") or (config.get("rag") or {}).get("type_filter")
         if yaml_type and "ORACLE_TYPE_FILTER" not in os.environ:
             os.environ["ORACLE_TYPE_FILTER"] = str(yaml_type).strip().lower()
 
         if os.environ.get("ORACLE_EXPLICIT_COLLECTION") != "1":
             yaml_coll = (active_phase.get("rag") or {}).get("collection_name") if active_phase else None
-            yaml_db = (active_phase.get("rag") or {}).get("db") or (config.get("rag") or {}).get("db")
+            yaml_db = ((active_phase or {}).get("rag") or {}).get("db") or (config.get("rag") or {}).get("db")
             if yaml_db:
                 raw_db = str(yaml_db).strip()
                 if not (raw_db.startswith("/") or raw_db.startswith("\\") or (len(raw_db) > 1 and raw_db[1] == ":")):
@@ -2714,22 +2084,11 @@ def _ensure_oracle_config():
                 if yaml_coll:
                     os.environ["ORACLE_COLLECTION"] = yaml_coll
             elif yaml_coll:
-                expanded = os.path.abspath(os.path.expanduser(yaml_coll))
-                if "/" in yaml_coll or "\\" in yaml_coll or os.path.exists(expanded):
-                    base = os.path.basename(expanded.rstrip("/\\"))
-                    if base.lower() == "lancedb":
-                        coll_name = os.path.basename(os.path.dirname(expanded.rstrip("/\\")))
-                        db_dir = expanded
-                    else:
-                        coll_name = base
-                        db_dir = os.path.join(expanded, "lancedb")
+                coll_name, db_dir = _resolve_collection_and_db(str(yaml_coll), project_dir)
+                if coll_name:
                     os.environ["ORACLE_COLLECTION"] = coll_name
+                if db_dir:
                     os.environ["ORACLE_RAG_DB_DIR"] = db_dir
-                else:
-                    os.environ["ORACLE_COLLECTION"] = yaml_coll
-                    os.environ["ORACLE_RAG_DB_DIR"] = os.path.join(
-                        project_dir, ".aider_factory", "markdown", "lanceDB", yaml_coll, "lancedb"
-                    )
         elif not os.environ.get("ORACLE_RAG_DB_DIR"):
             coll = os.environ.get("ORACLE_COLLECTION")
             if coll and "/" not in coll and "\\" not in coll:
@@ -3013,15 +2372,7 @@ Knowledge Base Maintenance:
         _session_loaded = isinstance(messages, list) and len(messages) > 1
 
         # 1. Exact pre-regression behavior: vector search runs on every turn
-        if mode == "no_retrieve":
-            context = ""  # pure LLM over the question/--file; no vector search
-        elif mode == "full_document":
-            context = _full_document(
-                os.environ.get("ORACLE_RAG_DB_DIR"),
-                os.environ.get("ORACLE_COLLECTION", "knowledge"),
-            )
-        else:  # top_k (default)
-            context = _retrieve(question, k)
+        context = _retrieve_by_mode(question, mode, k)
 
         # 2. Gate ONLY static context file injection to Turn 1 (prevents token inflation)
         prompt = ""
@@ -3030,16 +2381,7 @@ Knowledge Base Maintenance:
                 "ORACLE_CONTEXT_FILES"
             )
             if rf_str:
-                _ctx = []
-                for rf in rf_str.split("\x1e"):
-                    if rf and os.path.isfile(rf):
-                        try:
-                            with open(rf, encoding="utf-8") as fh:
-                                _ctx.append(f"File: {rf}\n```\n{fh.read()}\n```")
-                        except Exception:
-                            pass
-                if _ctx:
-                    prompt += "<project_files>\n" + "\n\n".join(_ctx) + "\n</project_files>\n\n"
+                prompt += _format_project_files_block(rf_str.split("\x1e"))
 
         if context:
             prompt += f"<knowledge_base>\n{context}\n</knowledge_base>\n\n"
@@ -3061,21 +2403,9 @@ Knowledge Base Maintenance:
 
         messages.append({"role": "user", "content": prompt})
         try:
-            import litellm
-            import time
-
-            kwargs = _build_llm_kwargs(model, messages, api_base, api_key)
-            effort_tag = f", effort={kwargs.get('reasoning_effort')}" if kwargs.get("reasoning_effort") else ""
-            print(f"[oracle] Thinking ({model}{effort_tag})...", file=sys.stderr, flush=True)
-
-            t0 = time.time()
-            resp = litellm.completion(**kwargs)
-            elapsed = time.time() - t0
-
-            answer = _response_content(resp)
-            cost_line = _litellm_cost_line(resp, persist_session=use_session)
-            if cost_line:
-                cost_line += f" · thinking_time={elapsed:.2f}s"
+            answer, cost_line = _call_oracle_llm(
+                model, messages, api_base, api_key, persist_session=use_session
+            )
         except Exception as e:
             print(f"[oracle] model call failed: {e}", file=sys.stderr)
             return 0

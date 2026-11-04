@@ -57,7 +57,7 @@ class TestE2ERagResearchDemo(unittest.TestCase):
             shim_bin = Path(tmp_dir) / "bin"
             self._ensure_binaries_on_path(shim_bin, env)
 
-            # Scrub lingering session variables
+            # Scrub lingering session variables (keep XDG_CONFIG_HOME and LLM keys for bootstrap & validator)
             for k in list(env.keys()):
                 if k.startswith("AI_FACTORY_") or k.startswith("ORACLE_"):
                     env.pop(k, None)
@@ -81,7 +81,30 @@ class TestE2ERagResearchDemo(unittest.TestCase):
                 0,
                 f"01_setup_workspace.sh failed with exit code {res1.returncode}\nStderr: {res1.stderr}\nStdout: {res1.stdout}",
             )
-            self.assertTrue((ws / ".aider_factory" / ".env.yml").is_file())
+            env_yml_path = ws / ".aider_factory" / ".env.yml"
+            self.assertTrue(env_yml_path.is_file())
+
+            import yaml
+
+            cfg_data = yaml.safe_load(env_yml_path.read_text(encoding="utf-8")) or {}
+            if isinstance(cfg_data.get("endpoints"), dict):
+                cfg_data["endpoints"].pop("embed_api_base", None)
+            if isinstance(cfg_data.get("rag"), dict):
+                cfg_data["rag"]["embed_model"] = "BAAI/bge-m3"
+                cfg_data["rag"]["embed_backend"] = "sentence-transformers"
+                cfg_data["rag"].pop("embed_api_base", None)
+            for phase in cfg_data.get("phases") or []:
+                if isinstance(phase, dict):
+                    if isinstance(phase.get("endpoints"), dict):
+                        phase["endpoints"].pop("embed_api_base", None)
+                    p_rag = phase.setdefault("rag", {})
+                    if isinstance(p_rag, dict):
+                        p_rag["embed_model"] = "BAAI/bge-m3"
+                        p_rag["embed_backend"] = "sentence-transformers"
+                        p_rag.pop("embed_api_base", None)
+            env_yml_path.write_text(
+                yaml.safe_dump(cfg_data, sort_keys=False), encoding="utf-8"
+            )
 
             # 2. Run 02_research_and_rag.sh
             res2 = subprocess.run(

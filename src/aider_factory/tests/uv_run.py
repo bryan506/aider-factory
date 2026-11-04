@@ -66,13 +66,18 @@ def main():
 
     failed_files = []
     sub_env = os.environ.copy()
+    for k in list(sub_env.keys()):
+        if k.startswith("AI_FACTORY_") or k.startswith("ORACLE_") or k == "AIDER_ARCHITECT":
+            sub_env.pop(k, None)
     sub_env["PYTHONUTF8"] = "1"
     sub_env["PYTHONIOENCODING"] = "utf-8"
+    sub_env.setdefault("AIDER_YES", "1")
+    sub_env.setdefault("AIDER_NO_GITIGNORE", "1")
 
     for f in test_files:
         print(f"\n{'='*80}\n🚀 RUNNING: {f}\n{'='*80}")
         cmd = ["uv", "run", "--with", "pytest", "pytest", "-s", "-v", f]
-        rc = subprocess.call(cmd, env=sub_env)
+        rc = subprocess.call(cmd, env=sub_env, stdin=subprocess.DEVNULL)
         if rc != 0:
             print(f"\n❌ FAILED: {f}")
             failed_files.append(f)

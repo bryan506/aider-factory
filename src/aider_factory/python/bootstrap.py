@@ -120,9 +120,21 @@ def clear_helper_session(terminal_mode=False):
             pass
 
 try:
-    from aider_factory.python.env_utils import is_dummy_key, resolve_api_key, load_env_files
+    from aider_factory.python.env_utils import (
+        atomic_write_text,
+        is_dummy_key,
+        is_test_path,
+        load_env_files,
+        resolve_api_key,
+    )
 except ImportError:
-    from env_utils import is_dummy_key, resolve_api_key, load_env_files
+    from env_utils import (
+        atomic_write_text,
+        is_dummy_key,
+        is_test_path,
+        load_env_files,
+        resolve_api_key,
+    )
 
 load_env_files()
 
@@ -292,6 +304,232 @@ def _select_models(available: list) -> dict:
     return {"architect": arch, "editor": arch, "weak": weak, "embed": embed, "reranker": rerank}
 
 
+_SOURCE_EXTS = {".py", ".r", ".rs", ".go", ".js", ".ts", ".jsx", ".tsx"}
+_EXCLUDE_DIRS = frozenset({
+    ".git", ".aider_factory", "node_modules", "__pycache__",
+    ".venv", "venv", "dist", "build", ".cache", ".pytest_cache",
+    "site-packages", ".eggs",
+})
+_EXCLUDE_RE = re.compile(
+    r"(?:^|[\\/])(?:tests?[\\/]|test_|conftest\.py|setup\.py|__init__\.py$)"
+)
+_ROUTER_ENDPOINTS = (
+    "architect_api_base",
+    "editor_api",
+    "editor_api_fallback",
+    "weak_model_api_base",
+)
+
+
+def _discover_target_files(base_dir: str) -> list:
+    found = []
+    for root, dirs, files in os.walk(base_dir):
+        dirs[:] = [
+            d for d in dirs
+            if d not in _EXCLUDE_DIRS and not d.endswith(".egg-info")
+        ]
+        for fname in files:
+            if os.path.splitext(fname)[1].lower() not in _SOURCE_EXTS:
+                continue
+            rel = os.path.relpath(os.path.join(root, fname), base_dir).replace("\\", "/")
+            if _EXCLUDE_RE.search(rel) or is_test_path(rel):
+                continue
+            found.append(rel)
+    found.sort()
+    return found
+
+
+def _discover_context_files(base_dir: str) -> list:
+    ctx = []
+    for name in ("README.md", "CHANGELOG.md"):
+        if os.path.isfile(os.path.join(base_dir, name)):
+            ctx.append(name)
+    docs_dir = os.path.join(base_dir, "docs")
+    if os.path.isdir(docs_dir):
+        for sub in sorted(os.listdir(docs_dir)):
+            if sub.endswith(".md"):
+                ctx.append(os.path.join("docs", sub).replace("\\", "/"))
+    return ctx
+
+
+def _render_workflow_yaml_template(
+    content: str,
+    *,
+    name: str,
+    working_directory: str,
+    test_command_prefix: Optional[str] = None,
+    test_runner: Optional[str] = None,
+    test_naming_and_path: Optional[str] = None,
+    router_base: Optional[str] = None,
+    cluster_config: Optional[dict] = None,
+    model_choices: Optional[dict] = None,
+    target_file: Optional[str] = None,
+    context_files: Optional[list] = None,
+    standardize_analyze_bugs: bool = False,
+) -> str:
+    """Apply deterministic regex substitutions to a workflow YAML template."""
+    cwd_forward = working_directory.replace("\\", "/")
+    content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{name}"', content, count=1)
+    content = re.sub(
+        r'working_directory:\s*".*?"',
+        lambda _: f'working_directory: "{cwd_forward}"',
+        content,
+        count=1,
+    )
+
+    if test_command_prefix is not None:
+        content = re.sub(
+            r'test_command_prefix:\s*".*?"',
+            lambda _: f'test_command_prefix: "{test_command_prefix}"',
+            content,
+        )
+    if test_runner is not None:
+        content = re.sub(
+            r'test_runner:\s*".*?"',
+            lambda _: f'test_runner: "{test_runner}"',
+            content,
+        )
+    if test_naming_and_path is not None:
+        content = re.sub(
+            r'test_naming_and_path:\s*".*?"',
+            lambda _: f'test_naming_and_path: "{test_naming_and_path}"',
+            content,
+        )
+
+    if router_base:
+        for ep_key in _ROUTER_ENDPOINTS:
+            content = re.sub(
+                rf'{ep_key}:\s*".*?"',
+                lambda _, k=ep_key: f'{k}: "{router_base}"',
+                content,
+            )
+
+    if cluster_config:
+        for ep_key in ("architect_api_base", "editor_api", "rag_agent_api"):
+            if ep_key in cluster_config:
+                content = re.sub(
+                    rf'{ep_key}:\s*".*?"',
+                    lambda _, k=ep_key: f'{k}: "{cluster_config[k]}"',
+                    content,
+                )
+        if "architect_agent" in cluster_config:
+            arch_c = cluster_config["architect_agent"]
+            ed_c = cluster_config.get("editor_agent", arch_c)
+            content = re.sub(
+                r'architect_agent:\s*".*?"',
+                lambda _: f'architect_agent: "{arch_c}"',
+                content,
+            )
+            content = re.sub(
+                r'editor_agent:\s*".*?"',
+                lambda _: f'editor_agent: "{ed_c}"',
+                content,
+            )
+            content = re.sub(
+                r'editor_agent_test:\s*".*?"',
+                lambda _: f'editor_agent_test: "{ed_c}"',
+                content,
+            )
+            content = re.sub(
+                r'editor_agent_test_fallback:\s*".*?"',
+                lambda _: f'editor_agent_test_fallback: "{arch_c}"',
+                content,
+            )
+
+    if model_choices:
+        if model_choices.get("architect"):
+            arch = model_choices["architect"]
+            editor = model_choices.get("editor", arch)
+            content = re.sub(
+                r'architect_agent:\s*".*?"',
+                lambda _: f'architect_agent: "{arch}"',
+                content,
+            )
+            content = re.sub(
+                r'editor_agent:\s*".*?"',
+                lambda _: f'editor_agent: "{editor}"',
+                content,
+            )
+            content = re.sub(
+                r'editor_agent_test:\s*".*?"',
+                lambda _: f'editor_agent_test: "{editor}"',
+                content,
+            )
+            content = re.sub(
+                r'editor_agent_test_fallback:\s*".*?"',
+                lambda _: f'editor_agent_test_fallback: "{editor}"',
+                content,
+            )
+        if model_choices.get("weak"):
+            weak = model_choices["weak"]
+            content = re.sub(
+                r'weak_model:\s*".*?"',
+                lambda _: f'weak_model: "{weak}"',
+                content,
+            )
+        if model_choices.get("embed"):
+            _embed_m = model_choices["embed"]
+            content = re.sub(
+                r'embed_model:\s*".*?"',
+                lambda _: f'embed_model: "{_embed_m}"',
+                content,
+            )
+            _eb = (
+                "openai"
+                if any(
+                    x in _embed_m.lower()
+                    for x in ("gemini", "openai", "embedding", "qwen")
+                )
+                else "sentence-transformers"
+            )
+            content = re.sub(
+                r'embed_backend:\s*".*?"',
+                lambda _: f'embed_backend: "{_eb}"',
+                content,
+            )
+        if model_choices.get("reranker"):
+            rerank = model_choices["reranker"]
+            content = re.sub(
+                r'ranking_agent:\s*".*?"',
+                lambda _: f'ranking_agent: "{rerank}"',
+                content,
+            )
+
+    if standardize_analyze_bugs:
+        bak_pat = r'template:\s*"\.?\.?/?(?:aider_factory/)?markdown/internal/analyze_bugs\.md"'
+        bak_rep = 'template: "src/aider_factory/markdown/internal/analyze_bugs.md"'
+        content = re.sub(bak_pat, lambda _: bak_rep, content, count=1)
+
+    if target_file:
+        def _repl_target(m: re.Match) -> str:
+            indent = m.group(1) or "        "
+            return f'{m.group(1)}target_files:\n{indent}- "{target_file}"'
+
+        content = re.sub(
+            r"^([ \t]*)target_files:\s*\[\]",
+            _repl_target,
+            content,
+            count=1,
+            flags=re.MULTILINE,
+        )
+
+    if context_files:
+        def _repl_context(m: re.Match) -> str:
+            indent = m.group(1) or "        "
+            _cf = "\n".join(f'{indent}- "{f}"' for f in context_files[:15])
+            return f"{m.group(1)}context_files_job:\n{_cf}"
+
+        content = re.sub(
+            r"^([ \t]*)context_files_job:\s*\[\]",
+            _repl_context,
+            content,
+            count=1,
+            flags=re.MULTILINE,
+        )
+
+    return content
+
+
 def run_bootstrap(target_dir: str) -> None:
     """Deterministic workspace scaffold. No interview. No LLM calls.
 
@@ -327,108 +565,12 @@ def run_bootstrap(target_dir: str) -> None:
         available_models = probe_router(router_base, router_key)
     model_choices = _select_models(available_models) if available_models else {}
 
-    # --- Step 4: Write config via regex substitution ---
+    # --- Step 4: Auto-discover target_files and context_files_job & render templates ---
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     template_path = os.path.join(pkg_dir, "default_configs", "env.yml")
 
     with open(template_path, "r", encoding="utf-8") as f:
         content = f.read()
-
-    # Project identity
-    sensible_name = f"{repo_name.replace('_', ' ').replace('-', ' ').title()} Pipeline"
-    content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{sensible_name}"', content, count=1)
-    cwd_forward = cwd.replace("\\", "/")
-    content = re.sub(r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd_forward}"', content, count=1)
-
-    # Test framework
-    content = re.sub(r'test_command_prefix:\s*".*?"', lambda _: f'test_command_prefix: "{fw_prefix}"', content, count=1)
-    content = re.sub(r'test_runner:\s*".*?"', lambda _: f'test_runner: "{fw_runner}"', content, count=1)
-    content = re.sub(r'test_naming_and_path:\s*".*?"', lambda _: f'test_naming_and_path: "{fw_path}"', content, count=1)
-
-    # Router endpoints: only traditional-LLM slots get the detected router URL.
-    # RAG, OCR, embed, ranking, grounding stay at template defaults —
-    # auto-resolved locally at runtime (llama.cpp, sentence-transformers, MiniCheck).
-    if router_base:
-        _ROUTER_ENDPOINTS = (
-            "architect_api_base",
-            "editor_api",
-            "editor_api_fallback",
-            "weak_model_api_base",
-        )
-        for ep_key in _ROUTER_ENDPOINTS:
-            content = re.sub(
-                rf'{ep_key}:\s*".*?"',
-                lambda _, k=ep_key: f'{k}: "{router_base}"',
-                content,
-                count=1,
-            )
-
-    # Models (only if router returned results)
-    if model_choices.get("architect"):
-        arch = model_choices["architect"]
-        editor = model_choices["editor"]
-        content = re.sub(r'architect_agent:\s*".*?"', lambda _: f'architect_agent: "{arch}"', content, count=1)
-        content = re.sub(r'editor_agent:\s*".*?"', lambda _: f'editor_agent: "{editor}"', content, count=1)
-        content = re.sub(r'editor_agent_test:\s*".*?"', lambda _: f'editor_agent_test: "{editor}"', content, count=1)
-        content = re.sub(r'editor_agent_test_fallback:\s*".*?"', lambda _: f'editor_agent_test_fallback: "{editor}"', content, count=1)
-    if model_choices.get("weak"):
-        weak = model_choices["weak"]
-        content = re.sub(r'weak_model:\s*".*?"', lambda _: f'weak_model: "{weak}"', content, count=1)
-    if model_choices.get("embed"):
-        _embed_m = model_choices["embed"]
-        content = re.sub(r'embed_model:\s*".*?"', lambda _: f'embed_model: "{_embed_m}"', content, count=1)
-        # Align embed_backend to prevent cloud-model / local-backend mismatch
-        _eb = "openai" if any(x in _embed_m.lower() for x in ("gemini", "openai", "embedding", "qwen")) else "sentence-transformers"
-        content = re.sub(r'embed_backend:\s*".*?"', lambda _: f'embed_backend: "{_eb}"', content, count=1)
-    if model_choices.get("reranker"):
-        content = re.sub(r'ranking_agent:\s*".*?"', lambda _: f'ranking_agent: "{model_choices["reranker"]}"', content, count=1)
-
-    # Standardize analyze_bugs template path
-    content = re.sub(
-        r'template:\s*"\.?\.?/?(?:aider_factory/)?markdown/internal/analyze_bugs\.md"',
-        'template: "src/aider_factory/markdown/internal/analyze_bugs.md"',
-        content,
-        count=1,
-    )
-
-    # --- Step 4b: Auto-discover target_files and context_files_job ---
-    _SOURCE_EXTS = {".py", ".r", ".rs", ".go", ".js", ".ts", ".jsx", ".tsx"}
-    _EXCLUDE_DIRS = frozenset({
-        ".git", ".aider_factory", "node_modules", "__pycache__",
-        ".venv", "venv", "dist", "build", ".cache", ".pytest_cache",
-        "site-packages", ".eggs",
-    })
-    _EXCLUDE_RE = re.compile(
-        r"(?:^|[\\/])(?:tests?[\\/]|test_|conftest\.py|setup\.py|__init__\.py$)"
-    )
-
-    def _discover_target_files(base_dir: str) -> list:
-        found = []
-        for root, dirs, files in os.walk(base_dir):
-            dirs[:] = [d for d in dirs
-                       if d not in _EXCLUDE_DIRS
-                       and not d.endswith(".egg-info")]
-            for fname in files:
-                if os.path.splitext(fname)[1].lower() not in _SOURCE_EXTS:
-                    continue
-                rel = os.path.relpath(os.path.join(root, fname), base_dir).replace("\\", "/")
-                if _EXCLUDE_RE.search(rel):
-                    continue
-                found.append(rel)
-        found.sort()
-        return found
-
-    def _discover_context_files(base_dir: str) -> list:
-        ctx = []
-        for name in ("README.md", "CHANGELOG.md"):
-            if os.path.isfile(os.path.join(base_dir, name)):
-                ctx.append(name)
-        docs_dir = os.path.join(base_dir, "docs")
-        if os.path.isdir(docs_dir):
-            for sub in sorted(os.listdir(docs_dir)):
-                if sub.endswith(".md"):
-                    ctx.append(os.path.join("docs", sub).replace("\\", "/"))
-        return ctx
 
     target_files = _discover_target_files(cwd)
     context_files = _discover_context_files(cwd)
@@ -443,35 +585,36 @@ def run_bootstrap(target_dir: str) -> None:
         # Broaden: pick any real file at repo root (README, DESCRIPTION, etc.)
         for _candidate in sorted(os.listdir(cwd)):
             _full = os.path.join(cwd, _candidate)
-            if os.path.isfile(_full) and not _candidate.startswith("."):
+            if (
+                os.path.isfile(_full)
+                and not _candidate.startswith(".")
+                and not _EXCLUDE_RE.search(_candidate)
+                and not is_test_path(_candidate)
+            ):
                 _anchor = _candidate
                 break
 
-    if _anchor:
-        content = re.sub(
-            r'(target_files:\s*)\[\]',
-            lambda m: m.group(1) + f'\n        - "{_anchor}"',
-            content,
-            count=1,
-        )
-
-    if context_files:
-        _cf = "\n".join(f'        - "{f}"' for f in context_files[:15])
-        content = re.sub(
-            r'(context_files_job:\s*)\[\]',
-            lambda m: m.group(1) + "\n" + _cf,
-            content,
-            count=1,
-        )
-    # context_files_test: left as [] — user populates manually.
+    sensible_name = f"{repo_name.replace('_', ' ').replace('-', ' ').title()} Pipeline"
+    content = _render_workflow_yaml_template(
+        content,
+        name=sensible_name,
+        working_directory=cwd,
+        test_command_prefix=fw_prefix,
+        test_runner=fw_runner,
+        test_naming_and_path=fw_path,
+        router_base=router_base,
+        model_choices=model_choices,
+        target_file=_anchor,
+        context_files=context_files,
+        standardize_analyze_bugs=True,
+    )
 
     # Provision .aider_factory directory
     local_aider_factory_dir = Path(cwd) / ".aider_factory"
     local_aider_factory_dir.mkdir(parents=True, exist_ok=True)
 
     target_yaml_path = local_aider_factory_dir / f".env_{repo_name}.yml"
-    with open(target_yaml_path, "w", encoding="utf-8") as f:
-        f.write(content)
+    atomic_write_text(target_yaml_path, content)
 
     plan_do_template_path = os.path.join(
         pkg_dir, "default_configs", "sample_yaml_config", "env_plan_do.yml"
@@ -483,107 +626,19 @@ def run_bootstrap(target_dir: str) -> None:
         sensible_plan_name = (
             f"{repo_name.replace('_', ' ').replace('-', ' ').title()} Plan-Do Pipeline"
         )
-        plan_do_content = re.sub(
-            r'name:\s*".*?"',
-            lambda _: f'name: "{sensible_plan_name}"',
+        plan_do_content = _render_workflow_yaml_template(
             plan_do_content,
-            count=1,
+            name=sensible_plan_name,
+            working_directory=cwd,
+            test_command_prefix=fw_prefix,
+            test_runner=fw_runner,
+            test_naming_and_path=fw_path,
+            router_base=router_base,
+            model_choices=model_choices,
         )
-        plan_do_content = re.sub(
-            r'working_directory:\s*".*?"',
-            lambda _: f'working_directory: "{cwd_forward}"',
-            plan_do_content,
-            count=1,
-        )
-        plan_do_content = re.sub(
-            r'test_command_prefix:\s*".*?"',
-            lambda _: f'test_command_prefix: "{fw_prefix}"',
-            plan_do_content,
-        )
-        plan_do_content = re.sub(
-            r'test_runner:\s*".*?"',
-            lambda _: f'test_runner: "{fw_runner}"',
-            plan_do_content,
-        )
-        plan_do_content = re.sub(
-            r'test_naming_and_path:\s*".*?"',
-            lambda _: f'test_naming_and_path: "{fw_path}"',
-            plan_do_content,
-        )
-
-        if router_base:
-            for ep_key in (
-                "architect_api_base",
-                "editor_api",
-                "editor_api_fallback",
-                "weak_model_api_base",
-            ):
-                plan_do_content = re.sub(
-                    rf'{ep_key}:\s*".*?"',
-                    lambda _, k=ep_key: f'{k}: "{router_base}"',
-                    plan_do_content,
-                )
-
-        if model_choices.get("architect"):
-            arch = model_choices["architect"]
-            editor = model_choices["editor"]
-            plan_do_content = re.sub(
-                r'architect_agent:\s*".*?"',
-                lambda _: f'architect_agent: "{arch}"',
-                plan_do_content,
-            )
-            plan_do_content = re.sub(
-                r'editor_agent:\s*".*?"',
-                lambda _: f'editor_agent: "{editor}"',
-                plan_do_content,
-            )
-            plan_do_content = re.sub(
-                r'editor_agent_test:\s*".*?"',
-                lambda _: f'editor_agent_test: "{editor}"',
-                plan_do_content,
-            )
-            plan_do_content = re.sub(
-                r'editor_agent_test_fallback:\s*".*?"',
-                lambda _: f'editor_agent_test_fallback: "{editor}"',
-                plan_do_content,
-            )
-        if model_choices.get("weak"):
-            weak = model_choices["weak"]
-            plan_do_content = re.sub(
-                r'weak_model:\s*".*?"',
-                lambda _: f'weak_model: "{weak}"',
-                plan_do_content,
-            )
-        if model_choices.get("embed"):
-            _embed_m = model_choices["embed"]
-            plan_do_content = re.sub(
-                r'embed_model:\s*".*?"',
-                lambda _: f'embed_model: "{_embed_m}"',
-                plan_do_content,
-            )
-            _eb = (
-                "openai"
-                if any(
-                    x in _embed_m.lower()
-                    for x in ("gemini", "openai", "embedding", "qwen")
-                )
-                else "sentence-transformers"
-            )
-            plan_do_content = re.sub(
-                r'embed_backend:\s*".*?"',
-                lambda _: f'embed_backend: "{_eb}"',
-                plan_do_content,
-            )
-        if model_choices.get("reranker"):
-            plan_do_content = re.sub(
-                r'ranking_agent:\s*".*?"',
-                lambda _: f'ranking_agent: "{model_choices["reranker"]}"',
-                plan_do_content,
-            )
 
         plan_do_yaml_path = local_aider_factory_dir / ".env_plan_do.yml"
-        with open(plan_do_yaml_path, "w", encoding="utf-8") as f:
-            f.write(plan_do_content)
+        atomic_write_text(plan_do_yaml_path, plan_do_content)
 
     # --- Step 5: Provision + report ---
     _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -658,13 +713,14 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
                     os.makedirs(".aider_factory", exist_ok=True)
                     sensible_name = f"{repo_name.replace('_', ' ').replace('-', ' ').title()} Pipeline"
                     cwd = os.getcwd()
-                    cwd_forward = cwd.replace("\\", "/")
                     with open(master_env_path, "r", encoding="utf-8") as f:
                         content = f.read()
-                    content = re.sub(r'name:\s*".*?"', lambda _: f'name: "{sensible_name}"', content)
-                    content = re.sub(r'working_directory:\s*".*?"', lambda _: f'working_directory: "{cwd_forward}"', content)
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        f.write(content)
+                    content = _render_workflow_yaml_template(
+                        content,
+                        name=sensible_name,
+                        working_directory=cwd,
+                    )
+                    atomic_write_text(file_path, content)
                     print(f"ℹ️ Created configuration file from template: {file_path}")
         elif file_path and not os.path.exists(file_path):
             print(f"❌ Error: Configuration file not found: {file_path}", file=sys.stderr)
@@ -1067,8 +1123,7 @@ def run_query(instruction, file_path, context_paths, ask_mode, terminal_mode=Fal
                 yaml_content = reply_text.split("```")[1].split("```")[0].strip()
                 
             if yaml_content:
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(yaml_content)
+                atomic_write_text(file_path, yaml_content)
                 print(f"✅ Successfully updated configuration: {file_path}")
 
     except Exception as e:

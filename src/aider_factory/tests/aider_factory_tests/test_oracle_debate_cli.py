@@ -11,6 +11,59 @@ from oracle_agent import _extract_overrides
 print("Starting Oracle Debate CLI Tests...\n")
 
 
+class FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+    def get(self, item, default=None):
+        return getattr(self, item, default)
+
+    def __getitem__(self, item):
+        return getattr(self, item)
+
+
+class FakeChoice:
+    def __init__(self, content):
+        self.message = FakeMessage(content)
+
+    def get(self, item, default=None):
+        return getattr(self, item, default)
+
+    def __getitem__(self, item):
+        return getattr(self, item)
+
+
+class FakeUsage:
+    def __init__(self, prompt_tokens=10, completion_tokens=5):
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+
+    def get(self, item, default=None):
+        return getattr(self, item, default)
+
+    def __getitem__(self, item):
+        return getattr(self, item)
+
+
+class FakeResponse:
+    def __init__(
+        self,
+        content="<critique>ok</critique>\nVERDICT: AGREE",
+        prompt_tokens=10,
+        completion_tokens=5,
+    ):
+        self.choices = [FakeChoice(content)]
+        self.usage = FakeUsage(
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
+        )
+
+    def get(self, item, default=None):
+        return getattr(self, item, default)
+
+    def __getitem__(self, item):
+        return getattr(self, item)
+
+
 def test_no_pass_history_flag_parsing():
     os.environ.pop("ORACLE_DEBATE_NO_PASS_HISTORY", None)
     args = ["--no-pass-history", "--debate", "code", "Query"]
@@ -64,44 +117,9 @@ def test_persona_missing_file_abort():
 
 
 def test_persona_prompt_injection_and_cache_invalidation():
-    import hashlib
     import oracle_agent
     import tempfile
-    from unittest.mock import patch, MagicMock
-
-    class FakeMessage:
-        def __init__(self, content):
-            self.content = content
-        def get(self, item, default=None):
-            return getattr(self, item, default)
-        def __getitem__(self, item):
-            return getattr(self, item)
-
-    class FakeChoice:
-        def __init__(self, content):
-            self.message = FakeMessage(content)
-        def get(self, item, default=None):
-            return getattr(self, item, default)
-        def __getitem__(self, item):
-            return getattr(self, item)
-
-    class FakeUsage:
-        def __init__(self):
-            self.prompt_tokens = 10
-            self.completion_tokens = 5
-        def get(self, item, default=None):
-            return getattr(self, item, default)
-        def __getitem__(self, item):
-            return getattr(self, item)
-
-    class FakeResponse:
-        def __init__(self, content="<critique>ok</critique>\nVERDICT: AGREE"):
-            self.choices = [FakeChoice(content)]
-            self.usage = FakeUsage()
-        def get(self, item, default=None):
-            return getattr(self, item, default)
-        def __getitem__(self, item):
-            return getattr(self, item)
+    from unittest.mock import patch
 
     with tempfile.TemporaryDirectory() as tmpdir:
         orc_file = os.path.join(tmpdir, "oracle_persona.md")
@@ -120,7 +138,12 @@ def test_persona_prompt_injection_and_cache_invalidation():
 
             mock_factory.return_value._aider_ask_turn.return_value = "PROPOSAL: implement fix"
 
-            ret = oracle_agent._run_cli_debate("Test persona issue", "code", max_turns=1, rounds=1)
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                ret = oracle_agent._run_cli_debate("Test persona issue", "code", max_turns=1, rounds=1)
+            finally:
+                os.chdir(orig_cwd)
             assert ret == 0
 
             # Verify Oracle system prompt received the persona
@@ -184,41 +207,7 @@ def test_cli_debate_pass_history_resolution():
     import oracle_agent
     import tempfile
     import yaml
-    from unittest.mock import patch, MagicMock
-
-    class FakeMessage:
-        def __init__(self, content):
-            self.content = content
-        def get(self, item, default=None):
-            return getattr(self, item, default)
-        def __getitem__(self, item):
-            return getattr(self, item)
-
-    class FakeChoice:
-        def __init__(self, content):
-            self.message = FakeMessage(content)
-        def get(self, item, default=None):
-            return getattr(self, item, default)
-        def __getitem__(self, item):
-            return getattr(self, item)
-
-    class FakeUsage:
-        def __init__(self, prompt_tokens=10, completion_tokens=5):
-            self.prompt_tokens = prompt_tokens
-            self.completion_tokens = completion_tokens
-        def get(self, item, default=None):
-            return getattr(self, item, default)
-        def __getitem__(self, item):
-            return getattr(self, item)
-
-    class FakeResponse:
-        def __init__(self, content="VERDICT: AGREE"):
-            self.choices = [FakeChoice(content)]
-            self.usage = FakeUsage()
-        def get(self, item, default=None):
-            return getattr(self, item, default)
-        def __getitem__(self, item):
-            return getattr(self, item)
+    from unittest.mock import patch
 
     cfg = {
         "phases": [
@@ -231,25 +220,25 @@ def test_cli_debate_pass_history_resolution():
         ]
     }
 
-    with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as f:
-        yaml.dump(cfg, f)
-        f.flush()
-        cfg_path = f.name
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg_path = os.path.join(tmpdir, "pass_history_cfg.yml")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            yaml.dump(cfg, f)
 
-    try:
         with patch.dict("os.environ", {"ORACLE_CONFIG_FILE": cfg_path}), \
              patch("orchestrate.AiderFactory") as mock_factory, \
              patch("oracle_agent._retrieve", return_value=""), \
              patch("litellm.completion", return_value=FakeResponse("VERDICT: AGREE")):
-            
-            mock_factory.return_value._aider_ask_turn.return_value = "PROPOSAL: test fix"
 
-            ret = oracle_agent._run_cli_debate("Test issue", "code", max_turns=1, rounds=1)
-            assert ret == 0
-            print("  ✅ _run_cli_debate resolved pass_history successfully.")
-    finally:
-        if os.path.exists(cfg_path):
-            os.remove(cfg_path)
+            mock_factory.return_value._aider_ask_turn.return_value = "PROPOSAL: test fix"
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                ret = oracle_agent._run_cli_debate("Test issue", "code", max_turns=1, rounds=1)
+                assert ret == 0
+                print("  ✅ _run_cli_debate resolved pass_history successfully.")
+            finally:
+                os.chdir(orig_cwd)
 
 
 def test_cli_debate_reads_glob_and_sticky_expansion():
@@ -280,23 +269,6 @@ def test_cli_debate_reads_glob_and_sticky_expansion():
         with open(cfg_path, "w", encoding="utf-8") as f:
             yaml.dump(cfg, f)
 
-        class FakeMessage:
-            def __init__(self, content): self.content = content
-            def get(self, item, default=None): return getattr(self, item, default)
-            def __getitem__(self, item): return getattr(self, item)
-
-        class FakeChoice:
-            def __init__(self, content): self.message = FakeMessage(content)
-            def get(self, item, default=None): return getattr(self, item, default)
-            def __getitem__(self, item): return getattr(self, item)
-
-        class FakeResponse:
-            def __init__(self):
-                self.choices = [FakeChoice("VERDICT: AGREE")]
-                self.usage = {"prompt_tokens": 10, "completion_tokens": 5}
-            def get(self, item, default=None): return getattr(self, item, default)
-            def __getitem__(self, item): return getattr(self, item)
-
         with patch.dict("os.environ", {"ORACLE_CONFIG_FILE": cfg_path}), \
              patch("orchestrate.AiderFactory") as mock_factory, \
              patch("oracle_agent._retrieve", return_value=""), \
@@ -322,23 +294,6 @@ def test_conventions_system_prompt_primacy():
     import oracle_agent
     import tempfile
     from unittest.mock import patch
-
-    class FakeMessage:
-        def __init__(self, content): self.content = content
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
-
-    class FakeChoice:
-        def __init__(self, content): self.message = FakeMessage(content)
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
-
-    class FakeResponse:
-        def __init__(self, content="VERDICT: AGREE"):
-            self.choices = [FakeChoice(content)]
-            self.usage = {"prompt_tokens": 10, "completion_tokens": 5}
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         af_dir = os.path.join(tmpdir, ".aider_factory")
@@ -424,23 +379,6 @@ def test_conventions_disk_cache_invalidation():
     import oracle_agent
     import tempfile
     from unittest.mock import patch
-
-    class FakeMessage:
-        def __init__(self, content): self.content = content
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
-
-    class FakeChoice:
-        def __init__(self, content): self.message = FakeMessage(content)
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
-
-    class FakeResponse:
-        def __init__(self, content="VERDICT: AGREE"):
-            self.choices = [FakeChoice(content)]
-            self.usage = {"prompt_tokens": 10, "completion_tokens": 5}
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         af_dir = os.path.join(tmpdir, ".aider_factory")
@@ -683,23 +621,6 @@ def test_cli_debate_yaml_persona_and_persist_fallback():
         with open(cfg_path, "w", encoding="utf-8") as f:
             yaml.dump(cfg, f)
 
-        class FakeMessage:
-            def __init__(self, content): self.content = content
-            def get(self, item, default=None): return getattr(self, item, default)
-            def __getitem__(self, item): return getattr(self, item)
-
-        class FakeChoice:
-            def __init__(self, content): self.message = FakeMessage(content)
-            def get(self, item, default=None): return getattr(self, item, default)
-            def __getitem__(self, item): return getattr(self, item)
-
-        class FakeResponse:
-            def __init__(self):
-                self.choices = [FakeChoice("VERDICT: AGREE")]
-                self.usage = {"prompt_tokens": 10, "completion_tokens": 5}
-            def get(self, item, default=None): return getattr(self, item, default)
-            def __getitem__(self, item): return getattr(self, item)
-
         clean_env = {
             k: v for k, v in os.environ.items()
             if k not in ("ORACLE_DEBATE_PERSIST", "ORACLE_PERSONA_FILE", "ARCHITECT_PERSONA_FILE")
@@ -736,12 +657,6 @@ def test_instruction_file_disk_cache_invalidation():
     import tempfile
     from unittest.mock import patch
 
-    class FakeChoice:
-        def __init__(self, content):
-            self.message = type("Msg", (), {"content": content})()
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
-
     with tempfile.TemporaryDirectory() as tmpdir:
         o_file = os.path.join(tmpdir, "oracle_spec.md")
         a_file = os.path.join(tmpdir, "arch_spec.md")
@@ -759,7 +674,7 @@ def test_instruction_file_disk_cache_invalidation():
         with patch.dict("os.environ", env, clear=True), \
              patch("orchestrate.AiderFactory") as mock_factory, \
              patch("oracle_agent._retrieve", return_value=""), \
-             patch("litellm.completion", return_value=type("Resp", (), {"choices": [FakeChoice("VERDICT: AGREE")], "usage": {}})()):
+             patch("litellm.completion", return_value=FakeResponse("VERDICT: AGREE")):
 
             mock_factory.return_value._aider_ask_turn.return_value = "PROPOSAL: test"
             orig_cwd = os.getcwd()
@@ -788,12 +703,6 @@ def test_yaml_persona_list_parsing():
     import tempfile
     import yaml
     from unittest.mock import patch
-
-    class FakeChoice:
-        def __init__(self, content):
-            self.message = type("Msg", (), {"content": content})()
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         p1 = os.path.join(tmpdir, "p1.md")
@@ -826,7 +735,7 @@ def test_yaml_persona_list_parsing():
         with patch.dict("os.environ", env, clear=True), \
              patch("orchestrate.AiderFactory") as mock_factory, \
              patch("oracle_agent._retrieve", return_value=""), \
-             patch("litellm.completion", return_value=type("Resp", (), {"choices": [FakeChoice("VERDICT: AGREE")], "usage": {}})()):
+             patch("litellm.completion", return_value=FakeResponse("VERDICT: AGREE")):
 
             mock_factory.return_value._aider_ask_turn.return_value = "PROPOSAL: test"
             orig_cwd = os.getcwd()
@@ -903,24 +812,7 @@ def test_cli_debate_turn0_prompt_isolation():
     """Verify Oracle Turn 0 receives oracle_file and Architect Turn 0 receives architect_file with zero cross-bleed."""
     import oracle_agent
     import tempfile
-    from unittest.mock import patch, MagicMock
-
-    class FakeMessage:
-        def __init__(self, content): self.content = content
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
-
-    class FakeChoice:
-        def __init__(self, content): self.message = FakeMessage(content)
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
-
-    class FakeResponse:
-        def __init__(self, content="VERDICT: AGREE"):
-            self.choices = [FakeChoice(content)]
-            self.usage = {"prompt_tokens": 10, "completion_tokens": 5}
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
+    from unittest.mock import patch
 
     with tempfile.TemporaryDirectory() as tmpdir:
         orc_file = os.path.join(tmpdir, "oracle_rubric.md")
@@ -977,11 +869,6 @@ def test_cli_debate_emits_timestamped_artifacts_and_archives_history():
     import tempfile
     from unittest.mock import patch
 
-    class FakeChoice:
-        def __init__(self, content): self.message = type("Msg", (), {"content": content})()
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
-
     with tempfile.TemporaryDirectory() as tmpdir:
         clean_env = {
             k: v for k, v in os.environ.items()
@@ -992,7 +879,7 @@ def test_cli_debate_emits_timestamped_artifacts_and_archives_history():
         with patch.dict("os.environ", clean_env, clear=True), \
              patch("orchestrate.AiderFactory") as mock_factory, \
              patch("oracle_agent._retrieve", return_value=""), \
-             patch("litellm.completion", return_value=type("Resp", (), {"choices": [FakeChoice("VERDICT: AGREE")], "usage": {}})()):
+             patch("litellm.completion", return_value=FakeResponse("VERDICT: AGREE")):
 
             mock_factory.return_value._aider_ask_turn.return_value = "PROPOSAL: verified fix"
             orig_cwd = os.getcwd()
@@ -1043,7 +930,7 @@ def test_cli_debate_multi_round_agreement_continuation_with_instruction_files():
         with patch.dict("os.environ", clean_env, clear=True), \
              patch("orchestrate.AiderFactory") as mock_factory, \
              patch("oracle_agent._retrieve", return_value=""), \
-             patch("litellm.completion", return_value=type("Resp", (), {"choices": [type("C", (), {"message": type("M", (), {"content": "VERDICT: AGREE"})()})()], "usage": {}})()):
+             patch("litellm.completion", return_value=FakeResponse("VERDICT: AGREE")):
 
             mock_factory.return_value._aider_ask_turn.return_value = "PROPOSAL: fix"
             orig_cwd = os.getcwd()
@@ -1065,23 +952,6 @@ def test_cli_debate_multi_round_file_cycling():
     import tempfile
     from unittest.mock import patch
 
-    class FakeMessage:
-        def __init__(self, content): self.content = content
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
-
-    class FakeChoice:
-        def __init__(self, content): self.message = FakeMessage(content)
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
-
-    class FakeResponse:
-        def __init__(self, content="VERDICT: REVISE"):
-            self.choices = [FakeChoice(content)]
-            self.usage = {"prompt_tokens": 10, "completion_tokens": 5}
-        def get(self, item, default=None): return getattr(self, item, default)
-        def __getitem__(self, item): return getattr(self, item)
-
     with tempfile.TemporaryDirectory() as tmpdir:
         a1 = os.path.join(tmpdir, "arch1.md")
         a2 = os.path.join(tmpdir, "arch2.md")
@@ -1101,7 +971,7 @@ def test_cli_debate_multi_round_file_cycling():
             with patch.dict("os.environ", clean_env, clear=True), \
                  patch("orchestrate.AiderFactory") as mock_factory, \
                  patch("oracle_agent._retrieve", return_value=""), \
-                 patch("litellm.completion", return_value=FakeResponse()):
+                 patch("litellm.completion", return_value=FakeResponse("VERDICT: REVISE")):
 
                 mock_factory.return_value._aider_ask_turn.return_value = "PROPOSAL: update"
 
@@ -1179,6 +1049,1021 @@ def test_env_plan_do_persona_and_instruction_pairing_exists_and_resolves():
     print("  ✅ env_plan_do.yml persona and instruction pairings verified.")
 
 
+def test_deliberate_shared_contracts_and_loaders():
+    """Verify shared prompt contracts, strict/lenient persona/instruction loaders, and multi-round continuation."""
+    import builtins
+    import contextlib
+    import io
+    import tempfile
+    from unittest.mock import patch
+    import deliberate
+    from orchestrate import AiderFactory, Task
+
+    expected_eval = (
+        "\n\n<evaluation_contract>\n"
+        "Critically evaluate the Architect's proposal in accordance with your persona guidelines. "
+        "Structure your response exactly as follows:\n"
+        "<critique>\n"
+        "[Step-by-step analysis of edge cases, logic flaws, and RAG grounding]\n"
+        "</critique>\n"
+        "VERDICT: [AGREE | REVISE | OBJECT - <reason>]\n"
+        "</evaluation_contract>"
+    )
+    expected_anchor = (
+        "Conclude your response with EXACTLY this terminal line:\n"
+        "PROPOSAL: <one-line summary of resolution>"
+    )
+    assert deliberate.EVALUATION_CONTRACT == expected_eval
+    assert deliberate.PROPOSAL_TERMINAL_ANCHOR == expected_anchor
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p1 = os.path.join(tmpdir, "p1.md")
+        p2 = os.path.join(tmpdir, "p2.md")
+        with open(p1, "w", encoding="utf-8") as f:
+            f.write("  Persona 1 Directive  \n")
+        with open(p2, "w", encoding="utf-8") as f:
+            f.write("Persona 2 Directive\n")
+
+        assert deliberate.load_persona_or_instruct_files(None, project_dir=tmpdir) == []
+        assert deliberate.load_persona_or_instruct_files("", project_dir=tmpdir) == []
+
+        loaded_csv = deliberate.load_persona_or_instruct_files(
+            "p1.md, p2.md", project_dir=tmpdir, strict=True
+        )
+        assert loaded_csv == ["Persona 1 Directive", "Persona 2 Directive"]
+
+        # strict=True aborts and prints error on missing file
+        stderr_buf = io.StringIO()
+        with contextlib.redirect_stderr(stderr_buf):
+            res_strict = deliberate.load_persona_or_instruct_files(
+                ["p1.md", "missing_persona.md"],
+                project_dir=tmpdir,
+                label="Oracle persona",
+                strict=True,
+            )
+        assert res_strict is None
+        assert "[oracle] Error: Oracle persona file not found: missing_persona.md" in stderr_buf.getvalue()
+
+        # strict=False gracefully skips missing file and loads existing
+        res_lenient = deliberate.load_persona_or_instruct_files(
+            ["missing_persona.md", "p2.md"],
+            project_dir=tmpdir,
+            strict=False,
+        )
+        assert res_lenient == ["Persona 2 Directive"]
+
+        # PermissionError during open with strict=True returns None; strict=False skips
+        real_open = builtins.open
+
+        def fail_p1_open(file, *args, **kwargs):
+            if os.path.abspath(str(file)) == os.path.abspath(p1):
+                raise PermissionError("locked")
+            return real_open(file, *args, **kwargs)
+
+        stderr_buf = io.StringIO()
+        with contextlib.redirect_stderr(stderr_buf), patch("builtins.open", side_effect=fail_p1_open):
+            assert (
+                deliberate.load_persona_or_instruct_files("p1.md", project_dir=tmpdir, strict=True)
+                is None
+            )
+            assert (
+                deliberate.load_persona_or_instruct_files(["p1.md", "p2.md"], project_dir=tmpdir, strict=False)
+                == ["Persona 2 Directive"]
+            )
+
+        # Multi-round continuation checks including Zero-RAG empty string round entry
+        assert deliberate.has_remaining_round_configs(1, ["working_repo_lib", ""]) is True
+        assert deliberate.has_remaining_round_configs(2, ["working_repo_lib", ""]) is False
+        assert deliberate.has_remaining_round_configs(1, "p1.md,p2.md") is True
+        assert deliberate.has_remaining_round_configs(2, "p1.md,p2.md") is False
+        assert deliberate.has_remaining_round_configs(1, "single.md", None, []) is False
+
+        # Verify AiderFactory._run_deliberation executes Round 2 when job_debate_collection=["working_repo_lib", ""]
+        prior_v = os.path.join(tmpdir, "r1.verdict.md")
+        deliberate.write_verdict(prior_v, "agreed", False, "PROPOSAL: round 1 plan", draft_mode=True)
+        r2_v = os.path.join(tmpdir, "r2.verdict.md")
+        r2_l = os.path.join(tmpdir, "r2.debate.json")
+
+        factory = AiderFactory(tmpdir, session_name="test_delib_r2")
+        task_continue = Task(
+            id="delib_r2_continue",
+            deliberate={
+                "verdict": r2_v,
+                "ledger": r2_l,
+                "prior_verdict": prior_v,
+                "round_idx": 2,
+                "loops": 1,
+                "mode": "code",
+                "draft_mode": True,
+                "job_debate_collection": ["working_repo_lib", ""],
+            },
+        )
+        with patch.object(factory, "_oracle_turn", return_value="VERDICT: AGREE") as mock_orc, \
+             patch.object(factory, "_aider_ask_turn", return_value="PROPOSAL: round 2 plan") as mock_arch:
+            assert factory._run_deliberation(task_continue) is True
+            assert mock_orc.call_count == 2  # Turn 0 pre-assess + Turn 1 review
+            assert mock_arch.call_count == 1
+
+    print("  ✅ deliberate shared contracts, loaders, and multi-round continuation verified.")
+
+
+def _write_task_heavy_seed_files(tmpdir: str) -> tuple[str, str]:
+    """Create template (2 tasks) and issue (4 tasks) files yielding a 6-task seed."""
+    template_path = os.path.join(tmpdir, "debate_template.md")
+    issue_path = os.path.join(tmpdir, "debate_issue.md")
+    with open(template_path, "w", encoding="utf-8") as tf:
+        tf.write(
+            "## Scope Analysis\n"
+            "RAW_SEED_SENTINEL_DO_NOT_LEAK\n"
+            "### [Task ID: 001] - Template Example Task 1\n"
+            "### [Task ID: 002] - Template Example Task 2\n"
+        )
+    with open(issue_path, "w", encoding="utf-8") as isf:
+        isf.write(
+            "## Implementation Plan\n"
+            "### [Task ID: 001] - Prior Strategy Task 1\n"
+            "### [Task ID: 002] - Prior Strategy Task 2\n"
+            "### [Task ID: 003] - Prior Strategy Task 3\n"
+            "### [Task ID: 004] - Prior Strategy Task 4\n"
+        )
+    return template_path, issue_path
+
+
+def test_deliberation_high_watermark_retention_tc001():
+    """TC-001: Verify 2-task Turn-1 proposal is retained over 6-task seed and 0-task Turn-2 delta."""
+    import re
+    import tempfile
+    from unittest.mock import patch
+    from orchestrate import AiderFactory, Task
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        template_path, issue_path = _write_task_heavy_seed_files(tmpdir)
+        factory = AiderFactory(tmpdir, session_name="test_tc001")
+        v_tc1 = os.path.join(tmpdir, "tc1.verdict.md")
+        l_tc1 = os.path.join(tmpdir, "tc1.debate.json")
+        t_tc1 = Task(
+            id="tc1_hwm",
+            deliberate={
+                "template": template_path,
+                "issue": issue_path,
+                "verdict": v_tc1,
+                "ledger": l_tc1,
+                "loops": 2,
+                "mode": "code",
+                "draft_mode": True,
+            },
+        )
+        turn1_arch_spec = (
+            "## Scope Analysis\n"
+            "Architect Focused Specification\n\n"
+            "## Implementation Plan\n"
+            "### [Task ID: 001] - Real Architect Task One\n"
+            "- Tight Description: First surgical change.\n\n"
+            "### [Task ID: 002] - Real Architect Task Two\n"
+            "- Tight Description: Second surgical change.\n\n"
+            "PROPOSAL: Two-task surgical plan"
+        )
+        turn2_arch_delta = (
+            "All P2 reviewer comments have been incorporated into the plan.\n\n"
+            "PROPOSAL: Confirmed two-task surgical plan"
+        )
+        with patch.object(
+            factory,
+            "_oracle_turn",
+            side_effect=["Pre-assessment notes", "VERDICT: REVISE", "VERDICT: AGREE"],
+        ), patch.object(
+            factory,
+            "_aider_ask_turn",
+            side_effect=[turn1_arch_spec, turn2_arch_delta],
+        ):
+            assert factory._run_deliberation(t_tc1) is True
+
+        with open(v_tc1, "r", encoding="utf-8") as vf:
+            v_tc1_text = vf.read()
+        res_tc1 = re.search(
+            r"(?s)# Resolution\s*\n\n(.*?)(?=\n---\n\n# Oracle Assessment|\Z)",
+            v_tc1_text,
+        ).group(1).strip()
+        assert "### [Task ID: 001] - Real Architect Task One" in res_tc1
+        assert "### [Task ID: 002] - Real Architect Task Two" in res_tc1
+        assert "RAW_SEED_SENTINEL_DO_NOT_LEAK" not in res_tc1
+        assert "All P2 reviewer comments" not in res_tc1
+    print("  ✅ TC-001 high-watermark retention against task-heavy seed verified.")
+
+
+def test_deliberation_draft_mode_seed_fallback_tc002a():
+    """TC-002A: Verify draft_mode=True falls back to sanitized seed when all Architect turns are empty/whitespace."""
+    import re
+    import tempfile
+    from unittest.mock import patch
+    import deliberate
+    from orchestrate import AiderFactory, Task
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        template_path, issue_path = _write_task_heavy_seed_files(tmpdir)
+        factory = AiderFactory(tmpdir, session_name="test_tc002a")
+        v_tc2a = os.path.join(tmpdir, "tc2a.verdict.md")
+        l_tc2a = os.path.join(tmpdir, "tc2a.debate.json")
+        t_tc2a = Task(
+            id="tc2a_fallback",
+            deliberate={
+                "template": template_path,
+                "issue": issue_path,
+                "verdict": v_tc2a,
+                "ledger": l_tc2a,
+                "loops": 2,
+                "mode": "code",
+                "draft_mode": True,
+            },
+        )
+        with patch.object(
+            factory,
+            "_oracle_turn",
+            side_effect=["Pre-assessment", "VERDICT: REVISE", "VERDICT: AGREE"],
+        ), patch.object(
+            factory,
+            "_aider_ask_turn",
+            side_effect=["   \n  ", ""],
+        ):
+            assert factory._run_deliberation(t_tc2a) is True
+
+        with open(v_tc2a, "r", encoding="utf-8") as vf:
+            v_tc2a_text = vf.read()
+        res_tc2a = re.search(
+            r"(?s)# Resolution\s*\n\n(.*?)(?=\n---\n\n# Oracle Assessment|\Z)",
+            v_tc2a_text,
+        ).group(1).strip()
+        assert "RAW_SEED_SENTINEL_DO_NOT_LEAK" in res_tc2a
+        assert deliberate.count_tasks(res_tc2a) == 6
+    print("  ✅ TC-002A draft_mode=True whitespace fallback to seed verified.")
+
+
+def test_deliberation_non_draft_mode_no_fallback_tc002b():
+    """TC-002B: Verify draft_mode=False does NOT fall back to seed when Architect output is empty."""
+    import re
+    import tempfile
+    from unittest.mock import patch
+    from orchestrate import AiderFactory, Task
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        template_path, issue_path = _write_task_heavy_seed_files(tmpdir)
+        factory = AiderFactory(tmpdir, session_name="test_tc002b")
+        v_tc2b = os.path.join(tmpdir, "tc2b.verdict.md")
+        l_tc2b = os.path.join(tmpdir, "tc2b.debate.json")
+        t_tc2b = Task(
+            id="tc2b_no_fallback",
+            deliberate={
+                "template": template_path,
+                "issue": issue_path,
+                "verdict": v_tc2b,
+                "ledger": l_tc2b,
+                "loops": 1,
+                "mode": "code",
+                "draft_mode": False,
+            },
+        )
+        with patch.object(
+            factory,
+            "_oracle_turn",
+            side_effect=["Pre-assessment", "VERDICT: OBJECT - empty"],
+        ), patch.object(
+            factory,
+            "_aider_ask_turn",
+            return_value="   ",
+        ):
+            assert factory._run_deliberation(t_tc2b) is True
+
+        with open(v_tc2b, "r", encoding="utf-8") as vf:
+            v_tc2b_text = vf.read()
+        res_tc2b = re.search(
+            r"(?s)# Resolution[ \t]*\r?\n\r?\n(.*?)(?=\r?\n---\r?\n\r?\n# Oracle Assessment|\Z)",
+            v_tc2b_text,
+        ).group(1).strip()
+        assert res_tc2b == ""
+        assert "RAW_SEED_SENTINEL_DO_NOT_LEAK" not in v_tc2b_text
+    print("  ✅ TC-002B draft_mode=False empty resolution preservation verified.")
+
+
+def test_deliberation_zero_loops_boundary_tc002c():
+    """TC-002C: Verify loops=0 transitions state to exhausted, falls back to seed, and is non-actionable."""
+    import json
+    import re
+    import tempfile
+    from unittest.mock import patch
+    import deliberate
+    from orchestrate import AiderFactory, Task
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        template_path, issue_path = _write_task_heavy_seed_files(tmpdir)
+        factory = AiderFactory(tmpdir, session_name="test_tc002c")
+        v_tc2c = os.path.join(tmpdir, "tc2c.verdict.md")
+        l_tc2c = os.path.join(tmpdir, "tc2c.debate.json")
+        t_tc2c = Task(
+            id="tc2c_zero_loops",
+            deliberate={
+                "template": template_path,
+                "issue": issue_path,
+                "verdict": v_tc2c,
+                "ledger": l_tc2c,
+                "loops": 0,
+                "mode": "code",
+                "draft_mode": True,
+            },
+        )
+        with patch.object(
+            factory,
+            "_oracle_turn",
+            return_value="Pre-assessment only",
+        ) as mock_orc_2c, patch.object(
+            factory,
+            "_aider_ask_turn",
+        ) as mock_arch_2c:
+            assert factory._run_deliberation(t_tc2c) is True
+            assert mock_orc_2c.call_count == 1
+            assert mock_arch_2c.call_count == 0
+
+        assert deliberate.verdict_status(v_tc2c) == "exhausted"
+        assert deliberate.verdict_is_actionable(v_tc2c) is False
+        with open(v_tc2c, "r", encoding="utf-8") as vf:
+            res_tc2c = re.search(
+                r"(?s)# Resolution\s*\n\n(.*?)(?=\n---\n\n# Oracle Assessment|\Z)",
+                vf.read(),
+            ).group(1).strip()
+        assert "RAW_SEED_SENTINEL_DO_NOT_LEAK" in res_tc2c
+        with open(l_tc2c, "r", encoding="utf-8") as lf:
+            assert json.load(lf)["state"] == "exhausted"
+    print("  ✅ TC-002C zero-turn boundary exhaustion and seed fallback verified.")
+
+
+def test_deliberation_architect_error_prefix_isolation_tc003():
+    """TC-003A & TC-003B: Verify _arch_err_prefixes bypass high-watermark update, record proposal_hash=None,
+    and fall back to seed when all turns fail in draft_mode=True."""
+    import json
+    import re
+    import tempfile
+    from unittest.mock import patch
+    import deliberate
+    from orchestrate import AiderFactory, Task
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        template_path, issue_path = _write_task_heavy_seed_files(tmpdir)
+        factory = AiderFactory(tmpdir, session_name="test_tc003")
+
+        # TC-003A: Turn 1 valid, Turn 2 timeout, Turn 3 failed
+        v_tc3a = os.path.join(tmpdir, "tc3a.verdict.md")
+        l_tc3a = os.path.join(tmpdir, "tc3a.debate.json")
+        t_tc3a = Task(
+            id="tc3a_err_prefix",
+            deliberate={
+                "template": template_path,
+                "issue": issue_path,
+                "verdict": v_tc3a,
+                "ledger": l_tc3a,
+                "loops": 3,
+                "mode": "code",
+                "draft_mode": True,
+            },
+        )
+        valid_turn1 = (
+            "## Scope Analysis\n"
+            "Valid Turn 1 Spec\n"
+            "### [Task ID: 001] - Valid Task\n"
+            "PROPOSAL: Valid turn 1"
+        )
+        with patch.object(
+            factory,
+            "_oracle_turn",
+            side_effect=[
+                "Pre-assessment",
+                "VERDICT: OBJECT - refine",
+                "VERDICT: OBJECT - timed out",
+                "VERDICT: OBJECT - failed",
+            ],
+        ), patch.object(
+            factory,
+            "_aider_ask_turn",
+            side_effect=[
+                valid_turn1,
+                "PROPOSAL: (architect turn timed out)",
+                "PROPOSAL: (architect turn failed: subprocess error)",
+            ],
+        ):
+            assert factory._run_deliberation(t_tc3a) is True
+
+        with open(v_tc3a, "r", encoding="utf-8") as vf:
+            res_tc3a = re.search(
+                r"(?s)# Resolution\s*\n\n(.*?)(?=\n---\n\n# Oracle Assessment|\Z)",
+                vf.read(),
+            ).group(1).strip()
+        assert "### [Task ID: 001] - Valid Task" in res_tc3a
+        assert "architect turn timed out" not in res_tc3a
+        assert "architect turn failed" not in res_tc3a
+
+        with open(l_tc3a, "r", encoding="utf-8") as lf:
+            ledger_tc3a = json.load(lf)
+        arch_turns_3a = [t for t in ledger_tc3a["turns"] if t["role"] == "architect"]
+        assert len(arch_turns_3a) == 3
+        assert arch_turns_3a[0]["proposal_hash"] == deliberate.proposal_hash(valid_turn1)
+        assert arch_turns_3a[1]["proposal_hash"] is None
+        assert arch_turns_3a[2]["proposal_hash"] is None
+        assert ledger_tc3a["state"] == "exhausted"
+
+        # TC-003B: All Architect turns fail in draft_mode=True -> falls back to seed, not error text
+        v_tc3b = os.path.join(tmpdir, "tc3b.verdict.md")
+        l_tc3b = os.path.join(tmpdir, "tc3b.debate.json")
+        t_tc3b = Task(
+            id="tc3b_all_failed",
+            deliberate={
+                "template": template_path,
+                "issue": issue_path,
+                "verdict": v_tc3b,
+                "ledger": l_tc3b,
+                "loops": 1,
+                "mode": "code",
+                "draft_mode": True,
+            },
+        )
+        with patch.object(
+            factory,
+            "_oracle_turn",
+            side_effect=["Pre-assessment", "VERDICT: OBJECT - failed"],
+        ), patch.object(
+            factory,
+            "_aider_ask_turn",
+            return_value="PROPOSAL: (architect turn failed)",
+        ):
+            assert factory._run_deliberation(t_tc3b) is True
+
+        with open(v_tc3b, "r", encoding="utf-8") as vf:
+            res_tc3b = re.search(
+                r"(?s)# Resolution\s*\n\n(.*?)(?=\n---\n\n# Oracle Assessment|\Z)",
+                vf.read(),
+            ).group(1).strip()
+        assert "RAW_SEED_SENTINEL_DO_NOT_LEAK" in res_tc3b
+        assert "architect turn failed" not in res_tc3b
+    print("  ✅ TC-003A & TC-003B architect failure/timeout prefix isolation verified.")
+
+
+def test_deliberation_round2_prior_verdict_deduplication_tc004abc():
+    """TC-004A, TC-004B, TC-004C: Verify Round-2 prior_verdict hash deduplication,
+    status=='agreed' gating, and distinct specification injection."""
+    import tempfile
+    from unittest.mock import patch
+    import deliberate
+    from orchestrate import AiderFactory, Task
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        template_path, issue_path = _write_task_heavy_seed_files(tmpdir)
+        factory = AiderFactory(tmpdir, session_name="test_tc004abc")
+
+        seed_text = ""
+        for p in (template_path, issue_path):
+            with open(p, "r", encoding="utf-8") as fh:
+                seed_text += fh.read() + "\n\n"
+
+        distinct_spec = (
+            "## Scope Analysis\n"
+            "Distinct Round 1 Specification\n\n"
+            "## Implementation Plan\n"
+            "### [Task ID: 001] - Distinct Round 1 Task\n"
+            "PROPOSAL: Distinct Round 1 plan"
+        )
+
+        v_prior_seed = os.path.join(tmpdir, "prior_seed.verdict.md")
+        deliberate.write_verdict(v_prior_seed, "agreed", False, seed_text, draft_mode=True)
+
+        v_prior_exhausted = os.path.join(tmpdir, "prior_exhausted.verdict.md")
+        deliberate.write_verdict(v_prior_exhausted, "exhausted", False, distinct_spec, draft_mode=True)
+
+        v_prior_agreed = os.path.join(tmpdir, "prior_agreed.verdict.md")
+        deliberate.write_verdict(v_prior_agreed, "agreed", False, distinct_spec, draft_mode=True)
+
+        # TC-004A: agreed prior_verdict matching seed hash -> suppressed
+        t_r2a = Task(
+            id="tc4a_r2_dedup",
+            deliberate={
+                "template": template_path,
+                "issue": issue_path,
+                "verdict": os.path.join(tmpdir, "r2a.verdict.md"),
+                "ledger": os.path.join(tmpdir, "r2a.debate.json"),
+                "prior_verdict": v_prior_seed,
+                "round_idx": 2,
+                "loops": 1,
+                "mode": "code",
+                "draft_mode": True,
+                "job_debate_collection": ["coll_r1", "coll_r2"],
+            },
+        )
+        with patch.object(
+            factory,
+            "_oracle_turn",
+            side_effect=["Pre-assessment", "VERDICT: AGREE"],
+        ), patch.object(
+            factory,
+            "_aider_ask_turn",
+            return_value=distinct_spec,
+        ) as mock_arch_4a:
+            assert factory._run_deliberation(t_r2a) is True
+            r2a_prompt = mock_arch_4a.call_args[0][1]
+            assert (
+                "## Context: The PREVIOUS escalation round agreed to attempt this specification:"
+                not in r2a_prompt
+            )
+            assert r2a_prompt.count("RAW_SEED_SENTINEL_DO_NOT_LEAK") == 1
+
+        # TC-004B: exhausted prior_verdict -> suppressed
+        t_r2b = Task(
+            id="tc4b_r2_unagreed",
+            deliberate={
+                "template": template_path,
+                "issue": issue_path,
+                "verdict": os.path.join(tmpdir, "r2b.verdict.md"),
+                "ledger": os.path.join(tmpdir, "r2b.debate.json"),
+                "prior_verdict": v_prior_exhausted,
+                "round_idx": 2,
+                "loops": 1,
+                "mode": "code",
+                "draft_mode": True,
+                "job_debate_collection": ["coll_r1", "coll_r2"],
+            },
+        )
+        with patch.object(
+            factory,
+            "_oracle_turn",
+            side_effect=["Pre-assessment", "VERDICT: AGREE"],
+        ), patch.object(
+            factory,
+            "_aider_ask_turn",
+            return_value=distinct_spec,
+        ) as mock_arch_4b:
+            assert factory._run_deliberation(t_r2b) is True
+            r2b_prompt = mock_arch_4b.call_args[0][1]
+            assert (
+                "## Context: The PREVIOUS escalation round agreed to attempt this specification:"
+                not in r2b_prompt
+            )
+
+        # TC-004C: agreed prior_verdict with distinct spec -> injected
+        t_r2c = Task(
+            id="tc4c_r2_inject",
+            deliberate={
+                "template": template_path,
+                "issue": issue_path,
+                "verdict": os.path.join(tmpdir, "r2c.verdict.md"),
+                "ledger": os.path.join(tmpdir, "r2c.debate.json"),
+                "prior_verdict": v_prior_agreed,
+                "round_idx": 2,
+                "loops": 1,
+                "mode": "code",
+                "draft_mode": True,
+                "job_debate_collection": ["coll_r1", "coll_r2"],
+            },
+        )
+        with patch.object(
+            factory,
+            "_oracle_turn",
+            side_effect=["Pre-assessment", "VERDICT: AGREE"],
+        ), patch.object(
+            factory,
+            "_aider_ask_turn",
+            return_value=distinct_spec,
+        ) as mock_arch_4c:
+            assert factory._run_deliberation(t_r2c) is True
+            r2c_prompt = mock_arch_4c.call_args[0][1]
+            assert (
+                "## Context: The PREVIOUS escalation round agreed to attempt this specification:"
+                in r2c_prompt
+            )
+            assert "### [Task ID: 001] - Distinct Round 1 Task" in r2c_prompt
+    print("  ✅ TC-004A, TC-004B, TC-004C Round-2 prior verdict deduplication and injection verified.")
+
+
+def test_deliberation_round2_malformed_prior_verdict_resilience_tc004de():
+    """TC-004D & TC-004E: Verify malformed prior_verdict (no # Resolution) and regex parse exceptions
+    are handled safely without aborting _run_deliberation."""
+    import tempfile
+    from unittest.mock import patch
+    from orchestrate import AiderFactory, Task
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        template_path, issue_path = _write_task_heavy_seed_files(tmpdir)
+        factory = AiderFactory(tmpdir, session_name="test_tc004de")
+
+        v_malformed = os.path.join(tmpdir, "malformed_prior.verdict.md")
+        with open(v_malformed, "w", encoding="utf-8") as mf:
+            mf.write("STATUS: agreed\nGATE: draft\n\nBody without resolution section\n")
+
+        turn1_spec = (
+            "## Scope Analysis\n"
+            "### [Task ID: 001] - Task One\n"
+            "PROPOSAL: Task one plan"
+        )
+
+        # TC-004D: Missing # Resolution header (res_match is None)
+        t_r2d = Task(
+            id="tc4d_malformed_prior",
+            deliberate={
+                "template": template_path,
+                "issue": issue_path,
+                "verdict": os.path.join(tmpdir, "r2d.verdict.md"),
+                "ledger": os.path.join(tmpdir, "r2d.debate.json"),
+                "prior_verdict": v_malformed,
+                "round_idx": 2,
+                "loops": 1,
+                "mode": "code",
+                "draft_mode": True,
+                "job_debate_collection": ["coll_r1", "coll_r2"],
+            },
+        )
+        with patch.object(
+            factory,
+            "_oracle_turn",
+            side_effect=["Pre-assessment", "VERDICT: AGREE"],
+        ), patch.object(
+            factory,
+            "_aider_ask_turn",
+            return_value=turn1_spec,
+        ) as mock_arch_4d:
+            assert factory._run_deliberation(t_r2d) is True
+            r2d_prompt = mock_arch_4d.call_args[0][1]
+            assert (
+                "## Context: The PREVIOUS escalation round agreed to attempt this specification:"
+                not in r2d_prompt
+            )
+
+        # TC-004E: Exception during prior_verdict regex parsing is caught and logged
+        t_r2e = Task(
+            id="tc4e_prior_read_err",
+            deliberate={
+                "template": template_path,
+                "issue": issue_path,
+                "verdict": os.path.join(tmpdir, "r2e.verdict.md"),
+                "ledger": os.path.join(tmpdir, "r2e.debate.json"),
+                "prior_verdict": v_malformed,
+                "round_idx": 2,
+                "loops": 1,
+                "mode": "code",
+                "draft_mode": True,
+                "job_debate_collection": ["coll_r1", "coll_r2"],
+            },
+        )
+        with patch.object(
+            factory,
+            "_oracle_turn",
+            side_effect=["Pre-assessment", "VERDICT: AGREE"],
+        ), patch.object(
+            factory,
+            "_aider_ask_turn",
+            return_value=turn1_spec,
+        ), patch("deliberate.verdict_status", side_effect=OSError("simulated prior verdict error")):
+            assert factory._run_deliberation(t_r2e) is True
+    print("  ✅ TC-004D & TC-004E malformed prior verdict and exception resilience verified.")
+
+
+def test_deliberation_state_and_env_isolation_tc005():
+    """TC-005A & TC-005B: Verify consecutive timeouts do not trigger false deadlock,
+    stale verdict/ledger artifacts are overwritten, and _ScopedEnv restores os.environ."""
+    import json
+    import tempfile
+    from unittest.mock import patch
+    import deliberate
+    from orchestrate import AiderFactory, Task
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        template_path, issue_path = _write_task_heavy_seed_files(tmpdir)
+        factory = AiderFactory(tmpdir, session_name="test_tc005")
+
+        v_tc5a = os.path.join(tmpdir, "tc5a.verdict.md")
+        l_tc5a = os.path.join(tmpdir, "tc5a.debate.json")
+        with open(v_tc5a, "w", encoding="utf-8") as svf:
+            svf.write("STATUS: deadlock\nGATE: none\n\n# Resolution\n\nSTALE_VERDICT_CONTENT\n")
+        with open(l_tc5a, "w", encoding="utf-8") as slf:
+            json.dump({"issue": "stale", "turns": [], "state": "deadlock"}, slf)
+
+        recovered_spec = (
+            "## Scope Analysis\n"
+            "Recovered Turn 3 Specification\n\n"
+            "## Implementation Plan\n"
+            "### [Task ID: 001] - Recovered Architect Task\n"
+            "PROPOSAL: Recovered Turn 3 plan"
+        )
+        t_tc5a = Task(
+            id="tc5a_no_false_deadlock",
+            deliberate={
+                "template": template_path,
+                "issue": issue_path,
+                "verdict": v_tc5a,
+                "ledger": l_tc5a,
+                "loops": 3,
+                "mode": "code",
+                "draft_mode": True,
+            },
+        )
+        with patch.object(
+            factory,
+            "_oracle_turn",
+            side_effect=[
+                "Pre-assessment",
+                "VERDICT: OBJECT - timeout 1",
+                "VERDICT: OBJECT - timeout 2",
+                "VERDICT: AGREE",
+            ],
+        ), patch.object(
+            factory,
+            "_aider_ask_turn",
+            side_effect=[
+                "PROPOSAL: (architect turn timed out)",
+                "PROPOSAL: (architect turn timed out)",
+                recovered_spec,
+            ],
+        ) as mock_arch_5a:
+            assert factory._run_deliberation(t_tc5a) is True
+            assert mock_arch_5a.call_count == 3
+
+        assert deliberate.verdict_status(v_tc5a) == "agreed"
+        assert deliberate.verdict_is_actionable(v_tc5a) is True
+        with open(v_tc5a, "r", encoding="utf-8") as vf:
+            v_tc5a_text = vf.read()
+        assert "STALE_VERDICT_CONTENT" not in v_tc5a_text
+        assert "### [Task ID: 001] - Recovered Architect Task" in v_tc5a_text
+
+        # TC-005B: _ScopedEnv hermetic restoration of ORACLE_* environment variables
+        os.environ["ORACLE_AGENT_MODEL"] = "baseline_agent_model"
+        os.environ.pop("ORACLE_REASONING_EFFORT", None)
+        observed_env_in_turn = {}
+
+        def _capture_env_oracle_turn(*args, **kwargs):
+            observed_env_in_turn["ORACLE_AGENT_MODEL"] = os.environ.get("ORACLE_AGENT_MODEL")
+            observed_env_in_turn["ORACLE_REASONING_EFFORT"] = os.environ.get("ORACLE_REASONING_EFFORT")
+            return "VERDICT: AGREE"
+
+        t_tc5b = Task(
+            id="tc5b_scoped_env",
+            rag_env={
+                "ORACLE_AGENT_MODEL": "scoped_override_model",
+                "ORACLE_REASONING_EFFORT": "high",
+            },
+            deliberate={
+                "template": template_path,
+                "issue": issue_path,
+                "verdict": os.path.join(tmpdir, "tc5b.verdict.md"),
+                "ledger": os.path.join(tmpdir, "tc5b.debate.json"),
+                "loops": 1,
+                "mode": "code",
+                "draft_mode": True,
+            },
+        )
+        with patch.object(
+            factory,
+            "_oracle_turn",
+            side_effect=_capture_env_oracle_turn,
+        ), patch.object(
+            factory,
+            "_aider_ask_turn",
+            return_value=recovered_spec,
+        ):
+            assert factory._run_deliberation(t_tc5b) is True
+
+        assert observed_env_in_turn["ORACLE_AGENT_MODEL"] == "scoped_override_model"
+        assert observed_env_in_turn["ORACLE_REASONING_EFFORT"] == "high"
+        assert os.environ.get("ORACLE_AGENT_MODEL") == "baseline_agent_model"
+        assert os.environ.get("ORACLE_REASONING_EFFORT") is None
+    print("  ✅ TC-005A & TC-005B anti-deadlock timeout recovery and _ScopedEnv hermeticity verified.")
+
+
+def test_oracle_agent_consolidated_helpers():
+    """Verify Pass 3B consolidated helpers in oracle_agent.py and orchestrate.py."""
+    import contextlib
+    import io
+    import tempfile
+    import yaml
+    from unittest.mock import patch
+    import oracle_agent
+    from orchestrate import AiderFactory, Task
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 1. _call_oracle_llm: nominal execution + cost/timing + unswallowed exception propagation
+        stderr_buf = io.StringIO()
+        with patch("litellm.completion", return_value=FakeResponse("Synthesized Answer")), \
+             patch("oracle_agent._litellm_cost_line", return_value="[oracle] Tokens: 10 sent, 5 received. Cost: $0.0001 message, $0.0001 session."), \
+             contextlib.redirect_stderr(stderr_buf):
+            ans, cost = oracle_agent._call_oracle_llm(
+                "gemini/gemini-3.6-flash",
+                [{"role": "user", "content": "hello"}],
+                persist_session=False,
+            )
+        assert ans == "Synthesized Answer"
+        assert "thinking_time=" in cost
+        assert "[oracle] Thinking (gemini/gemini-3.6-flash" in stderr_buf.getvalue()
+
+        with patch("litellm.completion", side_effect=RuntimeError("LLM connection error")):
+            try:
+                oracle_agent._call_oracle_llm(
+                    "gemini/gemini-3.6-flash", [{"role": "user", "content": "hi"}]
+                )
+                assert False, "Expected RuntimeError to propagate from _call_oracle_llm"
+            except RuntimeError as exc:
+                assert "LLM connection error" in str(exc)
+
+        # 2. _resolve_collection_and_db: empty, bare name, directory path, and lancedb suffix
+        assert oracle_agent._resolve_collection_and_db("", tmpdir) == ("", "")
+        assert oracle_agent._resolve_collection_and_db("   ", tmpdir) == ("", "")
+
+        c_name, db_path = oracle_agent._resolve_collection_and_db("my_docs", tmpdir)
+        assert c_name == "my_docs"
+        assert db_path == os.path.join(
+            tmpdir, ".aider_factory", "markdown", "lanceDB", "my_docs", "lancedb"
+        )
+
+        custom_dir = os.path.join(tmpdir, "custom_corpus")
+        c_name2, db_path2 = oracle_agent._resolve_collection_and_db(custom_dir, tmpdir)
+        assert c_name2 == "custom_corpus"
+        assert db_path2 == os.path.join(os.path.abspath(custom_dir), "lancedb")
+
+        lancedb_dir = os.path.join(custom_dir, "lancedb")
+        c_name3, db_path3 = oracle_agent._resolve_collection_and_db(lancedb_dir, tmpdir)
+        assert c_name3 == "custom_corpus"
+        assert db_path3 == os.path.abspath(lancedb_dir)
+
+        # 3. _select_active_phase: empty, index match, collection match, prefer_debate=True/False
+        assert oracle_agent._select_active_phase({}) is None
+        assert oracle_agent._select_active_phase({"phases": []}) is None
+
+        phases_cfg = {
+            "phases": [
+                {"name": "p0_disabled", "enabled": False, "rag": {"collection_name": "c0"}},
+                {"name": "p1_basic", "enabled": True, "rag": {"collection_name": "c1"}},
+                {
+                    "name": "p2_debate",
+                    "enabled": True,
+                    "vector_store": {"collection_name": "c2"},
+                    "oracle": {"pre_edit_debate": {"loops": 2}},
+                },
+            ]
+        }
+        assert oracle_agent._select_active_phase(phases_cfg, active_idx="1")["name"] == "p1_basic"
+        assert oracle_agent._select_active_phase(phases_cfg, target_coll="c2")["name"] == "p2_debate"
+        assert oracle_agent._select_active_phase(phases_cfg, prefer_debate=False)["name"] == "p1_basic"
+        assert oracle_agent._select_active_phase(phases_cfg, prefer_debate=True)["name"] == "p2_debate"
+
+        # 4. _format_project_files_block: empty, skip_conventions=False vs True, item_prefix
+        assert oracle_agent._format_project_files_block([]) == ""
+        assert oracle_agent._format_project_files_block(["missing_file.py"], base_dir=tmpdir) == ""
+
+        conv_file = os.path.join(tmpdir, "CONVENTIONS.md")
+        code_file = os.path.join(tmpdir, "module.py")
+        with open(conv_file, "w", encoding="utf-8") as f:
+            f.write("RULE_1")
+        with open(code_file, "w", encoding="utf-8") as f:
+            f.write("x = 1")
+
+        block_all = oracle_agent._format_project_files_block(
+            ["CONVENTIONS.md", "module.py"],
+            base_dir=tmpdir,
+            item_prefix="File: ",
+            skip_conventions=False,
+        )
+        assert "File: CONVENTIONS.md\n```\nRULE_1\n```" in block_all
+        assert "File: module.py\n```\nx = 1\n```" in block_all
+
+        block_no_conv = oracle_agent._format_project_files_block(
+            ["CONVENTIONS.md", "module.py"],
+            base_dir=tmpdir,
+            item_prefix="## ",
+            skip_conventions=True,
+        )
+        assert "CONVENTIONS.md" not in block_no_conv
+        assert "## module.py\n```\nx = 1\n```" in block_no_conv
+
+        # 5. _retrieve_by_mode: no_retrieve, full_document, top_k
+        with patch("oracle_agent._retrieve", return_value="TOP_K_CHUNK") as mock_ret, \
+             patch("oracle_agent._full_document", return_value="FULL_DOC_TEXT") as mock_full:
+            assert oracle_agent._retrieve_by_mode("q", "no_retrieve", 5) == ""
+            assert mock_ret.call_count == 0
+            assert mock_full.call_count == 0
+
+            assert (
+                oracle_agent._retrieve_by_mode(
+                    "q", "full_document", 5, db_dir="/tmp/db", collection="coll_a"
+                )
+                == "FULL_DOC_TEXT"
+            )
+            mock_full.assert_called_once_with("/tmp/db", "coll_a")
+
+            assert oracle_agent._retrieve_by_mode("q", "top_k", 7) == "TOP_K_CHUNK"
+            mock_ret.assert_called_once_with("q", 7)
+
+        # 6. AiderFactory._apply_oracle_model_env: local endpoint preservation vs cloud stripping
+        factory = AiderFactory(tmpdir, session_name="helper_unit")
+        local_task = Task(
+            id="local_t",
+            model="ollama/deepseek-r1",
+            editor_model="ollama/qwen2.5-coder",
+            architect_api_base="http://127.0.0.1:11434",
+            editor_api_base="http://127.0.0.1:11435",
+        )
+        env_local = {}
+        factory._apply_oracle_model_env(local_task, env_local)
+        assert env_local["ORACLE_AGENT_MODEL"] == "ollama/qwen2.5-coder"
+        assert env_local["ORACLE_AGENT_API_BASE"] == "http://127.0.0.1:11435"
+        assert env_local["ORACLE_ARCHITECT_MODEL"] == "ollama/deepseek-r1"
+        assert env_local["ORACLE_ARCHITECT_API_BASE"] == "http://127.0.0.1:11434"
+
+        cloud_task = Task(
+            id="cloud_t",
+            model="gemini/gemini-3.6-flash",
+            editor_model="gemini/gemini-2.5-flash",
+            architect_api_base="http://127.0.0.1:11434",
+            editor_api_base="http://127.0.0.1:11435",
+        )
+        env_cloud = {
+            "ORACLE_AGENT_API_BASE": "http://127.0.0.1:11435",
+            "ORACLE_ARCHITECT_API_BASE": "http://127.0.0.1:11434",
+        }
+        factory._apply_oracle_model_env(cloud_task, env_cloud)
+        assert env_cloud["ORACLE_AGENT_MODEL"] == "gemini/gemini-2.5-flash"
+        assert "ORACLE_AGENT_API_BASE" not in env_cloud
+        assert env_cloud["ORACLE_ARCHITECT_MODEL"] == "gemini/gemini-3.6-flash"
+        assert "ORACLE_ARCHITECT_API_BASE" not in env_cloud
+
+        # 7. AiderFactory._resolve_weak_model_settings: local synthesis, fallback, conf, cloud stripping
+        clean_env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("AIDER_WEAK_MODEL", "WEAK_MODEL", "WEAK_MODEL_API_BASE", "AIDER_WEAK_MODEL_API_BASE")
+        }
+        with patch.dict("os.environ", clean_env, clear=True):
+            t_local_weak = Task(
+                id="weak_local",
+                weak_model="ollama/qwen2.5:7b",
+                weak_model_api_base="http://127.0.0.1:11434/v1",
+            )
+            wm, wapi, settings_p = factory._resolve_weak_model_settings(t_local_weak)
+            assert wm == "ollama/qwen2.5:7b"
+            assert wapi == "http://127.0.0.1:11434/v1"
+            assert settings_p == os.path.join(str(factory.session_dir), ".aider.model.settings.yml")
+            assert os.path.isfile(settings_p)
+
+            # Cloud weak model must strip local api_base and remove stale session settings file
+            t_cloud_weak = Task(
+                id="weak_cloud",
+                weak_model="gemini/gemini-2.5-flash",
+                weak_model_api_base="http://127.0.0.1:11434/v1",
+            )
+            wm_c, wapi_c, settings_c = factory._resolve_weak_model_settings(t_cloud_weak)
+            assert wm_c == "gemini/gemini-2.5-flash"
+            assert wapi_c is None
+            assert settings_c is None
+            assert not os.path.exists(settings_p)
+
+            # Fallback to editor_api_base + .aider.conf.yml weak-model resolution
+            with open(os.path.join(tmpdir, ".aider.conf.yml"), "w", encoding="utf-8") as cf:
+                yaml.safe_dump({"weak-model": "ollama/qwen2.5:3b"}, cf)
+            t_conf_weak = Task(
+                id="weak_conf",
+                weak_model=None,
+                editor_api_base="http://127.0.0.1:11434/v1",
+            )
+            wm_f, wapi_f, settings_f = factory._resolve_weak_model_settings(t_conf_weak)
+            assert wm_f == "ollama/qwen2.5:3b"
+            assert wapi_f == "http://127.0.0.1:11434/v1"
+            assert os.path.isfile(settings_f)
+
+        # 8. AiderFactory._oracle_turn Turn-0 vs Turn-1 <project_files> formatting
+        captured_prompts = []
+
+        def fake_subproc_run(args, **kwargs):
+            file_idx = args.index("--file") + 1
+            with open(args[file_idx], "r", encoding="utf-8") as pf:
+                captured_prompts.append(pf.read())
+            return type("Proc", (), {"returncode": 0, "stdout": "VERDICT: AGREE\n", "stderr": ""})()
+
+        existing_sf = os.path.join(tmpdir, ".oracle_debate_session.json")
+        with open(existing_sf, "w", encoding="utf-8") as sf_fh:
+            import json
+            json.dump(
+                [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "r1 turn 0"},
+                    {"role": "assistant", "content": "r1 reply"},
+                ],
+                sf_fh,
+            )
+
+        with patch("subprocess.run", side_effect=fake_subproc_run):
+            d_cfg = {"mode": "code", "read_files": ["module.py"]}
+            factory._oracle_turn(local_task, d_cfg, "PROPOSAL: fix", turn=0, pre_assess_prompt="Pre-assess:")
+            factory._oracle_turn(local_task, d_cfg, "PROPOSAL: fix", turn=1)
+            d_cfg_r2 = {"mode": "code", "read_files": ["module.py"], "oracle_session_file": existing_sf}
+            factory._oracle_turn(local_task, d_cfg_r2, "", turn=0, pre_assess_prompt="Round 2 pre-assess:")
+
+        assert "<project_files>\nFile: module.py\n```\nx = 1\n```\n</project_files>" in captured_prompts[0]
+        assert "<project_files>" not in captured_prompts[1]
+        assert "<project_files>" not in captured_prompts[2]
+
+    print("  ✅ Consolidated helpers in oracle_agent.py and orchestrate.py verified.")
+
+
 if __name__ == "__main__":
     test_env_plan_do_persona_and_instruction_pairing_exists_and_resolves()
     test_instruction_file_disk_cache_invalidation()
@@ -1210,4 +2095,14 @@ if __name__ == "__main__":
     test_cli_debate_multi_round_file_cycling()
     test_cli_debate_emits_timestamped_artifacts_and_archives_history()
     test_cli_debate_multi_round_agreement_continuation_with_instruction_files()
+    test_deliberate_shared_contracts_and_loaders()
+    test_deliberation_high_watermark_retention_tc001()
+    test_deliberation_draft_mode_seed_fallback_tc002a()
+    test_deliberation_non_draft_mode_no_fallback_tc002b()
+    test_deliberation_zero_loops_boundary_tc002c()
+    test_deliberation_architect_error_prefix_isolation_tc003()
+    test_deliberation_round2_prior_verdict_deduplication_tc004abc()
+    test_deliberation_round2_malformed_prior_verdict_resilience_tc004de()
+    test_deliberation_state_and_env_isolation_tc005()
+    test_oracle_agent_consolidated_helpers()
     print("\n🎉 All CLI Oracle Debate Tests Passed!")

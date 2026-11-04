@@ -54,609 +54,36 @@ except ImportError:
     from aider_factory.python import aggregate_costs
 
 
-def _expand_file_list(file_patterns, base_dir):
-    """Expand glob patterns into a deduplicated, alphabetically sorted list of relative paths.
-    Literal paths with no glob magic are preserved verbatim if they exist.
-    Empty or None inputs return an empty list."""
-    if not file_patterns:
-        return []
-
-    if isinstance(file_patterns, str):
-        file_patterns = [file_patterns]
-
-    expanded = []
-    for pat in file_patterns:
-        if glob.has_magic(pat):
-            abs_pat = pat if os.path.isabs(pat) else os.path.join(str(base_dir), pat)
-            abs_pat = os.path.normpath(abs_pat)
-            for match in sorted(glob.glob(abs_pat)):
-                rel_path = os.path.relpath(match, str(base_dir)).replace("\\", "/")
-                if rel_path not in expanded:
-                    expanded.append(rel_path)
-        else:
-            clean_pat = pat.replace("\\", "/")
-            if clean_pat not in expanded:
-                expanded.append(clean_pat)
-
-    return expanded
-
-
-def _hex_to_ansi(hex_color: str, fallback: str) -> str:
-    """Convert '#RRGGBB' to '\\033[38;2;R;G;Bm'. Returns fallback on bad input."""
-    h = (hex_color or "").strip().lstrip("#")
-    if len(h) != 6:
-        return fallback
-    try:
-        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-        return f"\033[38;2;{r};{g};{b}m"
-    except ValueError:
-        return fallback
-
+try:
+    from aider_factory.python.run_workflow_utils import (
+        OSTee,
+        _TeeWriter,
+        _expand_file_list,
+        _extract_files_from_plan,
+        _hex_to_ansi,
+        _parse_insert_debate,
+        _render_testing_template,
+        _render_validate_template,
+        _resolve_job_debate_collection,
+        _resolve_job_debate_template,
+        resolve_template_path,
+    )
+except ImportError:
+    from run_workflow_utils import (
+        OSTee,
+        _TeeWriter,
+        _expand_file_list,
+        _extract_files_from_plan,
+        _hex_to_ansi,
+        _parse_insert_debate,
+        _render_testing_template,
+        _render_validate_template,
+        _resolve_job_debate_collection,
+        _resolve_job_debate_template,
+        resolve_template_path,
+    )
 
 script_dir = os.path.dirname(os.path.abspath(__file__))  # Verified
-
-
-def _parse_insert_debate(pre_edit_cfg: dict) -> tuple[bool, bool, bool]:
-    """Parse insert_debate into a 3-tuple (job1, job2, job3) boolean triggers."""
-    if not pre_edit_cfg or not pre_edit_cfg.get("enabled", False):
-        return (False, False, False)
-
-    raw = pre_edit_cfg.get("insert_debate")
-    if raw is None:
-        return (True, False, False)
-
-    if isinstance(raw, (list, tuple)):
-        vals = [bool(x) for x in raw]
-        while len(vals) < 3:
-            vals.append(False)
-        return (bool(vals[0]), bool(vals[1]), bool(vals[2]))
-
-    if isinstance(raw, str):
-        cleaned = re.sub(r"[^\d, ]", "", raw).replace(" ", ",")
-        parts = [p.strip() for p in cleaned.split(",") if p.strip()]
-        vals = [bool(int(p)) if p.isdigit() else False for p in parts]
-        while len(vals) < 3:
-            vals.append(False)
-        return (bool(vals[0]), bool(vals[1]), bool(vals[2]))
-
-    return (True, False, False)
-
-
-def _resolve_job_debate_template(
-    pre_edit_cfg: dict, job_num: int, project_directory: str = None
-) -> Optional[str]:
-    """Resolve specialized debate prompt template for Job 1, 2, or 3."""
-    if not pre_edit_cfg:
-        return None
-
-    raw = pre_edit_cfg.get("job_debate_template")
-    target = None
-    if isinstance(raw, (list, tuple)):
-        if 0 <= (job_num - 1) < len(raw) and raw[job_num - 1]:
-            target = str(raw[job_num - 1]).strip()
-        elif raw and raw[0]:
-            target = str(raw[0]).strip()
-    elif isinstance(raw, str) and raw.strip():
-        target = raw.strip()
-
-    return (
-        resolve_template_path(target, project_directory=project_directory)
-        if target
-        else None
-    )
-
-
-def _resolve_job_debate_collection(
-    pre_edit_cfg: dict,
-    job_num: int,
-    default_collection: str,
-    rag_context_root: str,
-    default_db: str = "",
-    project_directory: str = None,
-    round_num: int = 1,
-) -> tuple[str, str, str]:
-    """Resolve specialized vector collection, LanceDB dir, and retrieve_mode for Job and Round.
-    Supports flow sequences: [job1_coll, [round1_coll, round2_coll], job3_coll].
-    Empty, None, or 'no_retrieve' returns retrieve_mode='no_retrieve' to guarantee pure AST analysis."""
-    chosen = default_collection
-    if pre_edit_cfg and "job_debate_collection" in pre_edit_cfg:
-        raw = pre_edit_cfg.get("job_debate_collection")
-        if isinstance(raw, (list, tuple)):
-            if 0 <= (job_num - 1) < len(raw):
-                job_entry = raw[job_num - 1]
-                if isinstance(job_entry, (list, tuple)):
-                    idx = min(round_num - 1, len(job_entry) - 1)
-                    chosen = str(job_entry[idx]).strip() if job_entry[idx] is not None else ""
-                else:
-                    chosen = str(job_entry).strip() if job_entry is not None else default_collection
-            elif raw and raw[0] is not None:
-                if isinstance(raw[0], (list, tuple)):
-                    idx = min(round_num - 1, len(raw[0]) - 1)
-                    chosen = str(raw[0][idx]).strip() if raw[0][idx] is not None else ""
-                else:
-                    chosen = str(raw[0]).strip()
-        elif isinstance(raw, str):
-            chosen = raw.strip()
-
-    has_explicit_db = False
-    chosen_db = default_db or ""
-    if pre_edit_cfg and "job_debate_db" in pre_edit_cfg:
-        raw_db = pre_edit_cfg.get("job_debate_db")
-        if isinstance(raw_db, (list, tuple)):
-            if 0 <= (job_num - 1) < len(raw_db):
-                entry_db = raw_db[job_num - 1]
-                if isinstance(entry_db, (list, tuple)):
-                    idx = min(round_num - 1, len(entry_db) - 1)
-                    if entry_db[idx] is not None and str(entry_db[idx]).strip():
-                        chosen_db = str(entry_db[idx]).strip()
-                        has_explicit_db = True
-                elif entry_db is not None and str(entry_db).strip():
-                    chosen_db = str(entry_db).strip()
-                    has_explicit_db = True
-            elif raw_db and raw_db[0] is not None and str(raw_db[0]).strip():
-                chosen_db = str(raw_db[0]).strip()
-                has_explicit_db = True
-        elif isinstance(raw_db, str) and raw_db.strip():
-            chosen_db = raw_db.strip()
-            has_explicit_db = True
-
-    if chosen_db:
-        chosen_db = os.path.expanduser(chosen_db)
-        if project_directory and not (
-            chosen_db.startswith("/")
-            or chosen_db.startswith("\\")
-            or (len(chosen_db) > 1 and chosen_db[1] == ":")
-        ):
-            chosen_db = os.path.join(project_directory, chosen_db)
-        chosen_db = chosen_db.replace("\\", "/")
-
-    if not chosen or str(chosen).lower() in ("no_retrieve", "none"):
-        return "", (chosen_db if has_explicit_db else ""), "no_retrieve"
-
-    if chosen == "*":
-        return "*", chosen_db or "", "top_k"
-
-    expanded = os.path.abspath(os.path.expanduser(chosen))
-    if "/" in chosen or "\\" in chosen or os.path.exists(expanded):
-        base = os.path.basename(expanded.rstrip("/\\"))
-        if base.lower() == "lancedb":
-            coll = os.path.basename(os.path.dirname(expanded.rstrip("/\\")))
-            db_dir = expanded.replace("\\", "/")
-        else:
-            coll = base
-            db_dir = os.path.join(expanded, "lancedb").replace("\\", "/")
-        return coll, (chosen_db if has_explicit_db else (db_dir or chosen_db)), "top_k"
-
-    return chosen, (chosen_db or os.path.join(rag_context_root, chosen, "lancedb").replace("\\", "/")), "top_k"
-
-
-def _render_validate_template(
-    template_path: str, strategy_content: str, output_path: str
-) -> str:
-    """Inject strategy_content into the validate template's placeholder section."""
-    if not template_path or not os.path.exists(template_path):
-        return template_path
-
-    with open(template_path, "r", encoding="utf-8") as vf:
-        val_text = vf.read()
-
-    injection = f"## PREVIOUS COMPLETED SYSTEM GOALS AND CONSTRAINTS\n\n{strategy_content.strip()}\n"
-    placeholder = "## PREVIOUS COMPLETED SYSTEM GOALS AND CONSTRAINTS"
-
-    if placeholder in val_text:
-        final_text = re.sub(
-            r"## PREVIOUS COMPLETED SYSTEM GOALS AND CONSTRAINTS.*?(?=\n---|\n## 2\.|\Z)",
-            lambda _: injection + "\n",
-            val_text,
-            flags=re.DOTALL,
-        )
-    else:
-        final_text = val_text + "\n\n" + injection
-
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as rf:
-        rf.write(final_text)
-
-    return output_path
-
-
-def _render_testing_template(
-    template_path: str,
-    strategy_content: str,
-    output_path: str,
-    git_diff_text: Optional[str] = None,
-    include_diff: bool = False,
-) -> str:
-    """Inject read-only strategy specification and optional implementation git diff into a testing template."""
-    if not template_path or not os.path.exists(template_path):
-        return template_path
-
-    with open(template_path, "r", encoding="utf-8") as tf:
-        base_text = tf.read()
-
-    header = "## COMPLETED IMPLEMENTATION CONTEXT (READ-ONLY REFERENCE FOR TESTING)"
-    parts = [
-        header,
-        "",
-        "> **STRICT ROLE DIRECTIVE**: The specification and code changes below were **already executed** in Job 1 (Implementation) and Job 2 (Validation).",
-        "> - Do **NOT** re-execute the implementation plan below as a builder task list.",
-        "> - Use `<completed_strategy_specification>` as the **Normative Oracle** to identify required invariants, formulas, boundary conditions, edge cases, and acceptance criteria—including any requirements the implementation may have missed.",
-    ]
-    if include_diff:
-        parts.append(
-            "> - Use `<implementation_git_diff>` to inspect the **Exact Net Code Delta** applied to the editable files during Job 1 & Job 2."
-        )
-    parts.append(
-        "> - Only modify source files (`target_files` / `extra_editable_files`) if your tests uncover a genuine bug, contract discrepancy, or missing edge case in the implementation."
-    )
-
-    clean_strategy = (strategy_content or "").strip()
-    if clean_strategy:
-        clean_strategy = re.sub(
-            r"```ya?ml[^\n]*\n(?:(?!```).)*?\bfiles\s*:.*?```\s*",
-            "",
-            clean_strategy,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-        clean_strategy = re.sub(
-            r"(?i)(?:^|\n)#{2,3}\s*Scope Analysis[ \t]*\r?\n(?=\s*(?:#{1,3}\s|\Z))",
-            "\n",
-            clean_strategy,
-        ).strip()
-
-    if clean_strategy:
-        parts.extend(
-            [
-                "",
-                "<completed_strategy_specification>",
-                clean_strategy,
-                "</completed_strategy_specification>",
-            ]
-        )
-
-    if include_diff:
-        clean_diff = (git_diff_text or "").strip()
-        diff_body = (
-            f"```diff\n{clean_diff}\n```"
-            if clean_diff
-            else "(No net code changes detected in Job 1 / Job 2.)"
-        )
-        parts.extend(
-            [
-                "",
-                "<implementation_git_diff>",
-                diff_body,
-                "</implementation_git_diff>",
-            ]
-        )
-
-    injection = "\n".join(parts) + "\n"
-    if header in base_text:
-        final_text = re.sub(
-            rf"{re.escape(header)}.*\Z",
-            lambda _: injection,
-            base_text,
-            flags=re.DOTALL,
-        )
-    else:
-        final_text = base_text.rstrip() + "\n\n---\n\n" + injection
-
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as rf:
-        rf.write(final_text)
-
-    return output_path
-
-
-def resolve_template_path(path_val, project_directory=None):
-    """Resolves a template path, prioritizing local workspace paths (.aider_factory/ and project root)
-    before falling back to package bundled resources."""
-    if not path_val:
-        return None
-
-    if os.path.isabs(path_val):
-        return path_val
-
-    base_proj = str(project_directory or os.getcwd())
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    pkg_dir = os.path.abspath(os.path.join(script_dir, ".."))
-
-    # Strip `.aider_factory/` or `src/aider_factory/` prefixes
-    rel_stripped = path_val
-    for prefix in (
-        ".aider_factory/",
-        ".aider_factory\\",
-        "src/aider_factory/",
-        "src\\aider_factory\\",
-    ):
-        if rel_stripped.startswith(prefix):
-            rel_stripped = rel_stripped[len(prefix) :]
-            break
-
-    flat_filename = os.path.basename(path_val)
-
-    # Primary Workspace Candidates (Checked first in order of specificity)
-    workspace_candidates = [
-        os.path.join(base_proj, path_val),
-        os.path.join(base_proj, ".aider_factory", rel_stripped),
-        os.path.join(base_proj, ".aider_factory", "markdown", rel_stripped),
-        os.path.join(base_proj, ".aider_factory", flat_filename),
-        os.path.join(base_proj, ".aider_factory", "markdown", flat_filename),
-    ]
-
-    for cand in workspace_candidates:
-        if os.path.isfile(cand):
-            return cand.replace("\\", "/")
-
-    # Package Fallback Candidates (Checked only if workspace has no matching file)
-    pkg_candidates = [
-        os.path.join(pkg_dir, rel_stripped),
-        os.path.join(pkg_dir, "markdown", rel_stripped),
-        os.path.join(pkg_dir, flat_filename),
-        os.path.join(pkg_dir, "markdown", flat_filename),
-    ]
-
-    for cand in pkg_candidates:
-        if os.path.isfile(cand):
-            return cand.replace("\\", "/")
-
-    return os.path.join(base_proj, path_val).replace("\\", "/")
-
-
-def _extract_files_from_plan(plan_path: str, project_directory: str) -> dict[str, list[str]]:
-    """Deterministically extracts 5-field files configuration from a plan markdown file."""
-    result = {
-        "target_files": [],
-        "extra_editable_files": [],
-        "test_files": [],
-        "context_files_job": [],
-        "context_files_test": [],
-    }
-    if not plan_path or not os.path.isfile(plan_path):
-        return result
-
-    try:
-        with open(plan_path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except Exception:
-        return result
-
-    # 1. Primary: YAML block inside plan (scoped to Scope Analysis if present)
-    scope_match = re.search(r"(?i)#{2,3}\s*Scope Analysis.*?(?=\n#{2,3}\s|\Z)", content, re.DOTALL)
-    search_space = scope_match.group(0) if scope_match else content
-
-    yaml_found = False
-    yaml_blocks = re.findall(r"```ya?ml[^\n]*\n(.*?)```", search_space, re.DOTALL | re.IGNORECASE)
-    for block in yaml_blocks:
-        if "files:" in block:
-            try:
-                parsed = yaml.safe_load(block)
-                if isinstance(parsed, dict) and "files" in parsed and isinstance(parsed["files"], dict):
-                    f_block = parsed["files"]
-                    if not any(f_block.get(k) for k in result.keys()):
-                        continue
-                    for k in result.keys():
-                        vals = f_block.get(k, []) or []
-                        if isinstance(vals, str):
-                            vals = [vals]
-                        result[k] = [str(v).strip() for v in vals if v and isinstance(v, (str, int, float))]
-                    yaml_found = True
-                    break
-            except Exception:
-                continue
-
-    # 2. Fallback: Markdown section headers ONLY if no YAML block was parsed
-    if not yaml_found:
-        def _parse_section(pattern: str) -> list[str]:
-            m = re.search(
-                rf"(?i)[ \t]*(?:###|##)\s*{pattern}(?:\s*:)?\s*\r?\n(.*?)(?=\r?\n[ \t]*(?:###|##|#\s|---)|\Z)",
-                content,
-                re.DOTALL,
-            )
-            if not m:
-                return []
-            found = []
-            for line in m.group(1).splitlines():
-                line = line.strip()
-                item_match = re.search(r"^(?:[-*]|\d+\.)\s*(?:\[[ xX]\]\s*)?(?:[`'\"]([^`'\"\n\r#]+)[`'\"]|([^\s#`'\"]+))", line)
-                if item_match:
-                    raw_p = (item_match.group(1) or item_match.group(2) or "").strip()
-                    p = re.sub(r"[:—–-]+$", "", raw_p).strip()
-                    if p and not p.startswith("<") and not p.startswith("path/to/") and p not in ("...", "None", "null"):
-                        found.append(p)
-            return found
-
-        result["target_files"] = _parse_section(r"Target\s+Files?")
-        result["extra_editable_files"] = _parse_section(r"Extra\s+Editable\s+Files?")
-        result["test_files"] = _parse_section(r"Test\s+Files?")
-        result["context_files_job"] = _parse_section(r"(?:Context|Readonly)\s+Files?")
-        result["context_files_test"] = _parse_section(r"(?:Context\s+Files?\s+Test|Test\s+Context\s+Files?)")
-
-    # Default context_files_test to context_files_job if omitted or empty
-    if not result["context_files_test"] and result["context_files_job"]:
-        result["context_files_test"] = list(result["context_files_job"])
-
-    # 3. Path sanitization, test separation, and physical disk verification
-    def _canon_rel(p: str) -> str:
-        clean = os.path.normpath(p).replace("\\", "/")
-        if os.path.isabs(clean):
-            try:
-                return os.path.relpath(clean, project_directory).replace("\\", "/")
-            except ValueError:
-                return clean
-        return clean
-
-    verified: dict[str, list[str]] = {k: [] for k in result.keys()}
-
-    def _add_entry(category: str, raw_path: str):
-        if not raw_path or raw_path.startswith(("path/to/", "<")) or raw_path in ("...", "None", "null"):
-            return
-        abs_p = raw_path if os.path.isabs(raw_path) else os.path.join(project_directory, raw_path)
-        if glob.has_magic(raw_path):
-            matches = sorted(glob.glob(abs_p))
-            if not matches:
-                print(f"⚠️ [sticky_phases] Pruning non-matching pattern: '{raw_path}'", file=sys.stderr, flush=True)
-                return
-            for m in matches:
-                if os.path.isfile(m):
-                    _add_entry(category, m)
-            return
-
-        rel_p = _canon_rel(raw_path)
-        dest_cat = "test_files" if (category == "target_files" and is_test_path(rel_p)) else category
-        if dest_cat == "test_files" or os.path.isfile(abs_p):
-            if rel_p not in verified[dest_cat]:
-                verified[dest_cat].append(rel_p)
-        else:
-            print(f"⚠️ [sticky_phases] Pruning non-existent path: '{raw_path}'", file=sys.stderr, flush=True)
-
-    for k, paths in result.items():
-        for p in paths:
-            _add_entry(k, p)
-
-    return verified
-
-
-class _TeeWriter:
-    """Write-through wrapper: every write goes to both the original stream and a log file.
-    Used on Windows where os.dup2 on fd 1/2 is unreliable with buffered I/O."""
-
-    def __init__(self, original, log_file):
-        self._original = original
-        self._log = log_file
-        self._lock = threading.RLock()
-
-    def write(self, data):
-        with self._lock:
-            self._original.write(data)
-            try:
-                self._log.write(data)
-                self._log.flush()
-            except (ValueError, OSError):
-                pass
-
-    def flush(self):
-        with self._lock:
-            self._original.flush()
-            try:
-                self._log.flush()
-            except (ValueError, OSError):
-                pass
-
-    def fileno(self):
-        return self._original.fileno()
-
-    def __getattr__(self, name):
-        return getattr(self._original, name)
-
-
-class OSTee:
-    """Redirects OS file descriptors 1 (stdout) and 2 (stderr) so that ALL output from
-    Python AND child subprocesses (script, aider, Rscript) is captured to log_file
-    while streaming live to the terminal.
-    """
-
-    def __init__(self, log_path: str):
-        self.log_path = log_path
-        self.log_file = open(self.log_path, "a", encoding="utf-8", errors="replace")
-        self._lock = threading.Lock()
-        self.running = True
-        self._stopped = False
-
-        if sys.platform == "win32":
-            self._orig_stdout = sys.stdout
-            self._orig_stderr = sys.stderr
-            sys.stdout = _TeeWriter(self._orig_stdout, self.log_file)
-            sys.stderr = _TeeWriter(self._orig_stderr, self.log_file)
-            self.orig_stdout_fd = None
-            self.orig_stderr_fd = None
-            self.pipe_r = None
-            self.pipe_w = None
-            self.thread = None
-        else:
-            self._orig_stdout = None
-            self.orig_stdout_fd = os.dup(1)
-            self.orig_stderr_fd = os.dup(2)
-            self.pipe_r, self.pipe_w = os.pipe()
-            os.dup2(self.pipe_w, 1)
-            os.dup2(self.pipe_w, 2)
-            self.thread = threading.Thread(target=self._pump, daemon=True)
-            self.thread.start()
-
-    def _pump(self):
-        while True:
-            try:
-                if self.pipe_r is None:
-                    break
-                data = os.read(self.pipe_r, 4096)
-                if not data:
-                    break
-                if self.orig_stdout_fd is not None:
-                    os.write(self.orig_stdout_fd, data)
-                text = data.decode("utf-8", errors="replace")
-                try:
-                    self.log_file.write(text)
-                    self.log_file.flush()
-                except (ValueError, OSError):
-                    break
-            except Exception:
-                break
-
-    def stop(self):
-        with self._lock:
-            if self._stopped:
-                return
-            self._stopped = True
-            self.running = False
-
-            if sys.platform == "win32":
-                if self._orig_stdout:
-                    sys.stdout = self._orig_stdout
-                if self._orig_stderr:
-                    sys.stderr = self._orig_stderr
-                try:
-                    self.log_file.close()
-                except OSError:
-                    pass
-            else:
-                sys.stdout.flush()
-                sys.stderr.flush()
-                if self.orig_stdout_fd is not None:
-                    try:
-                        os.dup2(self.orig_stdout_fd, 1)
-                    except OSError:
-                        pass
-                if self.orig_stderr_fd is not None:
-                    try:
-                        os.dup2(self.orig_stderr_fd, 2)
-                    except OSError:
-                        pass
-                if self.pipe_w is not None:
-                    try:
-                        os.close(self.pipe_w)
-                    except OSError:
-                        pass
-                    self.pipe_w = None
-                if self.thread and self.thread.is_alive():
-                    self.thread.join(timeout=2.0)
-                if self.pipe_r is not None:
-                    try:
-                        os.close(self.pipe_r)
-                    except OSError:
-                        pass
-                    self.pipe_r = None
-                for fd_attr in ("orig_stdout_fd", "orig_stderr_fd"):
-                    fd = getattr(self, fd_attr, None)
-                    if fd is not None:
-                        try:
-                            os.close(fd)
-                        except OSError:
-                            pass
-                        setattr(self, fd_attr, None)
-                try:
-                    self.log_file.close()
-                except OSError:
-                    pass
 
 
 if __name__ in ("__main__", "__test__"):
@@ -1515,8 +942,24 @@ Options:
             # Ingestion runs exactly ONCE per phase (rag_manager.ingest builds every table
             # in a single call). The first task created carries the ingest payload; later
             # per-document tasks depend on it so it always completes first.
-            ingest_attached = False
-            phase_ingest_owner_id = None
+            phase_ingest = {
+                "payload": ocr_ingest if phase_run_ocr_rag else None,
+                "owner_id": None,
+            }
+
+            def _claim_ingest(task_id: str) -> Optional[dict]:
+                payload = phase_ingest["payload"]
+                if payload is not None:
+                    phase_ingest["payload"] = None
+                    phase_ingest["owner_id"] = task_id
+                return payload
+
+            def _with_ingest_owner(base_deps: list[str]) -> list[str]:
+                deps = list(base_deps)
+                owner_id = phase_ingest["owner_id"]
+                if owner_id and owner_id not in deps:
+                    deps.append(owner_id)
+                return deps
 
             def _add_task(t: Task) -> None:
                 phase_task_ids.append(t.id)
@@ -1580,11 +1023,7 @@ Options:
                 last_task_for_file = file_last_tasks.get(current_file)
                 initial_phase_deps = [last_task_for_file] if last_task_for_file else list(prior_phase_terminal_tasks)
 
-                # Ingest once per phase, carried on the first node built (any mode).
-                task_ocr_ingest = None
-                if phase_run_ocr_rag and not ingest_attached:
-                    task_ocr_ingest = ocr_ingest
-                    ingest_attached = True
+                # Removed: per-file task_ocr_ingest state (managed atomically by phase_ingest closures)
 
                 # ---- mode discriminator ----
                 _oa = oracle_cfg or {}
@@ -1634,6 +1073,253 @@ Options:
                 _apply_kwargs = None
                 _build_finalize = False
 
+                def _build_pre_edit_debate_tasks(
+                    job_num: int,
+                    issue_file: Optional[str],
+                    debate_reads: list[str],
+                    editable_files: list[str],
+                    base_rag_env: dict,
+                    editor_model: str,
+                    editor_api_base: Optional[str],
+                    initial_deps: list[str],
+                    testing_context: Optional[dict] = None,
+                ) -> tuple[str, str]:
+                    # Removed: global bindings; managed via closure over phase_ingest
+                    _pre_loops = pre_edit_cfg.get("loops")
+                    _job_loops = _pre_loops if _pre_loops is not None else 3
+                    _job_rounds = int(pre_edit_cfg.get("rounds", 1))
+                    _job_pass_history = bool(pre_edit_cfg.get("pass_history", True))
+                    _job_persist = bool(pre_edit_cfg.get("persist", False))
+                    _job_orc_persona = pre_edit_cfg.get("oracle_persona", "")
+                    _job_arch_persona = pre_edit_cfg.get("architect_persona", "")
+                    _job_orc_file = pre_edit_cfg.get("oracle_file", "")
+                    _job_arch_file = pre_edit_cfg.get("architect_file", "")
+
+                    _debate_template = _resolve_job_debate_template(
+                        pre_edit_cfg,
+                        job_num=job_num,
+                        project_directory=project_directory,
+                    )
+
+                    _raw_coll = pre_edit_cfg.get("job_debate_collection")
+                    if isinstance(_raw_coll, (list, tuple)):
+                        if len(_raw_coll) >= job_num:
+                            _job_coll_entry = _raw_coll[job_num - 1]
+                        elif len(_raw_coll) > 0:
+                            _job_coll_entry = _raw_coll[0]
+                        else:
+                            _job_coll_entry = None
+                    else:
+                        _job_coll_entry = _raw_coll
+
+                    prev_debate_id = None
+                    _verdict_job_abs = ""
+                    for r_idx in range(1, _job_rounds + 1):
+                        _j_coll, _j_db, _j_mode = _resolve_job_debate_collection(
+                            pre_edit_cfg,
+                            job_num=job_num,
+                            default_collection=_table,
+                            rag_context_root=rag_context_root,
+                            default_db=base_rag_env.get("ORACLE_RAG_DB_DIR", ""),
+                            project_directory=project_directory,
+                            round_num=r_idx,
+                        )
+                        _j_rag_env = dict(base_rag_env)
+                        if (
+                            pre_edit_cfg.get("job_debate_collection") is not None
+                            or pre_edit_cfg.get("job_debate_db") is not None
+                        ):
+                            _j_rag_env["ORACLE_COLLECTION"] = _j_coll
+                            _j_rag_env["ORACLE_RAG_DB_DIR"] = _j_db
+
+                        r_suf = f"_r{r_idx}" if _job_rounds > 1 else ""
+                        job_debate_id = (
+                            f"{env_prefix}_job{job_num}_debate_{base_name}{r_suf}"
+                        )
+                        _verdict_job_abs = os.path.join(
+                            _ddir, f"{base_name}.job{job_num}_verdict{r_suf}.md"
+                        )
+                        _ledger_job_abs = os.path.join(
+                            _ddir, f"{base_name}.job{job_num}_debate{r_suf}.json"
+                        )
+
+                        _r_deliberate = {
+                            "template": _debate_template,
+                            "issue": issue_file,
+                            "verdict": _verdict_job_abs,
+                            "ledger": _ledger_job_abs,
+                            "gate_cmd": None,
+                            "loops": _job_loops,
+                            "retrieve_mode": _j_mode
+                            if pre_edit_cfg.get("job_debate_collection") is not None
+                            else phase_retrieval_mode,
+                            "mode": "code",
+                            "draft_mode": True,
+                            "read_files": debate_reads,
+                            "editable_files": list(editable_files),
+                            "round_idx": r_idx,
+                            "pass_history": _job_pass_history,
+                            "persist": _job_persist,
+                            "oracle_persona": _job_orc_persona,
+                            "architect_persona": _job_arch_persona,
+                            "oracle_file": _job_orc_file,
+                            "architect_file": _job_arch_file,
+                            "job_debate_collection": _job_coll_entry,
+                        }
+                        if r_idx > 1:
+                            _r_deliberate["prior_verdict"] = os.path.join(
+                                _ddir,
+                                f"{base_name}.job{job_num}_verdict_r{r_idx - 1}.md",
+                            )
+                            _r_deliberate["prior_ledger"] = os.path.join(
+                                _ddir,
+                                f"{base_name}.job{job_num}_debate_r{r_idx - 1}.json",
+                            )
+
+                        _r_depends = (
+                            [prev_debate_id]
+                            if prev_debate_id
+                            else _with_ingest_owner(initial_deps)
+                        )
+                        _r_ingest = _claim_ingest(job_debate_id) if r_idx == 1 else None
+                        _add_task(
+                            Task(
+                                id=job_debate_id,
+                                depends_on=_r_depends,
+                                model=ARCHITECT_AGENT,
+                                editor_model=editor_model,
+                                weak_model=weak_model,
+                                weak_model_api_base=weak_model_api_base,
+                                architect_api_base=ARCHITECT_API_BASE,
+                                editor_api_base=editor_api_base,
+                                rag_env=_j_rag_env,
+                                ocr_ingest=_r_ingest,
+                                deliberate=_r_deliberate,
+                                history_stem=_h_stem(f"job{job_num}"),
+                                testing_context=testing_context,
+                            )
+                        )
+                        prev_debate_id = job_debate_id
+
+                    return prev_debate_id, _verdict_job_abs
+
+                def _build_escalation_rounds(
+                    base_debate: dict,
+                    base_apply_kwargs: dict,
+                    apply_files: list[str],
+                    delib_rag_env: dict,
+                    start_dep_id: Optional[str],
+                    tf_suf: str = "",
+                    build_finalize: bool = False,
+                ) -> Optional[str]:
+                    cur_last_task = start_dep_id
+                    _r_ledger = ""
+                    for round_idx in range(1, debate_rounds + 1):
+                        round_suf = f"_r{round_idx}" if debate_rounds > 1 else ""
+                        _r_verdict = os.path.join(
+                            _ddir, f"{base_name}{tf_suf}{round_suf}.verdict.md"
+                        )
+                        _r_ledger = os.path.join(
+                            _ddir, f"{base_name}{tf_suf}{round_suf}.debate.json"
+                        )
+
+                        _round_debate = dict(base_debate)
+                        _round_debate["verdict"] = _r_verdict
+                        _round_debate["ledger"] = _r_ledger
+                        _round_debate["round_idx"] = round_idx
+                        _round_debate["pass_history"] = pass_history
+                        _round_debate["persist"] = bool(esc_cfg.get("persist", False))
+                        _round_debate["oracle_persona"] = esc_cfg.get("oracle_persona", "")
+                        _round_debate["architect_persona"] = esc_cfg.get("architect_persona", "")
+                        _round_debate["oracle_file"] = esc_cfg.get("oracle_file", "")
+                        _round_debate["architect_file"] = esc_cfg.get("architect_file", "")
+                        if round_idx > 1:
+                            _round_debate["prior_ledger"] = os.path.join(
+                                _ddir, f"{base_name}{tf_suf}_r{round_idx - 1}.debate.json"
+                            )
+                            _round_debate["prior_verdict"] = os.path.join(
+                                _ddir, f"{base_name}{tf_suf}_r{round_idx - 1}.verdict.md"
+                            )
+
+                        _r_apply_kwargs = dict(base_apply_kwargs)
+                        if debate_rounds > 1 and round_idx < debate_rounds:
+                            _r_apply_kwargs["soft_fail"] = True
+                        if build_finalize:
+                            _r_apply_kwargs["rag_env"] = dict(
+                                base_apply_kwargs.get("rag_env", {})
+                            )
+                            _r_apply_kwargs["rag_env"]["ORACLE_BASELINE_LEDGER"] = _r_ledger
+
+                        delib_id = f"{env_prefix}_deliberate_{base_name}{tf_suf}{round_suf}"
+                        _delib_deps = (
+                            [cur_last_task]
+                            if round_idx > 1
+                            else _with_ingest_owner(
+                                [cur_last_task]
+                                if cur_last_task
+                                else initial_phase_deps
+                            )
+                        )
+                        _add_task(
+                            Task(
+                                id=delib_id,
+                                depends_on=_delib_deps,
+                                model=ARCHITECT_AGENT,
+                                editor_model=EDITOR_AGENT,
+                                weak_model=weak_model,
+                                weak_model_api_base=weak_model_api_base,
+                                architect_api_base=ARCHITECT_API_BASE,
+                                editor_api_base=EDITOR_API,
+                                rag_env=delib_rag_env,
+                                deliberate=_round_debate,
+                                history_stem=_h_stem(f"escalate{tf_suf}"),
+                            )
+                        )
+
+                        apply_id = f"{env_prefix}_apply_{base_name}{tf_suf}{round_suf}"
+                        _add_task(
+                            Task(
+                                id=apply_id,
+                                depends_on=[delib_id],
+                                message_file=_r_verdict,
+                                verdict_gate=_r_verdict,
+                                files=list(apply_files),
+                                model=ARCHITECT_AGENT,
+                                editor_model=EDITOR_AGENT_TEST,
+                                fallback_editor_model=EDITOR_AGENT_TEST_FALLBACK,
+                                architect_api_base=ARCHITECT_API_BASE,
+                                editor_api_base=EDITOR_API_FALLBACK,
+                                iterate_test=True,
+                                auto_test=auto_test,
+                                history_stem=_h_stem(f"escalate{tf_suf}"),
+                                **_r_apply_kwargs,
+                            )
+                        )
+                        cur_last_task = apply_id
+
+                    if build_finalize:
+                        finalize_id = f"{env_prefix}_finalize_{base_name}"
+                        _add_task(
+                            Task(
+                                id=finalize_id,
+                                depends_on=[cur_last_task] if cur_last_task else [],
+                                rag_env=file_rag_env,
+                                validate={
+                                    "review": _out_abs,
+                                    "source": _source_abs,
+                                    "report": _gate_report,
+                                    "tag": validation_tag,
+                                    "finalize": True,
+                                    "baseline_ledger": _r_ledger,
+                                },
+                                skip_aider=True,
+                                history_stem=_h_stem("finalize"),
+                            )
+                        )
+                        cur_last_task = finalize_id
+
+                    return cur_last_task
+
                 if grounding_mode:
                     # produce+verify for a review: generate -> autofix -> heal (all optional).
                     _source_abs = os.path.join(
@@ -1647,9 +1333,8 @@ Options:
                             _oa.get("template"), project_directory=project_directory
                         )
                         gen_id = f"{env_prefix}_oracle_{base_name}"
-                        deps = list(initial_phase_deps)
-                        if phase_ingest_owner_id and phase_ingest_owner_id not in deps:
-                            deps.append(phase_ingest_owner_id)
+                        deps = _with_ingest_owner(initial_phase_deps)
+                        _gen_ingest = _claim_ingest(gen_id)
                         _add_task(
                             Task(
                                 id=gen_id,
@@ -1659,7 +1344,7 @@ Options:
                                 architect_api_base=ARCHITECT_API_BASE,
                                 editor_api_base=EDITOR_API,
                                 rag_env=file_rag_env,
-                                ocr_ingest=task_ocr_ingest,
+                                ocr_ingest=_gen_ingest,
                                 oracle={
                                     "template": _tmpl,
                                     "out": _out_abs,
@@ -1672,20 +1357,23 @@ Options:
                                 history_stem=_h_stem("oracle"),
                             )
                         )
-                        if task_ocr_ingest is not None:
-                            phase_ingest_owner_id = gen_id
-                            task_ocr_ingest = None
                         last_task_for_file = gen_id
 
                     # autofix (deterministic ellipsis-stitch + audit), BEFORE any agent.
                     if resolve_evidence:
                         autofix_id = f"{env_prefix}_autofix_{base_name}"
+                        autofix_deps = _with_ingest_owner(
+                            [last_task_for_file]
+                            if last_task_for_file
+                            else initial_phase_deps
+                        )
+                        _autofix_ingest = _claim_ingest(autofix_id)
                         _add_task(
                             Task(
                                 id=autofix_id,
-                                depends_on=[last_task_for_file] if last_task_for_file else list(initial_phase_deps),
+                                depends_on=autofix_deps,
                                 rag_env=file_rag_env,
-                                ocr_ingest=task_ocr_ingest,
+                                ocr_ingest=_autofix_ingest,
                                 validate={
                                     "review": _out_abs,
                                     "source": _source_abs,
@@ -1702,9 +1390,6 @@ Options:
                                 history_stem=_h_stem("autofix"),
                             )
                         )
-                        if task_ocr_ingest is not None:
-                            phase_ingest_owner_id = autofix_id
-                            task_ocr_ingest = None
                         last_task_for_file = autofix_id
 
                     # heal (agent iterate loop; validator gates each attempt).
@@ -1726,12 +1411,15 @@ Options:
                                 f"{phase_cmd_prefix}{phase_test_runner.replace('{file}', _val_script)}"
                             )
                             heal_id = f"{env_prefix}_heal_{base_name}"
+                            heal_deps = _with_ingest_owner(
+                                [last_task_for_file]
+                                if last_task_for_file
+                                else initial_phase_deps
+                            )
                             _add_task(
                                 Task(
                                     id=heal_id,
-                                    depends_on=[last_task_for_file]
-                                    if last_task_for_file
-                                    else [],
+                                    depends_on=heal_deps,
                                     iterate_file=iterate_plan,
                                     read_files=list(initial_context_test_files),
                                     files=[
@@ -1817,11 +1505,7 @@ Options:
 
                 else:
                     # ---------- code / test mode: job_one -> job_two/iterate_test ----------
-                    def _ingest_deps(base_deps):
-                        d = list(base_deps)
-                        if phase_ingest_owner_id and phase_ingest_owner_id not in d:
-                            d.append(phase_ingest_owner_id)
-                        return d
+                    # Removed: local _ingest_deps (unified into _with_ingest_owner)
 
                     strategy_content = ""
                     strategy_file = plans.get("validate_strategy_file")
@@ -1908,124 +1592,41 @@ Options:
                             for prior_tf in prior_tfs:
                                 if prior_tf and prior_tf not in job1_files:
                                     job1_files.append(prior_tf)
-                        job1_depends = _ingest_deps(
+                        job1_depends = _with_ingest_owner(
                             initial_phase_deps
                         )
                         job1_msg_file = job_one_plan
 
                         if debate_j1:
-                            _pre_loops = pre_edit_cfg.get("loops")
-                            _job1_loops = _pre_loops if _pre_loops is not None else 3
-                            _job1_rounds = int(pre_edit_cfg.get("rounds", 1))
-                            _job1_pass_history = bool(pre_edit_cfg.get("pass_history", True))
-                            _job1_persist = bool(pre_edit_cfg.get("persist", False))
-                            _job1_orc_persona = pre_edit_cfg.get("oracle_persona", "")
-                            _job1_arch_persona = pre_edit_cfg.get("architect_persona", "")
-                            _job1_orc_file = pre_edit_cfg.get("oracle_file", "")
-                            _job1_arch_file = pre_edit_cfg.get("architect_file", "")
-
-                            _debate_template = _resolve_job_debate_template(
-                                pre_edit_cfg, job_num=1, project_directory=project_directory
+                            _debate_reads = list(
+                                dict.fromkeys(
+                                    [current_file]
+                                    + list(extra_editable_files)
+                                    + list(initial_context_files)
+                                    + (completed_files if sticky_context else [])
+                                )
                             )
-
-                            _debate_reads = list(dict.fromkeys(
-                                [current_file]
-                                + list(extra_editable_files)
-                                + list(initial_context_files)
-                                + (completed_files if sticky_context else [])
-                            ))
                             if job_one_plan and job_one_plan not in _debate_reads:
                                 _debate_reads.append(job_one_plan)
 
-                            prev_debate_id = None
-                            for r_idx in range(1, _job1_rounds + 1):
-                                _j1_coll, _j1_db, _j1_mode = _resolve_job_debate_collection(
-                                    pre_edit_cfg,
+                            prev_debate_id, _verdict_job1_abs = (
+                                _build_pre_edit_debate_tasks(
                                     job_num=1,
-                                    default_collection=_table,
-                                    rag_context_root=rag_context_root,
-                                    default_db=file_rag_env.get("ORACLE_RAG_DB_DIR", ""),
-                                    project_directory=project_directory,
-                                    round_num=r_idx,
+                                    issue_file=job_one_plan,
+                                    debate_reads=_debate_reads,
+                                    editable_files=list(job1_files),
+                                    base_rag_env=file_rag_env,
+                                    editor_model=EDITOR_AGENT,
+                                    editor_api_base=EDITOR_API,
+                                    initial_deps=_with_ingest_owner(initial_phase_deps),
                                 )
-                                _j1_rag_env = dict(file_rag_env)
-                                if (
-                                    pre_edit_cfg.get("job_debate_collection") is not None
-                                    or pre_edit_cfg.get("job_debate_db") is not None
-                                ):
-                                    _j1_rag_env["ORACLE_COLLECTION"] = _j1_coll
-                                    _j1_rag_env["ORACLE_RAG_DB_DIR"] = _j1_db
-
-                                r_suf = f"_r{r_idx}" if _job1_rounds > 1 else ""
-                                job1_debate_id = f"{env_prefix}_job1_debate_{base_name}{r_suf}"
-                                _verdict_job1_abs = os.path.join(
-                                    _ddir, f"{base_name}.job1_verdict{r_suf}.md"
-                                )
-                                _ledger_job1_abs = os.path.join(
-                                    _ddir, f"{base_name}.job1_debate{r_suf}.json"
-                                )
-
-                                _raw_coll = pre_edit_cfg.get("job_debate_collection")
-                                _job1_coll_entry = (
-                                    _raw_coll[0] if isinstance(_raw_coll, (list, tuple)) and len(_raw_coll) > 0
-                                    else _raw_coll
-                                )
-                                _r_deliberate = {
-                                    "template": _debate_template,
-                                    "issue": job_one_plan,
-                                    "verdict": _verdict_job1_abs,
-                                    "ledger": _ledger_job1_abs,
-                                    "gate_cmd": None,
-                                    "loops": _job1_loops,
-                                    "retrieve_mode": _j1_mode if pre_edit_cfg.get("job_debate_collection") is not None else phase_retrieval_mode,
-                                    "mode": "code",
-                                    "draft_mode": True,
-                                    "read_files": _debate_reads,
-                                    "editable_files": list(job1_files),
-                                    "round_idx": r_idx,
-                                    "pass_history": _job1_pass_history,
-                                    "persist": _job1_persist,
-                                    "oracle_persona": _job1_orc_persona,
-                                    "architect_persona": _job1_arch_persona,
-                                    "oracle_file": _job1_orc_file,
-                                    "architect_file": _job1_arch_file,
-                                    "job_debate_collection": _job1_coll_entry,
-                                }
-                                if r_idx > 1:
-                                    _r_deliberate["prior_verdict"] = os.path.join(
-                                        _ddir, f"{base_name}.job1_verdict_r{r_idx - 1}.md"
-                                    )
-                                    _r_deliberate["prior_ledger"] = os.path.join(
-                                        _ddir, f"{base_name}.job1_debate_r{r_idx - 1}.json"
-                                    )
-
-                                _r_depends = [prev_debate_id] if prev_debate_id else _ingest_deps(initial_phase_deps)
-                                _add_task(
-                                    Task(
-                                        id=job1_debate_id,
-                                        depends_on=_r_depends,
-                                        model=ARCHITECT_AGENT,
-                                        editor_model=EDITOR_AGENT,
-                                        weak_model=weak_model,
-                                        weak_model_api_base=weak_model_api_base,
-                                        architect_api_base=ARCHITECT_API_BASE,
-                                        editor_api_base=EDITOR_API,
-                                        rag_env=_j1_rag_env,
-                                        ocr_ingest=task_ocr_ingest if r_idx == 1 else None,
-                                        deliberate=_r_deliberate,
-                                        history_stem=_h_stem("job1"),
-                                    )
-                                )
-                                if task_ocr_ingest is not None and r_idx == 1:
-                                    phase_ingest_owner_id = job1_debate_id
-                                    task_ocr_ingest = None
-                                prev_debate_id = job1_debate_id
-
+                            )
                             job1_depends = [prev_debate_id]
                             job1_msg_file = _verdict_job1_abs
                             if job_one_plan and job_one_plan not in job1_reads:
                                 job1_reads.append(job_one_plan)
 
+                        job1_ingest = _claim_ingest(job1_id)
                         _add_task(
                             Task(
                                 id=job1_id,
@@ -2039,16 +1640,13 @@ Options:
                                 architect_api_base=ARCHITECT_API_BASE,
                                 editor_api_base=EDITOR_API,
                                 rag_env=file_rag_env,
-                                ocr_ingest=task_ocr_ingest,
+                                ocr_ingest=job1_ingest,
                                 pair_programming=pair_programming,
                                 history_stem=_h_stem("job1"),
                                 testing_context=baseline_capture_ctx,
                                 **task_aider_flags,
                             )
                         )
-                        if task_ocr_ingest is not None:
-                            phase_ingest_owner_id = job1_id
-                            task_ocr_ingest = None
                         last_task_for_file = job1_id
 
                     # =================================================================
@@ -2056,7 +1654,7 @@ Options:
                     # =================================================================
                     if run_job_two:
                         job2_id = f"{env_prefix}_job2_{base_name}"
-                        job2_depends = _ingest_deps(
+                        job2_depends = _with_ingest_owner(
                             [last_task_for_file] if last_task_for_file else list(initial_phase_deps)
                         )
 
@@ -2079,115 +1677,34 @@ Options:
                             job2_msg_file = None
 
                         if debate_j2:
-                            _pre_loops = pre_edit_cfg.get("loops")
-                            _job2_loops = _pre_loops if _pre_loops is not None else 3
-                            _job2_rounds = int(pre_edit_cfg.get("rounds", 1))
-                            _job2_pass_history = bool(pre_edit_cfg.get("pass_history", True))
-                            _job2_persist = bool(pre_edit_cfg.get("persist", False))
-                            _job2_orc_persona = pre_edit_cfg.get("oracle_persona", "")
-                            _job2_arch_persona = pre_edit_cfg.get("architect_persona", "")
-                            _job2_orc_file = pre_edit_cfg.get("oracle_file", "")
-                            _job2_arch_file = pre_edit_cfg.get("architect_file", "")
-
-                            _debate_template = _resolve_job_debate_template(
-                                pre_edit_cfg, job_num=2, project_directory=project_directory
+                            _debate_reads = list(
+                                dict.fromkeys(
+                                    [current_file]
+                                    + list(extra_editable_files)
+                                    + list(initial_context_files)
+                                    + (completed_files if sticky_context else [])
+                                )
                             )
-
-                            _debate_reads = list(dict.fromkeys(
-                                [current_file]
-                                + list(extra_editable_files)
-                                + list(initial_context_files)
-                                + (completed_files if sticky_context else [])
-                            ))
                             if job2_msg_file and job2_msg_file not in _debate_reads:
                                 _debate_reads.append(job2_msg_file)
 
-                            prev_debate_id = None
-                            for r_idx in range(1, _job2_rounds + 1):
-                                _j2_coll, _j2_db, _j2_mode = _resolve_job_debate_collection(
-                                    pre_edit_cfg,
+                            prev_debate_id, _verdict_job2_abs = (
+                                _build_pre_edit_debate_tasks(
                                     job_num=2,
-                                    default_collection=_table,
-                                    rag_context_root=rag_context_root,
-                                    default_db=file_rag_env.get("ORACLE_RAG_DB_DIR", ""),
-                                    project_directory=project_directory,
-                                    round_num=r_idx,
+                                    issue_file=job2_msg_file,
+                                    debate_reads=_debate_reads,
+                                    editable_files=[current_file]
+                                    + list(extra_editable_files),
+                                    base_rag_env=file_rag_env,
+                                    editor_model=EDITOR_AGENT,
+                                    editor_api_base=EDITOR_API,
+                                    initial_deps=_with_ingest_owner(
+                                        [last_task_for_file]
+                                        if last_task_for_file
+                                        else list(initial_phase_deps)
+                                    ),
                                 )
-                                _j2_rag_env = dict(file_rag_env)
-                                if (
-                                    pre_edit_cfg.get("job_debate_collection") is not None
-                                    or pre_edit_cfg.get("job_debate_db") is not None
-                                ):
-                                    _j2_rag_env["ORACLE_COLLECTION"] = _j2_coll
-                                    _j2_rag_env["ORACLE_RAG_DB_DIR"] = _j2_db
-
-                                r_suf = f"_r{r_idx}" if _job2_rounds > 1 else ""
-                                job2_debate_id = f"{env_prefix}_job2_debate_{base_name}{r_suf}"
-                                _verdict_job2_abs = os.path.join(
-                                    _ddir, f"{base_name}.job2_verdict{r_suf}.md"
-                                )
-                                _ledger_job2_abs = os.path.join(
-                                    _ddir, f"{base_name}.job2_debate{r_suf}.json"
-                                )
-
-                                _raw_coll = pre_edit_cfg.get("job_debate_collection")
-                                _job2_coll_entry = (
-                                    _raw_coll[1] if isinstance(_raw_coll, (list, tuple)) and len(_raw_coll) > 1
-                                    else (_raw_coll[0] if isinstance(_raw_coll, (list, tuple)) and len(_raw_coll) > 0 else _raw_coll)
-                                )
-                                _r_deliberate = {
-                                    "template": _debate_template,
-                                    "issue": job2_msg_file,
-                                    "verdict": _verdict_job2_abs,
-                                    "ledger": _ledger_job2_abs,
-                                    "gate_cmd": None,
-                                    "loops": _job2_loops,
-                                    "retrieve_mode": _j2_mode if pre_edit_cfg.get("job_debate_collection") is not None else phase_retrieval_mode,
-                                    "mode": "code",
-                                    "draft_mode": True,
-                                    "read_files": _debate_reads,
-                                    "editable_files": [current_file] + list(extra_editable_files),
-                                    "round_idx": r_idx,
-                                    "pass_history": _job2_pass_history,
-                                    "persist": _job2_persist,
-                                    "oracle_persona": _job2_orc_persona,
-                                    "architect_persona": _job2_arch_persona,
-                                    "oracle_file": _job2_orc_file,
-                                    "architect_file": _job2_arch_file,
-                                    "job_debate_collection": _job2_coll_entry,
-                                }
-                                if r_idx > 1:
-                                    _r_deliberate["prior_verdict"] = os.path.join(
-                                        _ddir, f"{base_name}.job2_verdict_r{r_idx - 1}.md"
-                                    )
-                                    _r_deliberate["prior_ledger"] = os.path.join(
-                                        _ddir, f"{base_name}.job2_debate_r{r_idx - 1}.json"
-                                    )
-
-                                _r_depends = [prev_debate_id] if prev_debate_id else _ingest_deps(
-                                    [last_task_for_file] if last_task_for_file else list(initial_phase_deps)
-                                )
-                                _add_task(
-                                    Task(
-                                        id=job2_debate_id,
-                                        depends_on=_r_depends,
-                                        model=ARCHITECT_AGENT,
-                                        editor_model=EDITOR_AGENT,
-                                        weak_model=weak_model,
-                                        weak_model_api_base=weak_model_api_base,
-                                        architect_api_base=ARCHITECT_API_BASE,
-                                        editor_api_base=EDITOR_API,
-                                        rag_env=_j2_rag_env,
-                                        ocr_ingest=task_ocr_ingest if r_idx == 1 else None,
-                                        deliberate=_r_deliberate,
-                                        history_stem=_h_stem("job2"),
-                                    )
-                                )
-                                if task_ocr_ingest is not None and r_idx == 1:
-                                    phase_ingest_owner_id = job2_debate_id
-                                    task_ocr_ingest = None
-                                prev_debate_id = job2_debate_id
-
+                            )
                             job2_depends = [prev_debate_id]
                             job2_msg_file = _verdict_job2_abs
 
@@ -2199,6 +1716,7 @@ Options:
                         if job2_msg_file and job2_msg_file not in job2_reads:
                             job2_reads.append(job2_msg_file)
 
+                        job2_ingest = _claim_ingest(job2_id)
                         _add_task(
                             Task(
                                 id=job2_id,
@@ -2213,15 +1731,12 @@ Options:
                                 editor_api_base=EDITOR_API,
                                 pair_programming=pair_programming,
                                 rag_env=file_rag_env,
-                                ocr_ingest=task_ocr_ingest,
+                                ocr_ingest=job2_ingest,
                                 history_stem=_h_stem("job2"),
                                 testing_context=baseline_capture_ctx,
                                 **task_aider_flags,
                             )
                         )
-                        if task_ocr_ingest is not None:
-                            phase_ingest_owner_id = job2_id
-                            task_ocr_ingest = None
                         last_task_for_file = job2_id
 
                     # =================================================================
@@ -2282,126 +1797,45 @@ Options:
                                 }
 
                             if debate_j3:
-                                _pre_loops = pre_edit_cfg.get("loops")
-                                _job3_loops = _pre_loops if _pre_loops is not None else 3
-                                _job3_rounds = int(pre_edit_cfg.get("rounds", 1))
-                                _job3_pass_history = bool(pre_edit_cfg.get("pass_history", True))
-                                _job3_persist = bool(pre_edit_cfg.get("persist", False))
-                                _job3_orc_persona = pre_edit_cfg.get("oracle_persona", "")
-                                _job3_arch_persona = pre_edit_cfg.get("architect_persona", "")
-                                _job3_orc_file = pre_edit_cfg.get("oracle_file", "")
-                                _job3_arch_file = pre_edit_cfg.get("architect_file", "")
-
-                                _debate_template = _resolve_job_debate_template(
-                                    pre_edit_cfg,
-                                    job_num=3,
-                                    project_directory=project_directory,
+                                _debate_reads = list(
+                                    dict.fromkeys(
+                                        [current_file]
+                                        + list(specific_test_files)
+                                        + list(extra_editable_files)
+                                        + list(initial_context_test_files)
+                                        + (completed_files if sticky_context else [])
+                                    )
                                 )
-
-                                _debate_reads = list(dict.fromkeys(
-                                    [current_file]
-                                    + list(specific_test_files)
-                                    + list(extra_editable_files)
-                                    + list(initial_context_test_files)
-                                    + (completed_files if sticky_context else [])
-                                ))
-                                if effective_job3_plan and effective_job3_plan not in _debate_reads:
+                                if (
+                                    effective_job3_plan
+                                    and effective_job3_plan not in _debate_reads
+                                ):
                                     _debate_reads.append(effective_job3_plan)
 
-                                prev_debate_id = None
-                                for r_idx in range(1, _job3_rounds + 1):
-                                    _j3_coll, _j3_db, _j3_mode = _resolve_job_debate_collection(
-                                        pre_edit_cfg,
+                                prev_debate_id, _verdict_job3_abs = (
+                                    _build_pre_edit_debate_tasks(
                                         job_num=3,
-                                        default_collection=_table,
-                                        rag_context_root=rag_context_root,
-                                        default_db=test_rag_env.get("ORACLE_RAG_DB_DIR", ""),
-                                        project_directory=project_directory,
-                                        round_num=r_idx,
+                                        issue_file=effective_job3_plan,
+                                        debate_reads=_debate_reads,
+                                        editable_files=list(specific_test_files),
+                                        base_rag_env=test_rag_env,
+                                        editor_model=EDITOR_AGENT_TEST,
+                                        editor_api_base=EDITOR_API_FALLBACK,
+                                        initial_deps=_with_ingest_owner(
+                                            [last_task_for_file]
+                                            if last_task_for_file
+                                            else list(initial_phase_deps)
+                                        ),
+                                        testing_context=render_job3_ctx,
                                     )
-                                    _j3_rag_env = dict(test_rag_env)
-                                    if (
-                                        pre_edit_cfg.get("job_debate_collection") is not None
-                                        or pre_edit_cfg.get("job_debate_db") is not None
-                                    ):
-                                        _j3_rag_env["ORACLE_COLLECTION"] = _j3_coll
-                                        _j3_rag_env["ORACLE_RAG_DB_DIR"] = _j3_db
-
-                                    r_suf = f"_r{r_idx}" if _job3_rounds > 1 else ""
-                                    job3_debate_id = f"{env_prefix}_job3_debate_{base_name}{r_suf}"
-                                    _verdict_job3_abs = os.path.join(
-                                        _ddir, f"{base_name}.job3_verdict{r_suf}.md"
-                                    )
-                                    _ledger_job3_abs = os.path.join(
-                                        _ddir, f"{base_name}.job3_debate{r_suf}.json"
-                                    )
-
-                                    _raw_coll = pre_edit_cfg.get("job_debate_collection")
-                                    _job3_coll_entry = (
-                                        _raw_coll[2] if isinstance(_raw_coll, (list, tuple)) and len(_raw_coll) > 2
-                                        else (_raw_coll[0] if isinstance(_raw_coll, (list, tuple)) and len(_raw_coll) > 0 else _raw_coll)
-                                    )
-                                    _r_deliberate = {
-                                        "template": _debate_template,
-                                        "issue": effective_job3_plan,
-                                        "verdict": _verdict_job3_abs,
-                                        "ledger": _ledger_job3_abs,
-                                        "gate_cmd": None,
-                                        "loops": _job3_loops,
-                                        "retrieve_mode": _j3_mode if pre_edit_cfg.get("job_debate_collection") is not None else phase_retrieval_mode,
-                                        "mode": "code",
-                                        "draft_mode": True,
-                                        "read_files": _debate_reads,
-                                        "editable_files": list(specific_test_files),
-                                        "round_idx": r_idx,
-                                        "pass_history": _job3_pass_history,
-                                        "persist": _job3_persist,
-                                        "oracle_persona": _job3_orc_persona,
-                                        "architect_persona": _job3_arch_persona,
-                                        "oracle_file": _job3_orc_file,
-                                        "architect_file": _job3_arch_file,
-                                        "job_debate_collection": _job3_coll_entry,
-                                    }
-                                    if r_idx > 1:
-                                        _r_deliberate["prior_verdict"] = os.path.join(
-                                            _ddir, f"{base_name}.job3_verdict_r{r_idx - 1}.md"
-                                        )
-                                        _r_deliberate["prior_ledger"] = os.path.join(
-                                            _ddir, f"{base_name}.job3_debate_r{r_idx - 1}.json"
-                                        )
-
-                                    _r_depends = [prev_debate_id] if prev_debate_id else _ingest_deps(
-                                        [last_task_for_file] if last_task_for_file else list(initial_phase_deps)
-                                    )
-                                    _add_task(
-                                        Task(
-                                            id=job3_debate_id,
-                                            depends_on=_r_depends,
-                                            model=ARCHITECT_AGENT,
-                                            editor_model=EDITOR_AGENT_TEST,
-                                            weak_model=weak_model,
-                                            weak_model_api_base=weak_model_api_base,
-                                            architect_api_base=ARCHITECT_API_BASE,
-                                            editor_api_base=EDITOR_API_FALLBACK,
-                                            rag_env=_j3_rag_env,
-                                            ocr_ingest=task_ocr_ingest if r_idx == 1 else None,
-                                            deliberate=_r_deliberate,
-                                            history_stem=_h_stem("job3"),
-                                            testing_context=render_job3_ctx,
-                                        )
-                                    )
-                                    if task_ocr_ingest is not None and r_idx == 1:
-                                        phase_ingest_owner_id = job3_debate_id
-                                        task_ocr_ingest = None
-                                    prev_debate_id = job3_debate_id
-
+                                )
                                 last_task_for_file = prev_debate_id
                                 debated_job3_msg_file = _verdict_job3_abs
 
                         for tf_idx, cur_test_file in enumerate(specific_test_files):
                             tf_suf = "" if tf_idx == 0 else f"_t{tf_idx + 1}"
                             cur_test_cmd = _build_test_cmd(cur_test_file)
-                            job3_depends = _ingest_deps(
+                            job3_depends = _with_ingest_owner(
                                 [last_task_for_file] if last_task_for_file else list(initial_phase_deps)
                             )
 
@@ -2416,6 +1850,7 @@ Options:
                                     job3_reads.append(effective_job3_plan)
 
                                 job3_msg_file = debated_job3_msg_file if debate_j3 else effective_job3_plan
+                                job3_ingest = _claim_ingest(job3_id)
 
                                 _add_task(
                                     Task(
@@ -2432,15 +1867,12 @@ Options:
                                         editor_api_base=EDITOR_API_FALLBACK,
                                         pair_programming=pair_programming,
                                         rag_env=test_rag_env,
-                                        ocr_ingest=task_ocr_ingest,
+                                        ocr_ingest=job3_ingest,
                                         history_stem=_h_stem(f"job3{tf_suf}"),
                                         testing_context=render_job3_ctx if tf_idx == 0 else None,
                                         **task_aider_flags,
                                     )
                                 )
-                                if task_ocr_ingest is not None:
-                                    phase_ingest_owner_id = job3_id
-                                    task_ocr_ingest = None
                                 last_task_for_file = job3_id
                                 job3_depends = [job3_id]
 
@@ -2450,6 +1882,7 @@ Options:
                                 if effective_iterate_plan and effective_iterate_plan not in verify_reads:
                                     verify_reads.append(effective_iterate_plan)
 
+                                verify_ingest = _claim_ingest(verify_id)
                                 _add_task(
                                     Task(
                                         id=verify_id,
@@ -2470,16 +1903,13 @@ Options:
                                         auto_test=auto_test,
                                         pair_programming=pair_programming,
                                         rag_env=test_rag_env,
-                                        ocr_ingest=task_ocr_ingest,
+                                        ocr_ingest=verify_ingest,
                                         soft_fail=escalate,
                                         final_check=True,
                                         history_stem=_h_stem(f"verify{tf_suf}"),
                                         **task_aider_flags,
                                     )
                                 )
-                                if task_ocr_ingest is not None:
-                                    phase_ingest_owner_id = verify_id
-                                    task_ocr_ingest = None
                                 last_task_for_file = verify_id
 
                             if escalate and iterate_test:
@@ -2519,76 +1949,17 @@ Options:
                                     final_check=True,
                                     **task_aider_flags,
                                 )
-                                for round_idx in range(1, debate_rounds + 1):
-                                    round_suf = f"_r{round_idx}" if debate_rounds > 1 else ""
-                                    _r_verdict = os.path.join(
-                                        _ddir, f"{base_name}{tf_suf}{round_suf}.verdict.md"
-                                    )
-                                    _r_ledger = os.path.join(
-                                        _ddir, f"{base_name}{tf_suf}{round_suf}.debate.json"
-                                    )
-                                    _round_debate = dict(_esc_base_debate)
-                                    _round_debate["verdict"] = _r_verdict
-                                    _round_debate["ledger"] = _r_ledger
-                                    _round_debate["round_idx"] = round_idx
-                                    _round_debate["pass_history"] = pass_history
-                                    _round_debate["persist"] = bool(esc_cfg.get("persist", False))
-                                    _round_debate["oracle_persona"] = esc_cfg.get("oracle_persona", "")
-                                    _round_debate["architect_persona"] = esc_cfg.get("architect_persona", "")
-                                    _round_debate["oracle_file"] = esc_cfg.get("oracle_file", "")
-                                    _round_debate["architect_file"] = esc_cfg.get("architect_file", "")
-                                    if round_idx > 1:
-                                        _round_debate["prior_ledger"] = os.path.join(
-                                            _ddir, f"{base_name}{tf_suf}_r{round_idx - 1}.debate.json"
-                                        )
-                                        _round_debate["prior_verdict"] = os.path.join(
-                                            _ddir, f"{base_name}{tf_suf}_r{round_idx - 1}.verdict.md"
-                                        )
-                                    _r_apply_kwargs = dict(_esc_apply_kwargs)
-                                    if debate_rounds > 1 and round_idx < debate_rounds:
-                                        _r_apply_kwargs["soft_fail"] = True
-
-                                    delib_id = f"{env_prefix}_deliberate_{base_name}{tf_suf}{round_suf}"
-                                    _add_task(
-                                        Task(
-                                            id=delib_id,
-                                            depends_on=[last_task_for_file]
-                                            if last_task_for_file
-                                            else [],
-                                            model=ARCHITECT_AGENT,
-                                            editor_model=EDITOR_AGENT,
-                                            weak_model=weak_model,
-                                            weak_model_api_base=weak_model_api_base,
-                                            architect_api_base=ARCHITECT_API_BASE,
-                                            editor_api_base=EDITOR_API,
-                                            rag_env=test_rag_env,
-                                            deliberate=_round_debate,
-                                            history_stem=_h_stem(f"escalate{tf_suf}"),
-                                        )
-                                    )
-
-                                    apply_id = f"{env_prefix}_apply_{base_name}{tf_suf}{round_suf}"
-                                    apply_files = [cur_test_file, current_file] + extra_editable_files
-                                    _add_task(
-                                        Task(
-                                            id=apply_id,
-                                            depends_on=[delib_id],
-                                            message_file=_r_verdict,
-                                            verdict_gate=_r_verdict,
-                                            files=apply_files,
-                                            model=ARCHITECT_AGENT,
-                                            editor_model=EDITOR_AGENT_TEST,
-                                            fallback_editor_model=EDITOR_AGENT_TEST_FALLBACK,
-                                            architect_api_base=ARCHITECT_API_BASE,
-                                            editor_api_base=EDITOR_API_FALLBACK,
-                                            iterate_test=True,
-                                            auto_test=auto_test,
-                                            history_stem=_h_stem(f"escalate{tf_suf}"),
-                                            **_r_apply_kwargs,
-                                        )
-                                    )
-                                    last_task_for_file = apply_id
-                    elif escalate:
+                                last_task_for_file = _build_escalation_rounds(
+                                    base_debate=_esc_base_debate,
+                                    base_apply_kwargs=_esc_apply_kwargs,
+                                    apply_files=[cur_test_file, current_file]
+                                    + extra_editable_files,
+                                    delib_rag_env=test_rag_env,
+                                    start_dep_id=last_task_for_file,
+                                    tf_suf=tf_suf,
+                                    build_finalize=False,
+                                )
+                    elif escalate and not run_job_one and not run_job_two:
                         _ct = resolve_template_path(
                             _oa.get("template"), project_directory=project_directory
                         )
@@ -2628,129 +1999,42 @@ Options:
 
                 # Ingest-only fallback: if nothing above carried the ingest, add a pure setup node
                 # (movable, file-coupled) so a run_ocr_rag-only phase still builds the table.
-                if task_ocr_ingest is not None:
+                if phase_ingest["payload"] is not None:
                     ing_id = f"{env_prefix}_ingest_{base_name}"
+                    ing_deps = _with_ingest_owner(
+                        [last_task_for_file]
+                        if last_task_for_file
+                        else initial_phase_deps
+                    )
+                    _ing_payload = _claim_ingest(ing_id)
                     _add_task(
                         Task(
                             id=ing_id,
-                            depends_on=[last_task_for_file] if last_task_for_file else [],
+                            depends_on=ing_deps,
                             rag_env=file_rag_env,
-                            ocr_ingest=task_ocr_ingest,
+                            ocr_ingest=_ing_payload,
                             skip_aider=True,
                             history_stem=_h_stem("ingest"),
                         )
                     )
-                    phase_ingest_owner_id = ing_id
-                    task_ocr_ingest = None
                     last_task_for_file = ing_id
 
                 # ---- shared escalation: debate -> apply (-> finalize for grounding) ----
                 if escalate and _debate is not None:
-                    # We loop the exact number of times requested by `debate_rounds` (default 1)
-                    # Each round gets a unique ID suffix and chains dependencies: apply_R1 -> delib_R2
-                    _base_debate = dict(_debate)
-                    for round_idx in range(1, debate_rounds + 1):
-                        round_suf = f"_r{round_idx}" if debate_rounds > 1 else ""
-
-                        # Suffix the ledger and verdict files so they don't clobber each other across rounds
-                        _r_verdict = os.path.join(_ddir, f"{base_name}{round_suf}.verdict.md")
-                        _r_ledger = os.path.join(_ddir, f"{base_name}{round_suf}.debate.json")
-
-                        _round_debate = dict(_base_debate)
-                        _round_debate["verdict"] = _r_verdict
-                        _round_debate["ledger"] = _r_ledger
-                        _round_debate["round_idx"] = round_idx
-                        _round_debate["pass_history"] = pass_history
-                        _round_debate["persist"] = bool(esc_cfg.get("persist", False))
-                        _round_debate["oracle_persona"] = esc_cfg.get("oracle_persona", "")
-                        _round_debate["architect_persona"] = esc_cfg.get("architect_persona", "")
-                        _round_debate["oracle_file"] = esc_cfg.get("oracle_file", "")
-                        _round_debate["architect_file"] = esc_cfg.get("architect_file", "")
-                        # Give this round the ledger of the PREVIOUS round so it knows what was just tried
-                        if round_idx > 1:
-                            _round_debate["prior_ledger"] = (
-                                os.path.join(_ddir, f"{base_name}_r{round_idx - 1}.debate.json")
-                            )
-                            _round_debate["prior_verdict"] = (
-                                os.path.join(_ddir, f"{base_name}_r{round_idx - 1}.verdict.md")
-                            )
-
-                        _r_apply_kwargs = dict(_apply_kwargs)
-                        if debate_rounds > 1 and round_idx < debate_rounds:
-                            _r_apply_kwargs["soft_fail"] = True
-                        if _build_finalize:
-                            _r_apply_kwargs["rag_env"] = dict(
-                                _apply_kwargs.get("rag_env", {})
-                            )
-                            _r_apply_kwargs["rag_env"]["ORACLE_BASELINE_LEDGER"] = _r_ledger
-
-                        delib_id = f"{env_prefix}_deliberate_{base_name}{round_suf}"
-                        _add_task(
-                            Task(
-                                id=delib_id,
-                                depends_on=[last_task_for_file]
-                                if last_task_for_file
-                                else [],
-                                model=ARCHITECT_AGENT,
-                                editor_model=EDITOR_AGENT,
-                                weak_model=weak_model,
-                                weak_model_api_base=weak_model_api_base,
-                                architect_api_base=ARCHITECT_API_BASE,
-                                editor_api_base=EDITOR_API,
-                                rag_env=test_rag_env if code_mode else file_rag_env,
-                                deliberate=_round_debate,
-                                history_stem=_h_stem("escalate"),
-                            )
-                        )
-
-                        apply_id = f"{env_prefix}_apply_{base_name}{round_suf}"
-                        apply_files = (
-                            [specific_test_file, current_file]
-                            if code_mode
-                            else [current_file]
-                        ) + extra_editable_files
-                        _add_task(
-                            Task(
-                                id=apply_id,
-                                depends_on=[delib_id],
-                                message_file=_r_verdict,  # attempt 0 seeds with the verdict
-                                verdict_gate=_r_verdict,  # skip unless agreed + gate-backed
-                                files=apply_files,
-                                model=ARCHITECT_AGENT,
-                                editor_model=EDITOR_AGENT_TEST,
-                                fallback_editor_model=EDITOR_AGENT_TEST_FALLBACK,
-                                architect_api_base=ARCHITECT_API_BASE,
-                                editor_api_base=EDITOR_API_FALLBACK,
-                                iterate_test=True,
-                                auto_test=auto_test,
-                                history_stem=_h_stem("escalate"),
-                                **_r_apply_kwargs,
-                            )
-                        )
-                        last_task_for_file = apply_id
-
-                    # Finalize ONLY runs once, at the very end of all escalation rounds
-                    if _build_finalize:
-                        finalize_id = f"{env_prefix}_finalize_{base_name}"
-                        _add_task(
-                            Task(
-                                id=finalize_id,
-                                depends_on=[last_task_for_file],
-                                rag_env=file_rag_env,
-                                validate={
-                                    "review": _out_abs,
-                                    "source": _source_abs,
-                                    "report": _gate_report,
-                                    "tag": validation_tag,
-                                    "finalize": True,
-                                    # Points back to the last ledger used in the final round
-                                    "baseline_ledger": _r_ledger,
-                                },
-                                skip_aider=True,
-                                history_stem=_h_stem("finalize"),
-                            )
-                        )
-                        last_task_for_file = finalize_id
+                    apply_files = (
+                        [specific_test_file, current_file]
+                        if code_mode
+                        else [current_file]
+                    ) + extra_editable_files
+                    last_task_for_file = _build_escalation_rounds(
+                        base_debate=_debate,
+                        base_apply_kwargs=_apply_kwargs,
+                        apply_files=apply_files,
+                        delib_rag_env=test_rag_env if code_mode else file_rag_env,
+                        start_dep_id=last_task_for_file,
+                        tf_suf="",
+                        build_finalize=_build_finalize,
+                    )
 
                 file_last_tasks[current_file] = last_task_for_file
                 if current_file not in completed_files:

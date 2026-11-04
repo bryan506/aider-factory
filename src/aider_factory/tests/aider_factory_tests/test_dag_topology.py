@@ -600,7 +600,7 @@ files:
         assert delib_r2.depends_on == ["p1_apply_feature_r1"]
         assert apply_r2.depends_on == ["p1_deliberate_feature_r2"]
         assert delib_r1.deliberate["loops"] == 4
-        assert delib_r1.deliberate["pass_history"] is True
+        assert delib_r1.deliberate["pass_history"] is False
 
         # 7. Phase 3 (Review & Follow-up) Invariants & Cross-Phase Context Hygiene
         p2_job1 = tasks["p2_job1_feature"]

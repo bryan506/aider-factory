@@ -107,6 +107,7 @@ Cargo.lock
 {AIDERIGNORE_STRATEGY_NEGATION}
 """
 
+
 def _ensure_git_repo(cwd: str):
     """Ensure git repository is initialized with default user config for Aider."""
     git_dir = os.path.join(cwd, ".git")
@@ -234,9 +235,8 @@ def _strip_aider_factory_ignore_lines(content: str) -> list[str]:
         s = line.strip()
         if s.startswith("# Ignore RAG database, logs, and caches"):
             continue
-        if (
-            s in (".aider_factory", "!.aider_factory", "!.aiderignore")
-            or s.startswith((".aider_factory/", "!.aider_factory/", ".aider_factory\\"))
+        if s in (".aider_factory", "!.aider_factory", "!.aiderignore") or s.startswith(
+            (".aider_factory/", "!.aider_factory/", ".aider_factory\\")
         ):
             continue
         cleaned.append(line)
@@ -260,11 +260,7 @@ def _ensure_baseline_aiderignore(cwd):
         while cleaned_lines and not cleaned_lines[-1].strip():
             cleaned_lines.pop()
         body = "\n".join(cleaned_lines)
-        updated = (
-            (body + "\n\n" if body else "")
-            + AIDERIGNORE_STRATEGY_NEGATION
-            + "\n"
-        )
+        updated = (body + "\n\n" if body else "") + AIDERIGNORE_STRATEGY_NEGATION + "\n"
         if updated != content:
             with open(local_aider_ignore, "w", encoding="utf-8") as f:
                 f.write(updated)
@@ -293,9 +289,7 @@ def _ensure_baseline_gitignore(cwd):
                 cleaned_lines.pop()
             body = "\n".join(cleaned_lines)
             updated = (
-                (body + "\n\n" if body else "")
-                + AIDERIGNORE_STRATEGY_NEGATION
-                + "\n"
+                (body + "\n\n" if body else "") + AIDERIGNORE_STRATEGY_NEGATION + "\n"
             )
             if updated != content:
                 with open(local_git_ignore, "w", encoding="utf-8") as f:
@@ -944,9 +938,9 @@ def init_user_project(cwd=None):
 def ensure_aider_installed():
     """Ensure user scripts directory is in PATH and aider is installed globally."""
     import sysconfig as _sysconfig
-    local_bin = (
-        _sysconfig.get_path("scripts", f"{os.name}_user")
-        or os.path.expanduser("~/.local/bin")
+
+    local_bin = _sysconfig.get_path("scripts", f"{os.name}_user") or os.path.expanduser(
+        "~/.local/bin"
     )
     current_path = os.environ.get("PATH", "")
     if os.path.exists(local_bin) and local_bin not in current_path.split(os.pathsep):
@@ -990,7 +984,11 @@ def ensure_aider_installed():
             subprocess.run(["uv", "tool", "install", "aider-chat"], check=False)
             for post_bin in (local_bin, os.path.expanduser("~/.local/bin")):
                 cur_p = os.environ.get("PATH", "")
-                if post_bin and os.path.exists(post_bin) and post_bin not in cur_p.split(os.pathsep):
+                if (
+                    post_bin
+                    and os.path.exists(post_bin)
+                    and post_bin not in cur_p.split(os.pathsep)
+                ):
                     os.environ["PATH"] = f"{post_bin}{os.pathsep}{cur_p}"
         except Exception as e:
             print(
@@ -1022,7 +1020,7 @@ def ensure_aider_installed():
 
             ver_str = _meta.version("litellm")
             ver_parts = tuple(int(x) for x in re.findall(r"\d+", ver_str)[:3])
-            if ver_parts < (1, 105, 1):
+            if ver_parts < (1, 106, 2):
                 subprocess.run(
                     [
                         "uv",
@@ -1031,7 +1029,7 @@ def ensure_aider_installed():
                         "--quiet",
                         "--python",
                         sys.executable,
-                        "litellm>=1.105.1",
+                        "litellm>=1.106.2",
                     ],
                     check=False,
                     capture_output=True,
@@ -1060,7 +1058,7 @@ def ensure_aider_installed():
                                 "-c",
                                 "import importlib.metadata as m, re, sys; "
                                 "v = tuple(int(x) for x in re.findall(r'\\d+', m.version('litellm'))[:3]); "
-                                "sys.exit(0 if v >= (1, 105, 1) else 1)",
+                                "sys.exit(0 if v >= (1, 106, 2) else 1)",
                             ],
                             check=False,
                             capture_output=True,
@@ -1074,7 +1072,7 @@ def ensure_aider_installed():
                                     "--quiet",
                                     "--python",
                                     aider_py,
-                                    "litellm>=1.105.1",
+                                    "litellm>=1.106.2",
                                 ],
                                 check=False,
                                 capture_output=True,
@@ -1136,8 +1134,14 @@ def _list_sessions(cwd, is_global=False):
                 )
                 chat_file = os.path.join(sess_dir, ".aider.chat.history.md")
                 hist_dir = os.path.join(sess_dir, "chat_history")
-                if os.path.isdir(hist_dir) and any(f.startswith(".aider.chat.history_") for f in os.listdir(hist_dir)):
-                    total_size = sum(os.path.getsize(os.path.join(hist_dir, f)) for f in os.listdir(hist_dir) if os.path.isfile(os.path.join(hist_dir, f)))
+                if os.path.isdir(hist_dir) and any(
+                    f.startswith(".aider.chat.history_") for f in os.listdir(hist_dir)
+                ):
+                    total_size = sum(
+                        os.path.getsize(os.path.join(hist_dir, f))
+                        for f in os.listdir(hist_dir)
+                        if os.path.isfile(os.path.join(hist_dir, f))
+                    )
                     size_str = f"{total_size // 1024} KB (isolated)"
                 elif os.path.exists(chat_file):
                     size_str = f"{os.path.getsize(chat_file) // 1024} KB"
@@ -1267,7 +1271,12 @@ def _get_side_session_artifacts(cwd):
                 if os.path.isdir(vault_dir):
                     for vf in os.listdir(vault_dir):
                         if vf.startswith(".oracle_") or vf.startswith(".debate_"):
-                            candidates.append((f"Session '{s}' Vault '{vf}'", os.path.join(vault_dir, vf)))
+                            candidates.append(
+                                (
+                                    f"Session '{s}' Vault '{vf}'",
+                                    os.path.join(vault_dir, vf),
+                                )
+                            )
 
     found = []
     for label, p in candidates:
@@ -1401,8 +1410,15 @@ def _status(cwd, is_global=False):
                     )
                     chat_file = os.path.join(s_dir, ".aider.chat.history.md")
                     hist_dir = os.path.join(s_dir, "chat_history")
-                    if os.path.isdir(hist_dir) and any(f.startswith(".aider.chat.history_") for f in os.listdir(hist_dir)):
-                        total_size = sum(os.path.getsize(os.path.join(hist_dir, f)) for f in os.listdir(hist_dir) if os.path.isfile(os.path.join(hist_dir, f)))
+                    if os.path.isdir(hist_dir) and any(
+                        f.startswith(".aider.chat.history_")
+                        for f in os.listdir(hist_dir)
+                    ):
+                        total_size = sum(
+                            os.path.getsize(os.path.join(hist_dir, f))
+                            for f in os.listdir(hist_dir)
+                            if os.path.isfile(os.path.join(hist_dir, f))
+                        )
                         size_str = f"{total_size // 1024} KB (isolated)"
                     elif os.path.exists(chat_file):
                         size_str = f"{os.path.getsize(chat_file) // 1024} KB"

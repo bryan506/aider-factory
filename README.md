@@ -162,6 +162,31 @@ cd aider-factory
 uv tool install --force --editable .
 ```
 
+### Updating `litellm` (For Newer Models & Providers)
+
+Because `aider-chat==0.86.2` pins `litellm==1.81.10` in its package metadata, `uv tool install` will initially display `litellm==1.81.10`. On your first invocation of an `aider-*` CLI command (e.g., `aider-oracle --help`), `aider-factory` automatically upgrades `litellm` to the minimum floor configured in the package and patches `aider` for compatibility.
+
+If you want to manually bump the `litellm` version floor in a local/editable clone:
+
+1. **`pyproject.toml`**: Keep `"litellm>=1.35.0"` under `[project] dependencies` (so `uv tool install` does not conflict with `aider-chat`), and update the version under `[tool.uv] override-dependencies`:
+   ```toml
+   [tool.uv]
+   override-dependencies = [
+       "litellm>=1.106.2",
+   ```
+2. **`src/aider_factory/cli.py`**: In `ensure_aider_installed()`, update the version tuple `(1, 106, 2)` and specifier `"litellm>=1.106.2"`.
+3. **Lock, reinstall, and trigger the auto-upgrade**:
+   ```bash
+   uv lock --upgrade-package litellm
+   uv tool install --force --editable .
+   aider-oracle --help >/dev/null
+   ```
+4. **Verify the active `litellm` version**:
+   ```bash
+   "$(uv tool dir)/aider-factory/bin/python" -c "import importlib.metadata as m; print('aider-factory litellm:', m.version('litellm'))"
+   "$(uv tool dir)/aider-chat/bin/python" -c "import importlib.metadata as m; print('aider-chat litellm:', m.version('litellm'))"
+   ```
+
 ---
 
 ## 📖 Standalone CLI Examples

@@ -266,7 +266,7 @@ def test_ensure_bash_wrappers_created_on_linux():
 
         bash_dir = os.path.join(af_dir, "bash")
         assert os.path.exists(bash_dir), "bash/ directory must be created on Linux"
-        for name in ["factory", "oracle", "validate", "research", "apply"]:
+        for name in ["factory", "oracle", "validate", "research", "apply", "aicat"]:
             assert os.path.isfile(os.path.join(bash_dir, name)), f"Wrapper {name} must exist"
     print("  ✅ ensure_bash_wrappers created on Linux PASS")
 
@@ -422,6 +422,61 @@ def test_searxng_health_check_runs_on_all_platforms():
     print("  ✅ SearXNG health check runs on all platforms PASS")
 
 
+def test_aicat_cli_and_bash_wrapper():
+    """Verify aicat_cli formats files into XML blocks, skips missing/dirs, and is provisioned."""
+    print("Testing aicat_cli and bash wrapper...")
+    import io
+    import subprocess
+    import tempfile
+    from aider_factory.cli import aicat_cli, ensure_bash_wrappers
+
+    repo_root = os.path.abspath(os.path.join(script_dir, "../../../.."))
+    pyproject_path = os.path.join(repo_root, "pyproject.toml")
+    if os.path.isfile(pyproject_path):
+        with open(pyproject_path, "r", encoding="utf-8") as pf:
+            pyproject_txt = pf.read()
+        assert 'aicat = "aider_factory.cli:aicat_cli"' in pyproject_txt
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        f1 = os.path.join(tmpdir, "alpha.txt")
+        f2 = os.path.join(tmpdir, "beta.py")
+        missing = os.path.join(tmpdir, "missing.txt")
+        subdir = os.path.join(tmpdir, "subdir")
+        os.makedirs(subdir, exist_ok=True)
+
+        with open(f1, "w", encoding="utf-8") as fh:
+            fh.write("hello world")
+        with open(f2, "w", encoding="utf-8") as fh:
+            fh.write("x = 1\n")
+
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            aicat_cli([f1, missing, subdir, f2])
+
+        out = buf.getvalue()
+        expected = (
+            f'\n<file name="{f1}">\nhello world\n</file>\n'
+            f'\n<file name="{f2}">\nx = 1\n\n</file>\n'
+        )
+        assert out == expected, f"Unexpected aicat_cli output: {out!r}"
+
+        if sys.platform != "win32":
+            af_dir = os.path.join(tmpdir, ".aider_factory")
+            os.makedirs(af_dir, exist_ok=True)
+            ensure_bash_wrappers(af_dir)
+            aicat_bin = os.path.join(af_dir, "bash", "aicat")
+            assert os.path.isfile(aicat_bin)
+            res = subprocess.run(
+                [aicat_bin, f1, missing],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert res.returncode == 0, f"aicat wrapper failed: {res.stderr}"
+            assert res.stdout == f'\n<file name="{f1}">\nhello world\n</file>\n'
+    print("  ✅ aicat_cli and bash wrapper PASS")
+
+
 if __name__ == "__main__":
     test_aider_toggle_overrides_when_false()
     test_aider_toggle_overrides_when_true()
@@ -434,3 +489,4 @@ if __name__ == "__main__":
     test_tty_path_windows_conout()
     test_tty_fallback_on_oserror()
     test_searxng_health_check_runs_on_all_platforms()
+    test_aicat_cli_and_bash_wrapper()

@@ -47,6 +47,7 @@ aider-helper = "aider_factory.cli:helper_cli"
 aider-apply = "aider_factory.cli:apply_cli"
 aider-launcher = "aider_factory.python.factory_launcher:main"
 aider-clean-lancedb = "aider_factory.python.clean_lancedb:main"
+aicat = "aider_factory.cli:aicat_cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aider_factory"]

@@ -595,6 +595,7 @@ def ensure_bash_wrappers(project_aider_factory_dir):
     os.makedirs(bash_dir, exist_ok=True)
 
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    src_root = os.path.dirname(pkg_dir)
     python_dir = os.path.join(pkg_dir, "python")
 
     # Determine the best python interpreter to use
@@ -607,6 +608,11 @@ def ensure_bash_wrappers(project_aider_factory_dir):
         "validate": f'#!/bin/bash\nexec "{aider_py}" "{os.path.join(python_dir, "validator.py")}" "$@"\n',
         "research": f'#!/bin/bash\nexec "{aider_py}" "{os.path.join(python_dir, "research_agent.py")}" "$@"\n',
         "apply": f'#!/bin/bash\nexec "{aider_py}" "{os.path.join(python_dir, "apply_agent.py")}" "$@"\n',
+        "aicat": (
+            f'#!/bin/bash\nexec "{aider_py}" -c '
+            f'"import sys; sys.path.insert(0, {repr(src_root)}); '
+            f'from aider_factory.cli import aicat_cli; aicat_cli()" "$@"\n'
+        ),
     }
 
     for script, content in wrappers.items():
@@ -1871,6 +1877,18 @@ Environment Variables for Custom Models:
             expert_mode=expert_val,
             repo_map=repo_map_val,
         )
+
+
+def aicat_cli(argv=None):
+    """Global 'aicat' CLI entry point to format files inside XML <file> tags."""
+    args = sys.argv[1:] if argv is None else argv
+    for f in args:
+        if os.path.isfile(f):
+            sys.stdout.write(f'\n<file name="{f}">\n')
+            with open(f, "r", encoding="utf-8", errors="replace") as fh:
+                sys.stdout.write(fh.read())
+            sys.stdout.write("\n</file>\n")
+    sys.stdout.flush()
 
 
 if __name__ == "__main__":

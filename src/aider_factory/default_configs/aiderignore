@@ -57,3 +57,4 @@ Cargo.lock
 !.aider_factory/sessions/*/session.yml
 !.aider_factory/sessions/*/feature_adr/
 !.aider_factory/sessions/*/templates/
+!.aider_factory/sessions/*/temp/

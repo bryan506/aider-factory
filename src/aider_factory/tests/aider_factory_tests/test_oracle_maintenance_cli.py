@@ -90,87 +90,93 @@ def test_lancedb_operations():
     os.environ["ORACLE_RAG_DB_DIR"] = temp_db_dir
     os.environ["ORACLE_COLLECTION"] = "test_col"
 
-    db = lancedb.connect(temp_db_dir)
+    try:
+        db = lancedb.connect(temp_db_dir)
 
-    # Create test schemas
-    class TestChunk(LanceModel):
-        text: str
-        vector: Vector(1536)
-        source_file: str
+        # Create test schemas
+        class TestChunk(LanceModel):
+            text: str
+            vector: Vector(1536)
+            source_file: str
 
-    # Create tables
-    t1_name = "test_col_code"
-    t2_name = "test_col_docs"
-    t3_name = "other_col_code"  # Should be ignored when filtering by test_col
+        # Create tables
+        t1_name = "test_col_code"
+        t2_name = "test_col_docs"
+        t3_name = "other_col_code"  # Should be ignored when filtering by test_col
 
-    tbl1 = db.create_table(t1_name, schema=TestChunk, mode="overwrite")
-    tbl2 = db.create_table(t2_name, schema=TestChunk, mode="overwrite")
-    tbl3 = db.create_table(t3_name, schema=TestChunk, mode="overwrite")
+        tbl1 = db.create_table(t1_name, schema=TestChunk, mode="overwrite")
+        tbl2 = db.create_table(t2_name, schema=TestChunk, mode="overwrite")
+        tbl3 = db.create_table(t3_name, schema=TestChunk, mode="overwrite")
 
-    # Insert data
-    tbl1.add(
-        [
-            {"text": "chunk1", "vector": [0.1] * 1536, "source_file": "R/aac.R"},
-            {"text": "chunk2", "vector": [0.2] * 1536, "source_file": "R/helpers.R"},
-        ]
-    )
-    tbl2.add([{"text": "chunk3", "vector": [0.3] * 1536, "source_file": "README.md"}])
-    tbl3.add([{"text": "chunk4", "vector": [0.4] * 1536, "source_file": "R/aac.R"}])
+        # Insert data
+        tbl1.add(
+            [
+                {"text": "chunk1", "vector": [0.1] * 1536, "source_file": "R/aac.R"},
+                {"text": "chunk2", "vector": [0.2] * 1536, "source_file": "R/helpers.R"},
+            ]
+        )
+        tbl2.add([{"text": "chunk3", "vector": [0.3] * 1536, "source_file": "README.md"}])
+        tbl3.add([{"text": "chunk4", "vector": [0.4] * 1536, "source_file": "R/aac.R"}])
 
-    print("  [Integration] Temporary mock tables created.")
+        print("  [Integration] Temporary mock tables created.")
 
-    # 1. Test listing files
-    rc = _list_files()
-    assert rc == 0, f"Expected 0, got {rc}"
+        # 1. Test listing files
+        rc = _list_files()
+        assert rc == 0, f"Expected 0, got {rc}"
 
-    # 2. Test surgical file delete (exact match)
-    rc = _remove_file("R/helpers.R")
-    assert rc == 0
-    # Verify R/helpers.R is gone from tbl1 (reopen to see updated MVCC snapshot)
-    tbl1 = db.open_table(t1_name)
-    rows = tbl1.to_arrow().to_pylist()
-    print("ROWS AFTER DELETE:", rows)
-    assert len(rows) == 1
-    assert rows[0]["source_file"] == "R/aac.R"
-    print("  [Integration] Surgical file delete (exact match) verified.")
+        # 2. Test surgical file delete (exact match)
+        rc = _remove_file("R/helpers.R")
+        assert rc == 0
+        # Verify R/helpers.R is gone from tbl1 (reopen to see updated MVCC snapshot)
+        tbl1 = db.open_table(t1_name)
+        rows = tbl1.to_arrow().to_pylist()
+        print("ROWS AFTER DELETE:", rows)
+        assert len(rows) == 1
+        assert rows[0]["source_file"] == "R/aac.R"
+        print("  [Integration] Surgical file delete (exact match) verified.")
 
-    def _current_tables(database):
-        _names = database.list_tables() if hasattr(database, "list_tables") else database.table_names()
-        return list(getattr(_names, "tables", _names))
+        def _current_tables(database):
+            _names = database.list_tables() if hasattr(database, "list_tables") else database.table_names()
+            return list(getattr(_names, "tables", _names))
 
-    # 3. Test surgical file delete (suffix match)
-    rc = _remove_file("aac.R")
-    assert rc == 0
-    # Since tbl1 became empty, it should have been dropped
-    assert t1_name not in _current_tables(db)
-    print(
-        "  [Integration] Surgical file delete (suffix match) and empty table drop verified."
-    )
+        # 3. Test surgical file delete (suffix match)
+        rc = _remove_file("aac.R")
+        assert rc == 0
+        # Since tbl1 became empty, it should have been dropped
+        assert t1_name not in _current_tables(db)
+        print(
+            "  [Integration] Surgical file delete (suffix match) and empty table drop verified."
+        )
 
-    # Verify tbl3 (other_col_code) was NOT touched because it belongs to 'other_col'
-    assert t3_name in _current_tables(db)
-    tbl3_opened = db.open_table(t3_name)
-    assert tbl3_opened.count_rows() == 1
-    print(
-        "  [Integration] Collection isolation verified (other collections untouched)."
-    )
+        # Verify tbl3 (other_col_code) was NOT touched because it belongs to 'other_col'
+        assert t3_name in _current_tables(db)
+        tbl3_opened = db.open_table(t3_name)
+        assert tbl3_opened.count_rows() == 1
+        print(
+            "  [Integration] Collection isolation verified (other collections untouched)."
+        )
 
-    # 4. Test removing a specific table
-    rc = _remove_table(t2_name)
-    assert rc == 0
-    assert t2_name not in _current_tables(db)
-    print("  [Integration] Table drop verified.")
+        # 4. Test removing a specific table
+        rc = _remove_table(t2_name)
+        assert rc == 0
+        assert t2_name not in _current_tables(db)
+        print("  [Integration] Table drop verified.")
 
-    # Release open table and connection handles before directory removal on Windows
-    del tbl1, tbl2, tbl3, tbl3_opened, db
-    import gc
-    gc.collect()
+        # Release open table and connection handles before directory removal on Windows
+        del tbl1, tbl2, tbl3, tbl3_opened, db
+        import gc
+        gc.collect()
 
-    # 5. Test removing the entire database
-    rc = _remove_db()
-    assert rc == 0
-    assert not os.path.exists(temp_db_dir)
-    print("  [Integration] Database wipe verified.")
+        # 5. Test removing the entire database
+        rc = _remove_db()
+        assert rc == 0
+        assert not os.path.exists(temp_db_dir)
+        print("  [Integration] Database wipe verified.")
+    finally:
+        os.environ.pop("ORACLE_RAG_DB_DIR", None)
+        os.environ.pop("ORACLE_COLLECTION", None)
+        if os.path.exists(temp_db_dir):
+            shutil.rmtree(temp_db_dir, ignore_errors=True)
 
 
 def test_add_operations():
@@ -208,6 +214,10 @@ def test_add_operations():
         os.path.join(external_dir, "file_in_dir.txt"), "w", encoding="utf-8"
     ) as f:
         f.write("mock content for file inside directory")
+    with open(os.path.join(external_dir, ".env"), "w", encoding="utf-8") as f:
+        f.write("SECRET=should_be_excluded\n")
+    with open(os.path.join(external_dir, "AGENTS.md"), "w", encoding="utf-8") as f:
+        f.write("harness should be excluded\n")
 
     # Mock rag_manager.ingest
     ingest_calls = []
@@ -225,12 +235,17 @@ def test_add_operations():
     # Mock yaml.safe_load to return a unified nested configuration dict
     from unittest.mock import patch
     mock_cfg = {
+        "working_directory": "/tmp/mock_working_repo",
         "endpoints": {},
         "models": {
             "embed_model": "BAAI/bge-m3"
         },
         "phases": [{
             "enabled": True,
+            "files": {
+                "target_files": ["R/target.R"],
+                "context_files_job": ["mock_working_repo/R/context.R"],
+            },
             "rag": {
                 "collection_name": test_collection,
                 "batch": True,
@@ -238,7 +253,10 @@ def test_add_operations():
                 "chunk_overlap_chars": 100,
                 "cer_threshold": 0.05,
                 "ocr_max_retries": 2,
-                "ocr_parallel": 1
+                "ocr_parallel": 1,
+                "code_exts": [".r", ".py"],
+                "text_doc_exts": [".md", ".txt"],
+                "ignore": ["custom_ignore_dir"],
             }
         }]
     }
@@ -276,13 +294,18 @@ def test_add_operations():
         _, kwargs = ingest_calls[0]
         assert kwargs["collection_name"] == test_collection
         assert kwargs["overwrite"] is False
+        assert kwargs["working_repo"] == "mock_working_repo"
+        assert kwargs["code_exclude"] == {"R/target.R", "R/context.R"}
+        assert kwargs["code_exts"] == [".r", ".py"]
+        assert kwargs["text_doc_exts"] == [".md", ".txt"]
+        assert kwargs["ignore"] == ["custom_ignore_dir"]
 
         # 2. Test adding a directory (table)
         with patch("yaml.safe_load", return_value=mock_cfg):
             rc = _add_maintenance("table", [external_dir])
         assert rc == 0, f"Expected 0, got {rc}"
 
-        # Verify that directory was copied recursively
+        # Verify that directory was synced and filtered via rsync-rag
         copied_dir = os.path.join(job_dir, "test_external_dir")
         assert os.path.exists(copied_dir), (
             "Directory was not copied to collection directory"
@@ -293,6 +316,8 @@ def test_add_operations():
         )
         with open(copied_file_in_dir, "r", encoding="utf-8") as f:
             assert f.read() == "mock content for file inside directory"
+        assert not os.path.exists(os.path.join(copied_dir, ".env"))
+        assert not os.path.exists(os.path.join(copied_dir, "AGENTS.md"))
 
         # Verify that rag_manager.ingest was called again
         assert len(ingest_calls) == 2, (
@@ -312,6 +337,7 @@ def test_add_operations():
 
     finally:
         os.environ.pop("ORACLE_CONFIG_FILE", None)
+        os.environ.pop("ORACLE_COLLECTION", None)
         os.environ.pop("ORACLE_EXPLICIT_COLLECTION", None)
         if os.path.exists(dummy_cfg_file):
             os.remove(dummy_cfg_file)
@@ -352,6 +378,8 @@ def test_oracle_maintenance_reexport_parity():
         assert getattr(oracle_agent, name) is getattr(oracle_maintenance, name), (
             f"Identity mismatch for {name}"
         )
+    assert hasattr(oracle_maintenance, "_get_active_phase")
+    assert hasattr(oracle_maintenance, "_resolve_phase_repo_filters")
 
     assert oracle_maintenance._safe_int("42", 10) == 42
     assert oracle_maintenance._safe_int(None, 10) == 10

@@ -47,7 +47,8 @@ AIDERIGNORE_STRATEGY_NEGATION = """# Ignore RAG database, logs, and caches (exce
 .aider_factory/sessions/*/*
 !.aider_factory/sessions/*/session.yml
 !.aider_factory/sessions/*/feature_adr/
-!.aider_factory/sessions/*/templates/"""
+!.aider_factory/sessions/*/templates/
+!.aider_factory/sessions/*/temp/"""
 
 BASELINE_GITIGNORE = f"""# Ephemeral and Local Workspace Files
 temp/
@@ -613,6 +614,16 @@ def ensure_bash_wrappers(project_aider_factory_dir):
             f'"import sys; sys.path.insert(0, {repr(src_root)}); '
             f'from aider_factory.cli import aicat_cli; aicat_cli()" "$@"\n'
         ),
+        "rsync-rag": (
+            f'#!/bin/bash\nexec "{aider_py}" -c '
+            f'"import sys; sys.path.insert(0, {repr(src_root)}); '
+            f'from aider_factory.cli import rsync_rag_cli; rsync_rag_cli()" "$@"\n'
+        ),
+        "rag_rsync.sh": (
+            f'#!/bin/bash\nexec "{aider_py}" -c '
+            f'"import sys; sys.path.insert(0, {repr(src_root)}); '
+            f'from aider_factory.cli import rsync_rag_cli; rsync_rag_cli()" "$@"\n'
+        ),
     }
 
     for script, content in wrappers.items():
@@ -1022,11 +1033,24 @@ def ensure_aider_installed():
 
     if shutil.which("uv"):
         try:
+            import importlib
             import importlib.metadata as _meta
 
-            ver_str = _meta.version("litellm")
-            ver_parts = tuple(int(x) for x in re.findall(r"\d+", ver_str)[:3])
-            if ver_parts < (1, 106, 2):
+            def _ver_tuple(pkg_name: str) -> tuple[int, ...]:
+                try:
+                    return tuple(
+                        int(x) for x in re.findall(r"\d+", _meta.version(pkg_name))[:3]
+                    )
+                except Exception:
+                    return (0, 0, 0)
+
+            upgrades: list[str] = []
+            if _ver_tuple("litellm") < (1, 106, 2):
+                upgrades.append("litellm>=1.106.2")
+            if _ver_tuple("numpy") < (2, 0, 0):
+                upgrades.extend(["numpy>=2.0.0", "scipy>=1.14.1"])
+
+            if upgrades:
                 subprocess.run(
                     [
                         "uv",
@@ -1035,11 +1059,12 @@ def ensure_aider_installed():
                         "--quiet",
                         "--python",
                         sys.executable,
-                        "litellm>=1.106.2",
+                        *upgrades,
                     ],
                     check=False,
                     capture_output=True,
                 )
+                importlib.invalidate_caches()
         except Exception:
             pass
 
@@ -1063,8 +1088,9 @@ def ensure_aider_installed():
                                 aider_py,
                                 "-c",
                                 "import importlib.metadata as m, re, sys; "
-                                "v = tuple(int(x) for x in re.findall(r'\\d+', m.version('litellm'))[:3]); "
-                                "sys.exit(0 if v >= (1, 106, 2) else 1)",
+                                "lv = tuple(int(x) for x in re.findall(r'\\d+', m.version('litellm'))[:3]); "
+                                "nv = tuple(int(x) for x in re.findall(r'\\d+', m.version('numpy'))[:3]); "
+                                "sys.exit(0 if (lv >= (1, 106, 2) and nv >= (2, 0, 0)) else 1)",
                             ],
                             check=False,
                             capture_output=True,
@@ -1079,6 +1105,8 @@ def ensure_aider_installed():
                                     "--python",
                                     aider_py,
                                     "litellm>=1.106.2",
+                                    "numpy>=2.0.0",
+                                    "scipy>=1.14.1",
                                 ],
                                 check=False,
                                 capture_output=True,
@@ -1889,6 +1917,259 @@ def aicat_cli(argv=None):
                 sys.stdout.write(fh.read())
             sys.stdout.write("\n</file>\n")
     sys.stdout.flush()
+
+
+RAG_RSYNC_ARGS = [
+    "--filter=:- .gitignore",
+    "--filter=:- .aiderignore",
+    "--exclude=.*",
+    "--exclude=node_modules/",
+    "--exclude=renv/",
+    "--exclude=packrat/",
+    "--exclude=__pycache__/",
+    "--exclude=venv/",
+    "--exclude=env/",
+    "--exclude=build/",
+    "--exclude=dist/",
+    "--exclude=target/",
+    "--exclude=out/",
+    "--exclude=coverage/",
+    "--exclude=htmlcov/",
+    "--exclude=site/",
+    "--exclude=_site/",
+    "--exclude=data/",
+    "--exclude=temp/",
+    "--exclude=tmp/",
+    "--exclude=tempFiles/",
+    "--exclude=tempfiles/",
+    "--exclude=logs/",
+    "--exclude=log/",
+    "--exclude=secrets/",
+    "--exclude=credentials/",
+    "--exclude=vendor/",
+    "--exclude=third_party/",
+    "--exclude=ai-agent-config/",
+    "--exclude=cursor-skills/",
+    "--exclude=skeleton/",
+    "--exclude=lancedb/",
+    "--exclude=images/",
+    "--exclude=AGENTS.md",
+    "--exclude=AGENTS.md.*",
+    "--exclude=CLAUDE.md",
+    "--exclude=GEMINI.md",
+    "--exclude=CONVENTIONS.md",
+    "--exclude=README.skeleton.md",
+    "--exclude=*.rds",
+    "--exclude=*.rda",
+    "--exclude=*.RData",
+    "--exclude=*.parquet",
+    "--exclude=*.feather",
+    "--exclude=*.h5",
+    "--exclude=*.bin",
+    "--exclude=*.exe",
+    "--exclude=*.dll",
+    "--exclude=*.so",
+    "--exclude=*.dylib",
+    "--exclude=*.zip",
+    "--exclude=*.tar",
+    "--exclude=*.tar.gz",
+    "--exclude=*.tgz",
+    "--exclude=*.gz",
+    "--exclude=*.7z",
+    "--exclude=*.lock",
+    "--exclude=package-lock.json",
+    "--exclude=Cargo.lock",
+    "--exclude=*.log",
+    "--exclude=*.map",
+    "--exclude=*.pyc",
+]
+
+
+def run_rsync_rag(argv=None) -> int:
+    """Execute RAG-filtered rsync pass-through (with Python fallback if rsync binary is absent)."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args or "-h" in args or "--help" in args:
+        print(
+            "rsync-rag: RAG-filtered rsync pass-through utility for AI Factory collections.\n\n"
+            "Usage:\n"
+            "  rsync-rag [rsync_options...] <src>... <dest>\n\n"
+            "Examples:\n"
+            "  rsync-rag ~/R/devenv .aider_factory/markdown/lanceDB/devenv_repo/\n"
+            "  rsync-rag -avn ~/R/devenv .aider_factory/markdown/lanceDB/devenv_repo/\n"
+            "  rsync-rag -rav -e 'ssh -p 22 -i ~/.ssh/id_key' --progress ./devenv user@host:/path/to/lanceDB/col/"
+        )
+        return 0
+
+    dry_run = False
+    skip_next = False
+    parse_opts = True
+    positionals = []
+    opts_with_val = {
+        "-e",
+        "--rsh",
+        "--filter",
+        "-f",
+        "--exclude",
+        "--include",
+        "--exclude-from",
+        "--include-from",
+        "--files-from",
+        "--max-size",
+        "--min-size",
+        "--bwlimit",
+        "--port",
+    }
+    for a in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if not parse_opts:
+            positionals.append(a)
+            continue
+        if a == "--":
+            parse_opts = False
+            continue
+        if a in opts_with_val:
+            skip_next = True
+            continue
+        if a in ("--dry-run", "-n"):
+            dry_run = True
+        elif a.startswith("-") and not a.startswith("--") and "n" in a[1:]:
+            dry_run = True
+        elif not a.startswith("-"):
+            positionals.append(a)
+
+    if len(positionals) < 2:
+        print(
+            "❌ [rsync-rag] Error: Requires at least a source and destination argument.",
+            file=sys.stderr,
+        )
+        return 1
+
+    _remote_re = re.compile(r"^(?![a-zA-Z]:)[^/\\]+:")
+    dest = positionals[-1]
+    sources = positionals[:-1]
+    is_remote_dest = bool(_remote_re.match(dest))
+
+    if not is_remote_dest and os.path.isfile(dest):
+        if len(sources) > 1 or any(os.path.isdir(s) for s in sources):
+            print(
+                f"❌ [rsync-rag] Error: Target '{dest}' is not a directory.",
+                file=sys.stderr,
+            )
+            return 1
+
+    if (
+        not dry_run
+        and not is_remote_dest
+        and not dest.startswith("-")
+        and not os.path.isfile(dest)
+    ):
+        os.makedirs(dest, exist_ok=True)
+
+    rsync_bin = shutil.which("rsync") if sys.platform != "win32" else None
+    if (
+        rsync_bin
+        and sys.platform == "darwin"
+        and os.path.abspath(rsync_bin) == "/usr/bin/rsync"
+    ):
+        try:
+            ver_res = subprocess.run(
+                [rsync_bin, "--version"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if (
+                ver_res.returncode != 0
+                or "openrsync" in (ver_res.stdout + ver_res.stderr).lower()
+            ):
+                rsync_bin = None
+        except Exception:
+            rsync_bin = None
+
+    if rsync_bin:
+        cmd = [rsync_bin, "-a", "--prune-empty-dirs", *RAG_RSYNC_ARGS, *args]
+        res = subprocess.run(cmd, check=False)
+        return res.returncode
+
+    if is_remote_dest or any(_remote_re.match(s) for s in sources):
+        print(
+            "❌ [rsync-rag] Error: 'rsync' binary is required for remote SSH transfers.",
+            file=sys.stderr,
+        )
+        return 1
+
+    import fnmatch
+
+    try:
+        import rag_manager
+    except ImportError:
+        from aider_factory.python import rag_manager
+
+    def _is_ignored_by_dir_rules(root_dir: str, file_path: str) -> bool:
+        rel_parts = (
+            os.path.relpath(file_path, root_dir).replace("\\", "/").split("/")
+        )
+        cur_dir = root_dir
+        for depth in range(len(rel_parts)):
+            sub_rel = "/".join(rel_parts[depth:])
+            sub_parts = rel_parts[depth:]
+            for ign_name in (".gitignore", ".aiderignore"):
+                ign_file = os.path.join(cur_dir, ign_name)
+                if os.path.isfile(ign_file):
+                    try:
+                        with open(ign_file, "r", encoding="utf-8", errors="ignore") as fh:
+                            for raw_line in fh:
+                                pat = raw_line.strip()
+                                if not pat or pat.startswith(("#", "!")):
+                                    continue
+                                clean_pat = pat.strip("/")
+                                if fnmatch.fnmatch(sub_rel, clean_pat) or any(
+                                    fnmatch.fnmatch(seg, clean_pat) for seg in sub_parts
+                                ):
+                                    return True
+                    except Exception:
+                        pass
+            if depth < len(rel_parts) - 1:
+                cur_dir = os.path.join(cur_dir, rel_parts[depth])
+        return False
+
+    for src in sources:
+        if not os.path.isdir(src):
+            if os.path.isfile(src):
+                if not dry_run:
+                    shutil.copy2(src, dest)
+                continue
+            return 1
+
+        target_root = (
+            dest
+            if src.endswith(("/", "\\"))
+            else os.path.join(dest, os.path.basename(src.rstrip("/\\")))
+        )
+        if not dry_run:
+            os.makedirs(target_root, exist_ok=True)
+            for src_file, _kind, sf in rag_manager._walk_repo(
+                src,
+                rag_manager.IGNORE_DEFAULT,
+                rag_manager.CODE_EXTS_DEFAULT,
+                rag_manager.TEXT_DOC_EXTS_DEFAULT,
+            ):
+                if _is_ignored_by_dir_rules(src, src_file):
+                    continue
+                rel_path = (
+                    sf.split("/", 1)[1] if "/" in sf else os.path.basename(src_file)
+                )
+                dst_file = os.path.join(target_root, rel_path)
+                os.makedirs(os.path.dirname(dst_file), exist_ok=True)
+                shutil.copy2(src_file, dst_file)
+    return 0
+
+
+def rsync_rag_cli(argv=None):
+    """Global 'rsync-rag' CLI entry point."""
+    sys.exit(run_rsync_rag(argv))
 
 
 if __name__ == "__main__":

@@ -26,10 +26,12 @@ def test_auto_derive_basename():
     print("test_auto_derive_basename...")
 
     def derive(working_dir, explicit_repo=None):
-        return explicit_repo or os.path.basename(str(working_dir).rstrip("/"))
+        norm = str(working_dir).rstrip("/\\").replace("\\", "/")
+        return explicit_repo or norm.rsplit("/", 1)[-1]
 
     assert derive("/path/to/working_repo") == "working_repo"
     assert derive("/path/to/working_repo/") == "working_repo"
+    assert derive("C:\\path\\to\\working_repo\\") == "working_repo"
     assert derive("/some/path/MyProject") == "MyProject"
     # Explicit override takes precedence
     assert derive("/path/to/working_repo", "CustomName") == "CustomName"
@@ -136,10 +138,10 @@ def test_non_matching_repo_no_exclude():
     # These excludes apply to working_repo, not TimeBaseR
     exclude = {"R/lq_leverage.R", "R/helpers.R"}
 
-    # Simulate the gate in rag_manager.ingest line 646:
-    # excl = code_exclude if os.path.basename(repo) == working_repo else frozenset()
+    # Simulate the gate in rag_manager.ingest:
+    # excl = code_exclude if os.path.basename(repo.rstrip("/\\")) == working_repo else frozenset()
     working_repo = "working_repo"
-    excl = exclude if os.path.basename(repo.rstrip("/")) == working_repo else frozenset()
+    excl = exclude if os.path.basename(repo.rstrip("/\\")) == working_repo else frozenset()
 
     code_exts = {".r", ".R", ".py"}
     text_doc_exts = {".md", ".txt"}
@@ -166,7 +168,7 @@ def test_end_to_end_derivation():
     rag_cfg = {}  # No explicit working_repo
 
     # The new auto-derive logic
-    rag_working_repo = rag_cfg.get("working_repo") or os.path.basename(str(project_directory).rstrip("/"))
+    rag_working_repo = rag_cfg.get("working_repo") or os.path.basename(str(project_directory).rstrip("/\\"))
     assert rag_working_repo == "working_repo"
 
     # Simulate target/context file list

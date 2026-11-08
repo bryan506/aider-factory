@@ -778,12 +778,20 @@ Options:
                     )
                 sys.exit(1)
 
-            rag_code_chunk = int(rag_phase_cfg.get("code_chunk_size", 2000))
+            rag_code_chunk = int(
+                rag_phase_cfg.get("code_chunk_size")
+                or global_rag.get("code_chunk_size")
+                or 6000
+            )
             # Auto-derive from working_directory if not explicitly set. Active target,
             # editable, and context files must always be excluded from the vector store
             # to prevent stale code from polluting oracle retrieval.
-            rag_working_repo = rag_phase_cfg.get("working_repo") or os.path.basename(
-                str(project_directory).rstrip("/")
+            rag_working_repo = (
+                rag_phase_cfg.get("working_repo")
+                or global_rag.get("working_repo")
+                or os.path.basename(
+                    str(project_directory).replace("\\", "/").rstrip("/")
+                )
             )
             rag_code_exts = rag_phase_cfg.get("code_exts")
             rag_text_doc_exts = rag_phase_cfg.get("text_doc_exts")
@@ -817,7 +825,7 @@ Options:
                         rag_phase_cfg.get("chunk_overlap_chars", rag_chunk_overlap)
                     ),
                     "code_chunk_size": int(
-                        rag_phase_cfg.get("code_chunk_size", rag_code_chunk)
+                        rag_phase_cfg.get("code_chunk_size") or rag_code_chunk
                     ),
                     "working_repo": rag_working_repo,
                     "code_exclude": code_exclude,

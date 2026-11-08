@@ -273,34 +273,44 @@ def _remove_db():
     return 0
 
 
+def _get_active_phase(cfg):
+    """Return the active phase dict honoring ORACLE_PHASE_INDEX and default enabled=True."""
+    phases = (cfg or {}).get("phases", []) or []
+    if not phases:
+        return {}
+    phase_idx_str = os.environ.get("ORACLE_PHASE_INDEX")
+    if phase_idx_str is not None:
+        try:
+            idx = int(phase_idx_str)
+            if 0 <= idx < len(phases) and isinstance(phases[idx], dict):
+                return phases[idx]
+        except ValueError:
+            pass
+    return next(
+        (ph for ph in phases if isinstance(ph, dict) and ph.get("enabled", True)),
+        phases[0] if isinstance(phases[0], dict) else {},
+    )
+
+
 def _resolve_active_collection(cfg):
     """Resolve collection name for maintenance commands (--add-file, --add-web, etc.).
 
     Explicit CLI --collection overrides take highest priority. Otherwise, reads the
-    phase collection_name from config, avoiding inherited per-doc table names.
+    phase collection_name (or global rag.collection_name) from config.
     """
     if os.environ.get("ORACLE_EXPLICIT_COLLECTION") == "1" and os.environ.get(
         "ORACLE_COLLECTION"
     ):
         return os.environ.get("ORACLE_COLLECTION")
 
-    phases = cfg.get("phases", [])
-    if phases:
-        active_phase = None
-        phase_idx_str = os.environ.get("ORACLE_PHASE_INDEX")
-        if phase_idx_str is not None:
-            try:
-                idx = int(phase_idx_str)
-                if 0 <= idx < len(phases):
-                    active_phase = phases[idx]
-            except ValueError:
-                pass
-        if active_phase is None:
-            active_phase = next((ph for ph in phases if ph.get("enabled")), phases[0])
+    active_phase = _get_active_phase(cfg)
+    rag_phase = active_phase.get("rag", {}) or {}
+    if isinstance(rag_phase, dict) and rag_phase.get("collection_name"):
+        return rag_phase.get("collection_name")
 
-        rag_phase = active_phase.get("rag", {}) or {}
-        if isinstance(rag_phase, dict) and rag_phase.get("collection_name"):
-            return rag_phase.get("collection_name")
+    global_rag = (cfg or {}).get("rag", {}) or {}
+    if isinstance(global_rag, dict) and global_rag.get("collection_name"):
+        return global_rag.get("collection_name")
 
     return "knowledge"
 
@@ -351,6 +361,48 @@ def _load_maintenance_config():
     return cfg, project_dir, context_root, collection, job_dir
 
 
+def _resolve_phase_repo_filters(cfg):
+    """Extract (working_repo, code_exclude, code_exts, text_doc_exts, rag_ignore) from config."""
+    raw_wd = cfg.get("working_directory")
+    project_dir = (
+        str(raw_wd).strip()
+        if (raw_wd is not None and str(raw_wd).strip())
+        else os.getcwd()
+    )
+    global_rag = cfg.get("rag", {}) or {}
+    active_phase = _get_active_phase(cfg)
+    phase_rag = active_phase.get("rag", {}) or {}
+
+    working_repo = (
+        phase_rag.get("working_repo")
+        or global_rag.get("working_repo")
+        or os.path.basename(project_dir.replace("\\", "/").rstrip("/"))
+    )
+    code_exts = phase_rag.get("code_exts") or global_rag.get("code_exts")
+    text_doc_exts = phase_rag.get("text_doc_exts") or global_rag.get("text_doc_exts")
+    rag_ignore = phase_rag.get("ignore") or global_rag.get("ignore")
+
+    files_cfg = (
+        (active_phase.get("files") or {}) if isinstance(active_phase, dict) else {}
+    )
+    active_files = (
+        (files_cfg.get("target_files") or [])
+        + (files_cfg.get("extra_editable_files") or [])
+        + (files_cfg.get("context_files_job") or [])
+        + (files_cfg.get("context_files_test") or [])
+    )
+    code_exclude = set()
+    for f in active_files:
+        if f and isinstance(f, str):
+            norm_f = f.replace("\\", "/")
+            if working_repo and norm_f.startswith(working_repo + "/"):
+                code_exclude.add(norm_f[len(working_repo) + 1 :])
+            else:
+                code_exclude.add(norm_f)
+
+    return working_repo, code_exclude, code_exts, text_doc_exts, rag_ignore
+
+
 def _run_maintenance_ingest(
     cfg,
     context_root,
@@ -364,12 +416,11 @@ def _run_maintenance_ingest(
     """Resolve active phase RAG/embedding settings and run rag_manager.ingest()."""
     import rag_manager
 
+    working_repo, code_exclude, code_exts, text_doc_exts, rag_ignore = _resolve_phase_repo_filters(cfg)
+
     endpoints = cfg.get("endpoints", {}) or {}
     global_rag = cfg.get("rag", {}) or {}
-    phases = cfg.get("phases", []) or []
-    active_phase = (
-        next((ph for ph in phases if ph.get("enabled")), phases[0]) if phases else {}
-    )
+    active_phase = _get_active_phase(cfg)
     phase_models = active_phase.get("models", {}) or {}
     phase_rag = active_phase.get("rag", {}) or {}
 
@@ -380,7 +431,9 @@ def _run_maintenance_ingest(
     max_retries = _safe_int(phase_rag.get("ocr_max_retries"), 2)
     parallel = _safe_int(phase_rag.get("ocr_parallel"), 1)
     ocr_max_tokens = _safe_int(phase_rag.get("ocr_max_tokens"), 4096)
-    code_chunk_size = _safe_int(phase_rag.get("code_chunk_size"), 2000)
+    code_chunk_size = _safe_int(
+        phase_rag.get("code_chunk_size") or global_rag.get("code_chunk_size"), 6000
+    )
     use_docling = phase_rag.get("use_docling", True)
     docling_do_ocr = phase_rag.get("docling_do_ocr", True)
     docling_timeout = phase_rag.get("docling_timeout") or global_rag.get(
@@ -443,6 +496,11 @@ def _run_maintenance_ingest(
             ocr_parallel=parallel,
             ocr_max_tokens=ocr_max_tokens,
             code_chunk_size=code_chunk_size,
+            working_repo=working_repo,
+            code_exclude=code_exclude,
+            code_exts=code_exts,
+            text_doc_exts=text_doc_exts,
+            ignore=rag_ignore,
             batch=batch_setting,
             ocr_only=ocr_only,
             use_docling=use_docling,
@@ -497,7 +555,11 @@ def _add_maintenance(action, paths):
             )
             continue
 
-        name = os.path.basename(p)
+        name = (
+            os.path.basename(p.rstrip("/\\"))
+            or os.path.basename(abs_p.rstrip("/\\"))
+            or "root"
+        )
         dest_p = os.path.join(job_dir, name)
 
         if os.path.isdir(p):
@@ -507,16 +569,19 @@ def _add_maintenance(action, paths):
                     file=sys.stderr,
                 )
                 return 1
-            print(f"[oracle] Copying directory {p} -> {dest_p}...", file=sys.stderr)
-            if os.path.exists(dest_p):
-                for root, _dirs, files in os.walk(p):
-                    rel_path = os.path.relpath(root, p)
-                    target_dir = os.path.join(dest_p, rel_path)
-                    os.makedirs(target_dir, exist_ok=True)
-                    for f in files:
-                        shutil.copy2(os.path.join(root, f), os.path.join(target_dir, f))
-            else:
-                shutil.copytree(p, dest_p)
+            print(f"[oracle] Syncing directory {p} -> {dest_p} via rsync-rag...", file=sys.stderr)
+            try:
+                from aider_factory.cli import run_rsync_rag
+            except ImportError:
+                from cli import run_rsync_rag
+
+            os.makedirs(dest_p, exist_ok=True)
+            src_arg = os.path.abspath(p).rstrip("/\\") + "/"
+            dst_arg = os.path.abspath(dest_p).rstrip("/\\") + "/"
+            rc = run_rsync_rag([src_arg, dst_arg])
+            if rc != 0:
+                print(f"[oracle] Error syncing directory '{p}' (exit code {rc}).", file=sys.stderr)
+                return 1
         else:
             print(f"[oracle] Copying file {p} -> {dest_p}...", file=sys.stderr)
             shutil.copy2(p, dest_p)

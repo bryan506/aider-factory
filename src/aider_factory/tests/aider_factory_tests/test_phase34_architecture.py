@@ -49,8 +49,34 @@ def test_type_flag_parser():
     print("  ✅ --type [code|docs] CLI parser works correctly.")
 
 
+def test_walk_repo_ignore_and_dedup():
+    import tempfile
+
+    for expected_ign in (".aider_factory", "ai-agent-config", "skeleton", "tempfiles", "secrets"):
+        assert expected_ign in IGNORE_DEFAULT, f"Missing {expected_ign} in IGNORE_DEFAULT"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo = os.path.join(tmpdir, "arch_repo")
+        os.makedirs(os.path.join(repo, "skeleton"), exist_ok=True)
+        with open(os.path.join(repo, "skeleton", "skip.py"), "w", encoding="utf-8") as fh:
+            fh.write("x = 1\n")
+        with open(os.path.join(repo, "AGENTS.md"), "w", encoding="utf-8") as fh:
+            fh.write("harness\n")
+        with open(os.path.join(repo, "guide.rmd"), "w", encoding="utf-8") as fh:
+            fh.write("# Guide\n")
+        with open(os.path.join(repo, "guide.html"), "w", encoding="utf-8") as fh:
+            fh.write("<html></html>\n")
+
+        found = list(_walk_repo(repo, IGNORE_DEFAULT, CODE_EXTS_DEFAULT, TEXT_DOC_EXTS_DEFAULT))
+        assert len(found) == 1
+        assert found[0][1] == "text_doc"
+        assert found[0][2] == "arch_repo/guide.rmd"
+    print("  ✅ _walk_repo enforces IGNORE_DEFAULT, AGENT_HARNESS_FILES, and .rmd/.html priority.")
+
+
 if __name__ == "__main__":
     test_classify()
     test_fenced_chunking()
     test_type_flag_parser()
+    test_walk_repo_ignore_and_dedup()
     print("\n🎉 All Phase 3+4 Architecture Tests Passed!")

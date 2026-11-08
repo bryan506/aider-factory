@@ -15,6 +15,7 @@
 
 import base64
 import logging
+import math
 import os
 import re
 import sys
@@ -51,7 +52,40 @@ except ImportError:
 _resolve_api_key = resolve_api_key
 
 
-def embed_texts(texts, backend, model, api_base, batch_size=8):
+def _sanitize_for_embed(s: str) -> str:
+    if not s:
+        return "."
+    s = re.sub(r"<\|([^|>]*)\|>", r"< \1 >", s)
+    s = s.replace("<|", "< ").replace("|>", " >")
+    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]", " ", s)
+    return s.strip() or "."
+
+
+def _is_valid_vec(vec) -> bool:
+    return (
+        isinstance(vec, list)
+        and len(vec) > 0
+        and all(
+            isinstance(x, (int, float))
+            and not isinstance(x, bool)
+            and math.isfinite(x)
+            for x in vec
+        )
+    )
+
+
+def _mean_pool_vecs(valid_vecs: list[list[float]]) -> list[float]:
+    dim = len(valid_vecs[0])
+    acc = [0.0] * dim
+    for v in valid_vecs:
+        for i, val in enumerate(v):
+            acc[i] += float(val)
+    norm = math.sqrt(sum(x * x for x in acc))
+    norm = norm if norm > 1e-9 else 1.0
+    return [x / norm for x in acc]
+
+
+def embed_texts(texts, backend, model, api_base, batch_size=8, max_batch_chars=7000):
     """Return list[list[float]] for `texts`. The ONLY embedding entrypoint.
     openai backend with api_base set -> direct HTTP to local llama-server.
     openai backend with api_base empty/None -> cloud model via litellm
@@ -66,23 +100,164 @@ def embed_texts(texts, backend, model, api_base, batch_size=8):
             # Local endpoint: direct HTTP (llama-server, etc.)
             import requests as _req
 
-            for i in range(0, len(texts), batch_size):
-                r = _req.post(
-                    f"{api_base.rstrip('/')}/embeddings",
-                    json={"input": texts[i : i + batch_size], "model": model},
-                    headers={
-                        "Authorization": "Bearer sk-dummy",
-                        "Content-Type": "application/json",
-                    },
-                    timeout=(10, None),  # 10s connect; unlimited read
+            url = f"{api_base.rstrip('/')}/embeddings"
+            headers = {
+                "Authorization": "Bearer sk-dummy",
+                "Content-Type": "application/json",
+            }
+
+            def _embed_single_safe(text_item: str, chunk_idx: int = -1):
+                clean_cand = _sanitize_for_embed(text_item)
+                print(
+                    f"      [warn] chunk {chunk_idx} (len={len(clean_cand)}) returned NaN; flushing slot & entering recovery...",
+                    file=sys.stderr,
                 )
-                r.raise_for_status()
-                out.extend(d["embedding"] for d in r.json()["data"])
+
+                # 6,000-char clean flush payload to overwrite poisoned KV/compute buffer past len(clean_cand)
+                flush_pad = " ".join(f"item_{i}" for i in range(850))
+
+                # Tier 1: Flush poisoned slot, then try 2-sequence halves [first_half, second_half]
+                if len(clean_cand) >= 256:
+                    half_len = len(clean_cand) // 2
+                    first_half = clean_cand[:half_len].strip()
+                    second_half = clean_cand[half_len:].strip()
+                    if first_half and second_half:
+                        try:
+                            _req.post(
+                                url,
+                                json={"input": [flush_pad, "ok"], "model": model},
+                                headers=headers,
+                                timeout=(10, 60),
+                            )
+                            r_halves = _req.post(
+                                url,
+                                json={"input": [first_half, second_half], "model": model},
+                                headers=headers,
+                                timeout=(10, 60),
+                            )
+                            r_halves.raise_for_status()
+                            half_data = r_halves.json().get("data", [])
+                            if (
+                                len(half_data) == 2
+                                and all(_is_valid_vec(d.get("embedding")) for d in half_data)
+                                and len(half_data[0]["embedding"]) == len(half_data[1]["embedding"])
+                            ):
+                                print(
+                                    f"      [recovery] chunk {chunk_idx} (len={len(clean_cand)}) recovered via "
+                                    f"slot-flush + 2-seq halves pool",
+                                    file=sys.stderr,
+                                )
+                                return _mean_pool_vecs(
+                                    [half_data[0]["embedding"], half_data[1]["embedding"]]
+                                )
+                        except _req.exceptions.ConnectionError as e:
+                            print(
+                                f"      [warn] chunk {chunk_idx} Tier 1 connection failed ({e}); aborting recovery.",
+                                file=sys.stderr,
+                            )
+                            return None
+                        except Exception as e:
+                            print(
+                                f"      [warn] chunk {chunk_idx} Tier 1 halves recovery failed: {e}",
+                                file=sys.stderr,
+                            )
+
+                # Tier 2: Language-neutral deduplicated identifier distillation
+                words = re.findall(r"[A-Za-z_][A-Za-z0-9_]{1,}", clean_cand)
+                unique_words = list(dict.fromkeys(words))
+                distilled_text = (
+                    ("code symbols: " + " ".join(unique_words))[:3000].strip() or "code"
+                )
+
+                for attempt in range(1, 4):
+                    try:
+                        _req.post(
+                            url,
+                            json={"input": [flush_pad, "ok"], "model": model},
+                            headers=headers,
+                            timeout=(10, 60),
+                        )
+                        r_rec = _req.post(
+                            url,
+                            json={"input": [distilled_text, "ok"], "model": model},
+                            headers=headers,
+                            timeout=(10, 60),
+                        )
+                        r_rec.raise_for_status()
+                        rec_data = r_rec.json().get("data", [])
+                        if rec_data and _is_valid_vec(rec_data[0].get("embedding")):
+                            print(
+                                f"      [recovery] chunk {chunk_idx} (len={len(clean_cand)}) recovered on attempt {attempt} "
+                                f"via slot-flush + deduplicated identifiers (len={len(distilled_text)}, words={len(unique_words)})",
+                                file=sys.stderr,
+                            )
+                            return rec_data[0]["embedding"]
+                    except _req.exceptions.ConnectionError as e:
+                        print(
+                            f"      [warn] chunk {chunk_idx} Tier 2 connection failed ({e}); aborting recovery.",
+                            file=sys.stderr,
+                        )
+                        return None
+                    except Exception as e:
+                        print(
+                            f"      [warn] chunk {chunk_idx} Tier 2 attempt {attempt} failed: {e}",
+                            file=sys.stderr,
+                        )
+                return None
+
+            sanitized_texts = [_sanitize_for_embed(t) for t in texts]
+            idx = 0
+            while idx < len(sanitized_texts):
+                batch_slice = []
+                batch_indices = []
+                batch_chars = 0
+                while idx < len(sanitized_texts) and len(batch_slice) < batch_size:
+                    nxt = sanitized_texts[idx]
+                    if batch_slice and (batch_chars + len(nxt) > max_batch_chars):
+                        break
+                    batch_slice.append(nxt)
+                    batch_indices.append(idx)
+                    batch_chars += len(nxt)
+                    idx += 1
+
+                try:
+                    r = _req.post(
+                        url,
+                        json={"input": batch_slice, "model": model},
+                        headers=headers,
+                        timeout=(10, None),  # 10s connect; unlimited read
+                    )
+                    r.raise_for_status()
+                    batch_data = r.json().get("data") or []
+                    batch_vecs = [
+                        batch_data[i].get("embedding")
+                        if i < len(batch_data) and isinstance(batch_data[i], dict)
+                        else None
+                        for i in range(len(batch_slice))
+                    ]
+                except _req.exceptions.ConnectionError as e:
+                    print(
+                        f"      [warn] Batch POST connection failed ({e}); skipping recovery for disconnected batch.",
+                        file=sys.stderr,
+                    )
+                    out.extend([None] * len(batch_slice))
+                    continue
+                except Exception as e:
+                    print(
+                        f"      [warn] Batch POST failed ({e}); falling back to safe item-by-item recovery...",
+                        file=sys.stderr,
+                    )
+                    batch_vecs = [None] * len(batch_slice)
+                for c_idx, t_item, vec in zip(batch_indices, batch_slice, batch_vecs):
+                    if _is_valid_vec(vec):
+                        out.append(vec)
+                    else:
+                        out.append(_embed_single_safe(t_item, chunk_idx=c_idx))
         else:
             # Cloud model: route through litellm (gemini/, openai/, etc.)
             import litellm
-            import sys
-            
+            # Removed redundant local sys import
+
             try:
                 from aider_factory.python.cost_tracker import fmt_token_count, fmt_cost_usd, _PROCESS_SESSION_COST
                 import aider_factory.python.cost_tracker as ct
@@ -209,15 +384,44 @@ CODE_EXTS_DEFAULT = {
 TEXT_DOC_EXTS_DEFAULT = {".md", ".rmd", ".txt", ".rst"}
 IGNORE_DEFAULT = {
     ".git",
+    ".aider_factory",
     "renv",
     "packrat",
     "node_modules",
     "__pycache__",
     ".venv",
+    "venv",
+    "env",
     "build",
     "dist",
+    "target",
+    "out",
+    "coverage",
+    "htmlcov",
+    "site",
+    "_site",
     "data",
+    "temp",
+    "tmp",
+    "tempfiles",
+    "logs",
+    "log",
+    "secrets",
+    "credentials",
+    "vendor",
+    "third_party",
+    "ai-agent-config",
+    "cursor-skills",
+    "skeleton",
     ".rproj.user",
+}
+
+AGENT_HARNESS_FILES = {
+    "agents.md",
+    "claude.md",
+    "gemini.md",
+    "conventions.md",
+    "readme.skeleton.md",
 }
 
 _LANG_BY_EXT = {
@@ -283,10 +487,29 @@ def _get_parser(lang):
         return None
 
 
+_DEF_NODE_TYPES = {
+    "function_definition",
+    "class_definition",
+    "decorated_definition",
+    "method_definition",
+    "function_declaration",
+    "class_declaration",
+    "method_declaration",
+    "struct_item",
+    "impl_item",
+    "trait_item",
+    "function_item",
+    "method",
+    "singleton_method",
+}
+
+
 def _text_split_fallback(text, max_chars, overlap_lines=3):
     """Split oversized text at line boundaries when AST cannot subdivide further.
     If the text has no line breaks (single long line), falls back to character-level
     splitting with ~20% overlap so no chunk exceeds max_chars."""
+    max_chars = max(1, int(max_chars))
+    overlap_lines = max(0, int(overlap_lines or 0))
     lines = text.splitlines(keepends=True)
     if not lines:
         return []
@@ -321,6 +544,9 @@ def _text_split_fallback(text, max_chars, overlap_lines=3):
             # keep last overlap_lines as context for next chunk
             buf = buf[-overlap_lines:] if overlap_lines else []
             n = sum(len(l) for l in buf)
+            while buf and n + len(line) > max_chars:
+                removed = buf.pop(0)
+                n -= len(removed)
         buf.append(line)
         n += len(line)
     if buf:
@@ -328,7 +554,9 @@ def _text_split_fallback(text, max_chars, overlap_lines=3):
     return chunks
 
 
-def _ast_chunk(source, language, max_chars=2000):
+def _ast_chunk(source, language, max_chars=6000):
+    if not source or not source.strip():
+        return []
     src = source.encode("utf-8")
     parser = _get_parser(language)
     if not parser:
@@ -339,58 +567,201 @@ def _ast_chunk(source, language, max_chars=2000):
     except Exception:
         return []
 
-    def txt(n):
-        return src[n.start_byte : n.end_byte].decode("utf-8", "ignore")
+    def txt_bytes(start_b: int, end_b: int) -> str:
+        return src[start_b:end_b].decode("utf-8", "ignore")
 
-    def symbol(n):
-        for c in n.children:
-            if c.type in ("identifier", "name"):
-                return txt(c)
+    def extract_def_symbol(n) -> str:
+        target = n
+        if n.type == "decorated_definition":
+            for c in n.children:
+                if c.type in _DEF_NODE_TYPES and c.type != "decorated_definition":
+                    target = c
+                    break
+        if target.type in ("binary_operator", "left_assignment", "equals_assignment"):
+            if (
+                any(c.type == "function_definition" for c in target.children)
+                and target.children
+            ):
+                first_c = target.children[0]
+                if first_c.type in ("identifier", "name"):
+                    return txt_bytes(first_c.start_byte, first_c.end_byte).strip()
+            return ""
+        if target.type not in _DEF_NODE_TYPES:
+            return ""
+        name_node = (
+            target.child_by_field_name("name")
+            if hasattr(target, "child_by_field_name")
+            else None
+        )
+        if name_node is not None:
+            cand = txt_bytes(name_node.start_byte, name_node.end_byte).strip()
+            return "" if cand in ("function", "def", "class", "fn", "func") else cand
+        for c in target.children:
+            if c.type in (
+                "identifier",
+                "name",
+                "type_identifier",
+                "property_identifier",
+                "word",
+            ):
+                cand = txt_bytes(c.start_byte, c.end_byte).strip()
+                if cand and cand not in ("function", "def", "class", "fn", "func"):
+                    return cand
         return ""
 
-    chunks = []
+    # Stage 1: Decompose AST into in-order spans <= max_chars
+    spans = []  # (start_byte | None, end_byte_or_text, line_start, line_end, sym)
 
-    def flush(buf, s, e, sym):
-        t = "\n".join(buf).strip("\n")
-        if t.strip():
-            chunks.append((t, s, e, sym))
+    def collect_spans(node, scope: str = ""):
+        node_sym = extract_def_symbol(node)
+        last_seg = scope.split(".")[-1] if scope else ""
+        if node_sym and node_sym != last_seg:
+            cur_scope = f"{scope}.{node_sym}" if scope else node_sym
+        else:
+            cur_scope = scope
+        byte_len = node.end_byte - node.start_byte
 
-    def recurse(node):
-        buf, s, e = [], None, None
-        for ch in node.children:
-            ctext = txt(ch)
-            if len(ctext) > max_chars and ch.child_count:
-                if buf:
-                    flush(buf, s, e, symbol(node))
-                    buf, s = [], None
-                recurse(ch)
-            elif len(ctext) > max_chars:
-                # Oversized leaf: fall back to line-level text splitting
-                if buf:
-                    flush(buf, s, e, symbol(node))
-                    buf, s = [], None
-                sym = symbol(node)
-                ls = ch.start_point[0] + 1
-                le = ch.end_point[0] + 1
-                for sub in _text_split_fallback(ctext, max_chars):
-                    chunks.append((sub, ls, le, sym))
-            else:
-                if s is None:
-                    s = ch.start_point[0] + 1
-                buf.append(ctext)
-                e = ch.end_point[0] + 1
-                if sum(len(x) for x in buf) >= max_chars:
-                    flush(buf, s, e, symbol(node))
-                    buf, s = [], None
-        if buf:
-            flush(buf, s, e, symbol(node))
+        if byte_len <= max_chars:
+            if byte_len > 0:
+                spans.append(
+                    (
+                        node.start_byte,
+                        node.end_byte,
+                        node.start_point[0] + 1,
+                        node.end_point[0] + 1,
+                        cur_scope,
+                    )
+                )
+            return
+
+        if node.child_count > 0:
+            for ch in node.children:
+                collect_spans(ch, cur_scope)
+            return
+
+        leaf_text = txt_bytes(node.start_byte, node.end_byte)
+        ls = node.start_point[0] + 1
+        le = node.end_point[0] + 1
+        leaf_budget = max(256, max_chars - 200)
+        for sub in _text_split_fallback(leaf_text, leaf_budget):
+            if sub.strip():
+                spans.append((None, sub.strip("\n"), ls, max(le, ls + 1), cur_scope))
 
     root = tree.root_node
     if root.children:
-        recurse(root)
-    if not chunks:
+        for child in root.children:
+            collect_spans(child, "")
+
+    if not spans:
         return []
-    return chunks
+
+    # Stage 2: Greedily merge contiguous byte spans up to max_chars
+    raw_chunks = []
+    win_sb = win_eb = win_ls = win_le = None
+    win_sym = ""
+
+    def emit_split_text(text_val: str, base_ls: int, base_le: int, sym: str):
+        subs = [
+            s.strip("\n")
+            for s in _text_split_fallback(text_val, max_chars)
+            if s.strip()
+        ]
+        cur_line = base_ls
+        for sub in subs:
+            n_lines = max(1, len(sub.splitlines()))
+            sub_le = (
+                min(base_le, cur_line + n_lines - 1)
+                if base_le > cur_line
+                else cur_line + n_lines - 1
+            )
+            raw_chunks.append((sub, cur_line, sub_le, sym))
+            cur_line = sub_le
+
+    def flush_win():
+        nonlocal win_sb, win_eb, win_ls, win_le, win_sym
+        if win_sb is None or win_eb is None:
+            return
+        t = txt_bytes(win_sb, win_eb).strip("\n")
+        if t.strip():
+            if len(t) <= max_chars:
+                raw_chunks.append((t, win_ls, win_le, win_sym))
+            else:
+                emit_split_text(t, win_ls, win_le, win_sym)
+        win_sb = win_eb = win_ls = win_le = None
+        win_sym = ""
+
+    for sb, eb_or_text, ls, le, sym in spans:
+        if sb is None:
+            if win_sb is not None and (win_ls == win_le or (win_eb - win_sb) < 160):
+                hdr_t = txt_bytes(win_sb, win_eb).strip("\n")
+                combined = f"{hdr_t}\n{eb_or_text}" if hdr_t else eb_or_text
+                comb_ls = win_ls
+                comb_sym = win_sym or sym
+                win_sb = win_eb = win_ls = win_le = None
+                win_sym = ""
+                emit_split_text(combined, comb_ls, le, comb_sym)
+            else:
+                flush_win()
+                raw_chunks.append((eb_or_text, ls, le, sym))
+            continue
+
+        if win_sb is not None:
+            if (eb_or_text - win_sb) <= max_chars:
+                win_eb = eb_or_text
+                win_le = le
+                if sym and (not win_sym or ("." in sym and "." not in win_sym)):
+                    win_sym = sym
+                continue
+            if win_ls == win_le or (win_eb - win_sb) < 160:
+                combined_text = txt_bytes(win_sb, eb_or_text).strip("\n")
+                comb_ls = win_ls
+                comb_sym = sym if (sym and ("." in sym or not win_sym)) else win_sym
+                win_sb = win_eb = win_ls = win_le = None
+                win_sym = ""
+                emit_split_text(combined_text, comb_ls, le, comb_sym)
+                continue
+
+        flush_win()
+        win_sb = sb
+        win_eb = eb_or_text
+        win_ls = ls
+        win_le = le
+        win_sym = sym
+
+    flush_win()
+
+    # Final pass: eliminate any remaining 1-line orphan chunks by merging or borrowing context lines
+    merged = []
+    for t, ls, le, sym in raw_chunks:
+        is_one_line = (ls == le) or (len(t.splitlines()) == 1)
+        if merged and is_one_line:
+            pt, pls, ple, psym = merged[-1]
+            if len(pt) + 1 + len(t) <= max_chars:
+                merged[-1] = (f"{pt}\n{t}", pls, max(ple, le, pls + 1), psym or sym)
+                continue
+            prev_lines = pt.splitlines()
+            if len(prev_lines) > 4:
+                borrow = prev_lines[-3:]
+                kept = "\n".join(prev_lines[:-3])
+                rebalanced = "\n".join(borrow) + "\n" + t
+                if len(rebalanced) <= max_chars:
+                    merged[-1] = (kept, pls, max(pls + 1, ple - 3), psym)
+                    merged.append(
+                        (rebalanced, max(1, ls - 3), max(le, ls + 1), sym or psym)
+                    )
+                    continue
+        merged.append((t, ls, le, sym))
+
+    if len(merged) > 1 and (
+        merged[0][1] == merged[0][2] or len(merged[0][0].splitlines()) == 1
+    ):
+        t0, ls0, _le0, sym0 = merged[0]
+        t1, _ls1, le1, sym1 = merged[1]
+        if len(t0) + 1 + len(t1) <= max_chars:
+            merged[1] = (f"{t0}\n{t1}", ls0, max(_le0, le1, ls0 + 1), sym0 or sym1)
+            merged.pop(0)
+
+    return merged
 
 
 def _classify(path, code_exts, text_doc_exts):
@@ -406,12 +777,13 @@ def _classify(path, code_exts, text_doc_exts):
 
 def _walk_repo(repo_dir, ignore, code_exts, text_doc_exts, exclude_rel=frozenset()):
     repo_name = os.path.basename(str(repo_dir).rstrip("/\\"))
+    effective_ignore = IGNORE_DEFAULT | {x.lower() for x in (ignore or ())}
     exclude_normalized = {e.replace("\\", "/") for e in (exclude_rel or set())}
     for root, dirs, files in os.walk(repo_dir):
         dirs[:] = [
             d
             for d in dirs
-            if d.lower() not in ignore
+            if d.lower() not in effective_ignore
             and d not in ("lancedb", "images")
             and not d.startswith(".")
         ]
@@ -419,15 +791,27 @@ def _walk_repo(repo_dir, ignore, code_exts, text_doc_exts, exclude_rel=frozenset
         ocr_stems = {
             os.path.splitext(f)[0]
             for f in files
-            if _classify(os.path.join(root, f), code_exts, text_doc_exts) == "ocr_doc"
+            if not f.startswith(".")
+            and os.path.splitext(f)[1].lower() != ".html"
+            and _classify(os.path.join(root, f), code_exts, text_doc_exts) == "ocr_doc"
+        }
+        text_doc_stems = {
+            os.path.splitext(f)[0]
+            for f in files
+            if not f.startswith(".")
+            and os.path.splitext(f)[1].lower() in text_doc_exts
         }
 
         for f in sorted(files):
+            if f.startswith(".") or f.lower() in AGENT_HARNESS_FILES:
+                continue
             p = os.path.join(root, f)
             ext = os.path.splitext(f)[1].lower()
             stem = os.path.splitext(f)[0]
 
-            if ext in text_doc_exts and stem in ocr_stems:
+            if ext == ".md" and stem in ocr_stems:
+                continue
+            if ext == ".html" and stem in text_doc_stems:
                 continue
 
             kind = _classify(p, code_exts, text_doc_exts)
@@ -441,14 +825,20 @@ def _walk_repo(repo_dir, ignore, code_exts, text_doc_exts, exclude_rel=frozenset
             yield p, kind, f"{repo_name}/{rel}"
 
 
-def _collection_sources(job_dir, code_exts, text_doc_exts):
+def _collection_sources(job_dir, code_exts, text_doc_exts, ignore=None):
     subdirs, top_files = [], []
+    effective_ignore = IGNORE_DEFAULT | {x.lower() for x in (ignore or ())}
     for name in sorted(os.listdir(job_dir)):
         p = os.path.join(job_dir, name)
-        if name in ("images", "lancedb") or name.startswith("."):
+        if (
+            name in ("images", "lancedb")
+            or name.startswith(".")
+            or name.lower() in AGENT_HARNESS_FILES
+        ):
             continue
         if os.path.isdir(p):
-            subdirs.append(p)
+            if name.lower() not in effective_ignore:
+                subdirs.append(p)
         elif os.path.isfile(p) and _classify(p, code_exts, text_doc_exts):
             top_files.append(p)
     return subdirs, top_files
@@ -668,7 +1058,7 @@ def ingest(
     ocr_agent=None,
     ocr_prompt=DEFAULT_OCR_PROMPT,
     overwrite=False,
-    code_chunk_size=2000,
+    code_chunk_size=6000,
     working_repo=None,
     code_exclude=frozenset(),
     code_exts=None,
@@ -698,7 +1088,7 @@ def ingest(
 
     code_exts = set(code_exts or CODE_EXTS_DEFAULT)
     text_doc_exts = set(text_doc_exts or TEXT_DOC_EXTS_DEFAULT)
-    ignore = set(x.lower() for x in (ignore or IGNORE_DEFAULT))
+    ignore = IGNORE_DEFAULT | {x.lower() for x in (ignore or ())}
 
     try:
         _names = db.list_tables() if hasattr(db, "list_tables") else db.table_names()
@@ -709,11 +1099,12 @@ def ingest(
     _dim = 1536  # Safe dummy value for ocr_only mode
     if not ocr_only:
         try:
-            _dim = len(
-                embed_texts(
-                    ["dimension probe"], embed_backend, embed_model, embed_api_base
-                )[0]
+            probe_vecs = embed_texts(
+                ["dimension probe"], embed_backend, embed_model, embed_api_base
             )
+            if not probe_vecs or not _is_valid_vec(probe_vecs[0]):
+                raise RuntimeError("embedding dimension probe returned invalid/null vector")
+            _dim = len(probe_vecs[0])
         except Exception as e:
             log.error(f"[RAG] Failed to probe embedding model '{embed_model}': {e}")
             return False
@@ -1022,12 +1413,21 @@ def ingest(
                 cfg["embed_model"],
                 cfg["embed_api_base"],
             )
+            valid_rows = []
             for r, v in zip(pending, vecs):
+                if v is None:
+                    log.warning(
+                        f"[RAG] Skipping un-embeddable chunk (NaN/null vector) in "
+                        f"'{r.get('source_file')}:{r.get('line_start')}-{r.get('line_end')}'"
+                    )
+                    continue
                 r["vector"] = v
-            if table is None:
-                table = db.create_table(table_name, schema=schema)
-            table.add(pending)
-            appended += len(pending)
+                valid_rows.append(r)
+            if valid_rows:
+                if table is None:
+                    table = db.create_table(table_name, schema=schema)
+                table.add(valid_rows)
+                appended += len(valid_rows)
             pending.clear()
 
         for abs_path, kind, sf in entries:
@@ -1058,14 +1458,14 @@ def ingest(
         log.info(f"[RAG] table '{table_name}': +{appended} chunk(s)")
         return appended > 0 or bool(existing_files)
 
-    subdirs, top_files = _collection_sources(job_dir, code_exts, text_doc_exts)
+    subdirs, top_files = _collection_sources(job_dir, code_exts, text_doc_exts, ignore)
     jobs = []
 
     for repo in subdirs:
         repo_name = table_name_for(os.path.basename(repo))
         excl = (
             code_exclude
-            if os.path.basename(repo.rstrip("/")) == working_repo
+            if os.path.basename(repo.rstrip("/\\")) == working_repo
             else frozenset()
         )
         code_entries, doc_entries = [], []
@@ -1077,37 +1477,40 @@ def ingest(
             jobs.append((f"{collection_name}_{repo_name}_docs", doc_entries))
 
     if top_files:
-        if batch:
-            # Dedup generated .md sidecars from top-level files
-            ocr_stems = {
-                os.path.splitext(f)[0]
-                for f in top_files
-                if _classify(f, code_exts, text_doc_exts) == "ocr_doc"
-            }
-            entries = []
-            for p in top_files:
-                if (
-                    os.path.splitext(p)[1].lower() in text_doc_exts
+        ocr_stems = {
+            os.path.splitext(f)[0]
+            for f in top_files
+            if os.path.splitext(f)[1].lower() != ".html"
+            and _classify(f, code_exts, text_doc_exts) == "ocr_doc"
+        }
+        text_doc_stems = {
+            os.path.splitext(f)[0]
+            for f in top_files
+            if os.path.splitext(f)[1].lower() in text_doc_exts
+        }
+        filtered_top_files = [
+            p
+            for p in top_files
+            if not (
+                (
+                    os.path.splitext(p)[1].lower() == ".md"
                     and os.path.splitext(p)[0] in ocr_stems
-                ):
-                    continue
-                entries.append(
-                    (p, _classify(p, code_exts, text_doc_exts), os.path.basename(p))
                 )
+                or (
+                    os.path.splitext(p)[1].lower() == ".html"
+                    and os.path.splitext(p)[0] in text_doc_stems
+                )
+            )
+        ]
+        if batch:
+            entries = [
+                (p, _classify(p, code_exts, text_doc_exts), os.path.basename(p))
+                for p in filtered_top_files
+            ]
             if entries:
                 jobs.append((f"{collection_name}_docs", entries))
         else:
-            ocr_stems = {
-                os.path.splitext(f)[0]
-                for f in top_files
-                if _classify(f, code_exts, text_doc_exts) == "ocr_doc"
-            }
-            for p in top_files:
-                if (
-                    os.path.splitext(p)[1].lower() in text_doc_exts
-                    and os.path.splitext(p)[0] in ocr_stems
-                ):
-                    continue
+            for p in filtered_top_files:
                 jobs.append(
                     (
                         table_name_for(p),
@@ -1152,17 +1555,23 @@ def ingest(
 def _from_config(yaml_path):
     import yaml
 
-    with open(yaml_path, "r") as f:
+    with open(yaml_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     project_dir = str(cfg.get("working_directory", os.getcwd()))
     endpoints = cfg.get("endpoints", {}) or {}
-    
+
     phases = cfg.get("phases", []) or []
-    active_phase = next((ph for ph in phases if ph.get("enabled")), {}) if phases else {}
+    active_phase = (
+        next((ph for ph in phases if ph.get("enabled", True)), {}) if phases else {}
+    )
     phase_models = active_phase.get("models", {}) or {}
     phase_rag = active_phase.get("rag", {}) or {}
     global_rag = cfg.get("rag", {}) or {}
-    collection_name = phase_rag.get("collection_name") or global_rag.get("collection_name") or "knowledge"
+    collection_name = (
+        phase_rag.get("collection_name")
+        or global_rag.get("collection_name")
+        or "knowledge"
+    )
     embed_model = (
         phase_models.get("embed_model")
         or phase_rag.get("embed_model")
@@ -1176,10 +1585,24 @@ def _from_config(yaml_path):
         or phase_models.get("embed_backend")
         or "sentence-transformers"
     )
-    
+
     if embed_api_base and embed_backend == "sentence-transformers":
         embed_backend = "openai"
-    
+
+    working_repo = (
+        phase_rag.get("working_repo")
+        or global_rag.get("working_repo")
+        or os.path.basename(project_dir.replace("\\", "/").rstrip("/"))
+    )
+    code_exts = phase_rag.get("code_exts") or global_rag.get("code_exts")
+    text_doc_exts = phase_rag.get("text_doc_exts") or global_rag.get("text_doc_exts")
+    ignore = phase_rag.get("ignore") or global_rag.get("ignore")
+    code_chunk_size = int(
+        phase_rag.get("code_chunk_size")
+        or global_rag.get("code_chunk_size")
+        or 6000
+    )
+
     return ingest(
         context_root=os.path.join(project_dir, ".aider_factory", "markdown", "lanceDB"),
         collection_name=collection_name,
@@ -1190,6 +1613,11 @@ def _from_config(yaml_path):
         ocr_agent=phase_models.get("ocr_agent", ""),
         ocr_prompt=phase_rag.get("ocr_prompt", DEFAULT_OCR_PROMPT),
         overwrite=phase_rag.get("vectordb_overwrite", False),
+        code_chunk_size=code_chunk_size,
+        working_repo=working_repo,
+        code_exts=code_exts,
+        text_doc_exts=text_doc_exts,
+        ignore=ignore,
         cer_threshold=0.05,
         ocr_max_retries=2,
         ocr_parallel=1,

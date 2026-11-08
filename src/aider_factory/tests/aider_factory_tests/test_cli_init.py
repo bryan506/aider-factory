@@ -402,6 +402,7 @@ def test_aiderignore_unignores_only_strategy_template(mock_sub, mock_bash, mock_
                 "!.aider_factory/sessions/*/session.yml",
                 "!.aider_factory/sessions/*/feature_adr/",
                 "!.aider_factory/sessions/*/templates/",
+                "!.aider_factory/sessions/*/temp/",
             ):
                 assert rule in upgraded
 
@@ -505,6 +506,7 @@ def test_legacy_multiline_aiderignore_and_gitignore_check_ignore():
             ".aider_factory/sessions/my_sess/session.yml",
             ".aider_factory/sessions/my_sess/feature_adr/adr_001.md",
             ".aider_factory/sessions/my_sess/templates/calc_validate_rendered.md",
+            ".aider_factory/sessions/my_sess/temp/notes.sh",
         )
 
         ignored_paths_common = (
@@ -607,6 +609,7 @@ def test_orchestrate_task_aiderignore_isolation():
                 ".aider_factory/sessions/s1/session.yml",
                 ".aider_factory/sessions/s1/feature_adr/adr_001.md",
                 ".aider_factory/sessions/s1/templates/rendered.md",
+                ".aider_factory/sessions/s1/temp/notes.sh",
             )
         ):
             t_af = Task(id=f"t_af_{idx}", files=[af_target], pair_programming=False)

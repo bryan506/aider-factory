@@ -171,6 +171,7 @@ class TestE2EAiderignoreGitignoreLive(unittest.TestCase):
             ".aider_factory/sessions/s1/session.yml": "session: s1\n",
             ".aider_factory/sessions/s1/feature_adr/adr_001.md": "# ADR 001\n",
             ".aider_factory/sessions/s1/templates/rendered.md": "# Rendered Template\n",
+            ".aider_factory/sessions/s1/temp/notes.py": "# Session temp scratch\n",
             ".aider_factory/sessions/s1/.aider.chat.history.md": "# Chat History\n",
         }
         for rel_path, content in seeded_files.items():
@@ -188,6 +189,7 @@ class TestE2EAiderignoreGitignoreLive(unittest.TestCase):
             ".aider_factory/sessions/s1/session.yml",
             ".aider_factory/sessions/s1/feature_adr/adr_001.md",
             ".aider_factory/sessions/s1/templates/rendered.md",
+            ".aider_factory/sessions/s1/temp/notes.py",
         )
         blocked_rels = (
             ".aider_factory/markdown/oracle_pre_plan/strategy_instruct_template.md",
